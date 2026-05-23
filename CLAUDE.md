@@ -1,6 +1,7 @@
 # CLAUDE.md — AI Email Project Constitution
 
-Source of truth for how Claude (and humans) work in this codebase.
+Source of truth for **how** Claude (and humans) work in this codebase.
+For **what** we're building, see [`docs/SPEC.md`](docs/SPEC.md).
 Keep this file short. When in doubt, ask the user.
 
 ---
@@ -21,7 +22,7 @@ ai-email/
 │       ├── imap/             # IMAP client + parsing
 │       ├── smtp/             # SMTP send
 │       ├── ai/               # Anthropic client + prompts
-│       ├── db/               # SQLite layer (rusqlite)
+│       ├── db/               # PostgreSQL layer (sqlx + migrations)
 │       └── commands/         # #[tauri::command] handlers
 ├── .github/                  # CI workflows, dependabot, PR template
 ├── .claude/                  # Claude Code settings + hooks
@@ -34,7 +35,7 @@ ai-email/
 - **Tauri 2** — no Electron, no separate web server
 - **React + TypeScript**, strict mode everywhere
 - **Rust** for the core (IMAP / SMTP / DB / AI / Tauri commands)
-- **SQLite** via `rusqlite` for local cache
+- **PostgreSQL 18** via `sqlx` (dev: local docker via OrbStack; prod: managed PG over TLS)
 - **`async-imap`** + **`lettre`** for mail
 - **Anthropic API** via `reqwest` (no third-party AI wrappers)
 - **pnpm** as package manager (NOT npm or yarn)
