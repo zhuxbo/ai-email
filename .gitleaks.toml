@@ -1,0 +1,40 @@
+title = "Gitleaks config — AI Email"
+
+[extend]
+useDefault = true
+
+# QQ Mail authorization code (16 chars, lower-case alnum)
+[[rules]]
+id = "qq-mail-auth-code"
+description = "QQ Mail authorization code (授权码)"
+regex = '''(?i)(qq[_-]?mail|qq[_-]?auth|qq[_-]?授权码)['"\s:=]+[a-z0-9]{16}\b'''
+tags = ["mail", "credential", "qq"]
+
+# Anthropic API key
+[[rules]]
+id = "anthropic-api-key"
+description = "Anthropic API key"
+regex = '''sk-ant-[a-zA-Z0-9_-]{32,}'''
+tags = ["api-key", "anthropic"]
+
+# Generic email + password near each other (heuristic)
+[[rules]]
+id = "email-password-pair"
+description = "Email/password literal"
+regex = '''(?i)(password|passwd|pwd)\s*[:=]\s*['"][^'"\s]{6,}['"]'''
+tags = ["credential"]
+
+[allowlist]
+description = "Allowlisted paths and patterns"
+paths = [
+  '''.*\.example$''',
+  '''.*\.template$''',
+  '''.*\.md$''',
+  '''.*\.test\.(ts|tsx|rs)$''',
+  '''docs/.*''',
+  '''.*\.gitleaks\.toml$''',
+]
+regexes = [
+  '''sk-ant-your-key-here''',
+  '''your-auth-code-here''',
+]
