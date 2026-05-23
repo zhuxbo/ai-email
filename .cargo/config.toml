@@ -1,0 +1,17 @@
+# Cargo registry mirror (rsproxy.cn) for faster crate downloads in mainland China.
+# Falls back to crates.io if rsproxy is unreachable via the [source] replacement.
+
+[source.crates-io]
+replace-with = "rsproxy-sparse"
+
+[source.rsproxy]
+registry = "https://rsproxy.cn/crates.io-index"
+
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
+
+[registries.rsproxy]
+index = "https://rsproxy.cn/crates.io-index"
+
+[net]
+git-fetch-with-cli = true

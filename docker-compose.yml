@@ -1,0 +1,38 @@
+# Local development PostgreSQL 18 for ai-email.
+# Prod uses a managed PG (Supabase / RDS / self-hosted) via DATABASE_URL.
+#
+# Usage:
+#   docker compose up -d postgres      # start in background
+#   docker compose logs -f postgres    # tail logs
+#   docker compose down                # stop (data persisted in volume)
+#   docker compose down -v             # nuke volume too (destructive)
+#
+# Defaults give you: postgres://aiemail:aiemail_dev@localhost:5432/ai_email_dev
+# Override any of POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB in .env to
+# customise. .env is gitignored.
+
+services:
+  postgres:
+    image: postgres:18
+    container_name: ai-email-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-aiemail}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aiemail_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-ai_email_dev}
+    ports:
+      - '5432:5432'
+    volumes:
+      # PG 18+ image expects the volume one level up; it manages
+      # major-version subdirectories internally for pg_upgrade compatibility.
+      - pg_data:/var/lib/postgresql
+    healthcheck:
+      test:
+        ['CMD-SHELL', 'pg_isready -U $${POSTGRES_USER:-aiemail} -d $${POSTGRES_DB:-ai_email_dev}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pg_data:
+    name: ai-email_pg_data

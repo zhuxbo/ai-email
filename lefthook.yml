@@ -1,0 +1,55 @@
+# Lefthook config — STRICT mode.
+# Any check failure blocks the operation. Do not bypass with --no-verify.
+# See CLAUDE.md "Quality Gates" for the policy.
+
+pre-commit:
+  parallel: true
+  commands:
+    rust-format:
+      glob: '*.rs'
+      run: cd src-tauri && cargo fmt --check
+      fail_text: 'Rust files not formatted. Run: cd src-tauri && cargo fmt'
+
+    rust-clippy:
+      glob: '*.rs'
+      run: cd src-tauri && cargo clippy --no-deps --all-targets -- -D warnings
+      fail_text: 'Fix clippy warnings before committing'
+
+    prettier:
+      glob: '*.{ts,tsx,js,jsx,json,md,yml,yaml,html,css}'
+      run: pnpm exec prettier --check {staged_files}
+      fail_text: 'Formatting required. Run: pnpm exec prettier --write {staged_files}'
+
+    eslint:
+      glob: '*.{ts,tsx}'
+      run: pnpm exec eslint --max-warnings 0 --no-warn-ignored {staged_files}
+      fail_text: 'Fix ESLint errors before committing'
+
+    tsc:
+      glob: '*.{ts,tsx}'
+      run: pnpm exec tsc --noEmit
+      fail_text: 'Fix TypeScript errors before committing'
+
+    gitleaks:
+      run: gitleaks protect --staged --no-banner --redact -v
+      fail_text: 'Secrets detected — remove before committing'
+
+commit-msg:
+  commands:
+    commitlint:
+      run: pnpm exec commitlint --edit {1}
+      fail_text: 'Commit message must follow Conventional Commits (feat:, fix:, refactor:, ...)'
+
+pre-push:
+  parallel: true
+  commands:
+    cargo-test:
+      run: cd src-tauri && cargo test --all-features
+      fail_text: 'Rust tests must pass before push'
+
+    vitest:
+      run: pnpm exec vitest run --passWithNoTests
+      fail_text: 'Vitest must pass before push'
+    # cargo audit moved to CI (.github/workflows/audit.yml) — runs weekly + on
+    # dependency changes. Keeps pre-push fast and avoids forcing every dev to
+    # `cargo install cargo-audit` locally.
