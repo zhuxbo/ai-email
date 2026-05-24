@@ -50,9 +50,12 @@ export function MessageDetail() {
   return (
     <section className="flex h-full flex-1 flex-col bg-slate-50 dark:bg-slate-950">
       <header className="border-b border-slate-200 bg-white px-6 py-4 dark:border-slate-700 dark:bg-slate-900">
-        <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
-          {msg.subject ?? '(无主题)'}
-        </h3>
+        <div className="flex items-start justify-between gap-3">
+          <h3 className="flex-1 text-lg font-semibold text-slate-900 dark:text-slate-100">
+            {msg.subject ?? '(无主题)'}
+          </h3>
+          <ReplyButton />
+        </div>
         <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs text-slate-600 dark:text-slate-400">
           <dt className="font-medium">发件人</dt>
           <dd className="break-all">{msg.fromAddr ?? '—'}</dd>
@@ -84,6 +87,22 @@ export function MessageDetail() {
         <AiPanel />
       </div>
     </section>
+  );
+}
+
+function ReplyButton() {
+  const openComposer = useMailStore((s) => s.openComposer);
+  const body = useMailStore((s) => s.body);
+  return (
+    <button
+      type="button"
+      onClick={openComposer}
+      disabled={body === null}
+      className="shrink-0 rounded bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+      title={body === null ? '等待正文加载后才能回复' : '回复这封邮件'}
+    >
+      回复
+    </button>
   );
 }
 

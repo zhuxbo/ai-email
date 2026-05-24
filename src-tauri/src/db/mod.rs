@@ -16,6 +16,7 @@ pub mod bodies;
 pub mod mailboxes;
 pub mod message_tags;
 pub mod messages;
+pub mod send_log;
 
 use std::env;
 use std::time::Duration;

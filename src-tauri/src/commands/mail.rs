@@ -14,6 +14,7 @@ use crate::imap::client::ImapClient;
 use crate::imap::parse;
 use crate::imap::sync::{self, SyncReport};
 use crate::keychain;
+use crate::smtp::{self, SendDraft, SendReceipt};
 use crate::AppState;
 
 #[tauri::command]
@@ -102,4 +103,9 @@ pub async fn message_body(state: State<'_, AppState>, id: Uuid) -> AppResult<Mes
     messages::mark_body_fetched(&state.db, id, parsed.has_attachment, snippet).await?;
     tracing::info!(message_id = %id, "message body fetched and cached");
     Ok(body)
+}
+
+#[tauri::command]
+pub async fn smtp_send(state: State<'_, AppState>, draft: SendDraft) -> AppResult<SendReceipt> {
+    smtp::send_draft(&state.db, &draft).await
 }

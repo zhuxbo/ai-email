@@ -104,6 +104,42 @@ export interface AddModelForm {
   apiKey: string;
 }
 
+export interface DraftResult {
+  subject: string;
+  body: string;
+  tone: string;
+  source: 'fresh' | 'cached';
+  model: string;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cacheReadTokens: number | null;
+}
+
+export interface SendDraft {
+  accountId: string;
+  to: string[];
+  cc: string[];
+  subject: string;
+  body: string;
+  inReplyTo: string | null;
+  aiAssisted: boolean;
+}
+
+export interface SendLogRecord {
+  id: string;
+  accountId: string;
+  inReplyTo: string | null;
+  toAddrs: string[];
+  subject: string;
+  aiAssisted: boolean;
+  sentAt: string;
+  smtpResponse: string | null;
+}
+
+export interface SendReceipt {
+  sendLog: SendLogRecord;
+}
+
 export interface TranslateResult {
   target: string;
   subject: string;

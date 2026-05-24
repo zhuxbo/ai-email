@@ -41,6 +41,8 @@ interface MailState {
   categoryFilter: Category[];
   sortByPriority: boolean;
 
+  composerOpen: boolean;
+
   syncing: boolean;
   loadingBody: boolean;
   summarizing: boolean;
@@ -59,6 +61,9 @@ interface MailState {
   summarizeSelectedMessage: () => Promise<void>;
   translateSelectedMessage: (target: string) => Promise<void>;
   clearTranslation: () => void;
+
+  openComposer: () => void;
+  closeComposer: () => void;
 
   loadAiConfig: () => Promise<void>;
   addModel: (form: AddModelForm) => Promise<AiModel>;
@@ -107,6 +112,8 @@ export const useMailStore = create<MailState>((set, get) => ({
 
   categoryFilter: [],
   sortByPriority: false,
+
+  composerOpen: false,
 
   syncing: false,
   loadingBody: false,
@@ -290,6 +297,13 @@ export const useMailStore = create<MailState>((set, get) => ({
 
   clearTranslation: () => {
     set({ translation: null });
+  },
+
+  openComposer: () => {
+    set({ composerOpen: true });
+  },
+  closeComposer: () => {
+    set({ composerOpen: false });
   },
 
   loadAiConfig: async () => {

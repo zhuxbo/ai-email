@@ -9,6 +9,7 @@ pub mod db;
 pub mod error;
 pub mod imap;
 pub mod keychain;
+pub mod smtp;
 
 use tauri::Manager;
 use tracing_subscriber::EnvFilter;
@@ -51,6 +52,8 @@ pub fn run() {
             commands::ai::ai_summarize,
             commands::ai::ai_classify,
             commands::ai::ai_translate,
+            commands::ai::ai_draft_reply,
+            commands::mail::smtp_send,
             commands::ai_config::models_list,
             commands::ai_config::model_add,
             commands::ai_config::model_remove,

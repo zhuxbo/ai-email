@@ -11,10 +11,13 @@ import type {
   AiModel,
   AiRole,
   ClassifyResult,
+  DraftResult,
   Mailbox,
   MessageBody,
   MessageHeader,
   RoleDefault,
+  SendDraft,
+  SendReceipt,
   SummaryResult,
   SyncReport,
   TranslateResult,
@@ -66,6 +69,14 @@ export async function aiClassify(ids: string[]): Promise<ClassifyResult[]> {
 
 export async function aiTranslate(id: string, target: string): Promise<TranslateResult> {
   return invoke('ai_translate', { id, target });
+}
+
+export async function aiDraftReply(id: string, intent: string | null): Promise<DraftResult> {
+  return invoke('ai_draft_reply', { id, intent });
+}
+
+export async function smtpSend(draft: SendDraft): Promise<SendReceipt> {
+  return invoke('smtp_send', { draft });
 }
 
 export async function modelsList(): Promise<AiModel[]> {

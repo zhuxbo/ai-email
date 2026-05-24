@@ -6,6 +6,7 @@ use tauri::State;
 use uuid::Uuid;
 
 use crate::ai::classify::{self, ClassifyResult};
+use crate::ai::draft::{self, DraftResult};
 use crate::ai::summarize::{self, SummaryResult};
 use crate::ai::translate::{self, TranslateResult};
 use crate::error::AppResult;
@@ -33,4 +34,13 @@ pub async fn ai_translate(
     target: String,
 ) -> AppResult<TranslateResult> {
     translate::translate_message(&state.db, id, &target).await
+}
+
+#[tauri::command]
+pub async fn ai_draft_reply(
+    state: State<'_, AppState>,
+    id: Uuid,
+    intent: Option<String>,
+) -> AppResult<DraftResult> {
+    draft::draft_reply(&state.db, id, intent.as_deref()).await
 }

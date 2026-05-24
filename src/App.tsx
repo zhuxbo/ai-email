@@ -8,6 +8,7 @@ import { AddAccountDialog } from './components/add-account-dialog';
 import { AiSettingsDialog } from './components/ai-settings-dialog';
 import { MessageDetail } from './components/message-detail';
 import { MessageList } from './components/message-list';
+import { ReplyComposer } from './components/reply-composer';
 import { useMailStore } from './lib/store/mail';
 import './App.css';
 
@@ -49,6 +50,7 @@ function App() {
           setAiSettingsOpen(false);
         }}
       />
+      <ReplyComposer />
 
       {error && (
         <div
