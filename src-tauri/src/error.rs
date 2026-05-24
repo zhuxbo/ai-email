@@ -16,6 +16,9 @@ pub enum AppError {
     #[error("config error: {0}")]
     Config(String),
 
+    #[error("keychain error: {0}")]
+    Keychain(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
