@@ -274,6 +274,27 @@ Quality baseline (Tier 1+3) + Tauri scaffold + PG container via OrbStack.
 
 ### ✅ Sprint 2 — AI summary (done, commits fd440a0 + a43f41a)
 
+### ✅ Sprint 2.5 — Multi-provider AI (NEW, done, commits 8145523 + 38e79de)
+
+Scope drift from user request: AI must support both Anthropic native + OpenAI-compatible
+interfaces (the latter covers DeepSeek / 智谱 GLM / Moonshot Kimi / 通义 / 字节豆包 etc.
+via base_url override). Pulled the hardcoded Sonnet 4.6 + ANTHROPIC_API_KEY env path out and
+replaced with DB-stored model rows + per-role dispatch.
+
+- [x] `ai_models` + `ai_role_defaults` tables (migration 0002)
+- [x] `AiClient` enum: `Anthropic` (native `/v1/messages`, cache_control aware) +
+      `OpenAI` (`/v1/chat/completions`, covers domestic vendors via base_url)
+- [x] `keychain` second service `com.zhuxbo.aiemail.ai` keyed by `ai_models.id`
+- [x] 6 Tauri commands: `models_list / model_add / model_remove /
+role_defaults_list / role_default_set / role_default_clear`
+- [x] `<AiSettingsDialog>` modal with 7 vendor presets (Anthropic / OpenAI / DeepSeek /
+      智谱 GLM / Moonshot Kimi / 通义 / 自定义) + role assignment matrix
+- [x] `ai_summarize` (and later `ai_classify / ai_translate / ai_draft_reply`) all resolve
+      their model via `ai_role_defaults` before each call
+
+**Done when:** user can add a DeepSeek model in the UI, assign it to summary role, and the
+next 总结 click uses DeepSeek instead of Sonnet.
+
 - [x] `ai::AnthropicClient` with prompt caching (system prompt cached 5 min ephemeral)
 - [x] `ai_summarize` command (Sonnet 4.6)
 - [x] `<AiPanel />` in detail view: button → result → token-count footer
@@ -281,31 +302,34 @@ Quality baseline (Tier 1+3) + Tauri scaffold + PG container via OrbStack.
 
 **Done when:** click "总结" → tldr + bullets in ≤3s; second call instant (cache hit).
 
-### Sprint 3 — Classification + priority (M · ~3 days)
+### ✅ Sprint 3 — Classification + priority (done, commit c0e72a9)
 
-- [ ] `ai_classify` command (Haiku 4.5; batch up to 20 messages per call)
-- [ ] Background bulk-classify on `inbox_sync`
-- [ ] Tags + priority columns in list view
-- [ ] Filter chips (`personal`, `work`, `spam`) + sort by priority
+- [x] `ai_classify` command (Haiku-tier; batch up to 20 messages per call)
+- [x] Background bulk-classify on `inbox_sync` (tokio::spawn after persist)
+- [x] Tags + priority + category columns in list view
+- [x] Filter chips (`personal/work/notification/promotion/spam`) + sort by priority
 
-**Done when:** new mail tagged + prioritised within ~5s of sync; UI updates live.
+**Done when:** new mail tagged + prioritised within ~5s of sync; UI re-fetches after 3.5s
+to catch the background result.
 
-### Sprint 4 — Translation (S · ~2 days)
+### ✅ Sprint 4 — Translation (done, commit a3e4179)
 
-- [ ] `ai_translate` command (Sonnet 4.6, target = user UI lang)
-- [ ] "Translate" toggle in detail view
-- [ ] Side-by-side or inline rendering, user-toggleable
+- [x] `ai_translate` command (Sonnet-tier, target = zh-CN at MVP)
+- [x] "翻译" toggle in detail view (in AiPanel)
+- [x] Inline translated subject + body block with usage footer
 
-**Done when:** any English/Japanese mail → readable Chinese with one click.
+**Done when:** any English / Japanese mail → readable Chinese with one click; second click
+hits ai_results cache (separate entry per target language).
 
-### Sprint 5 — Draft reply (M · ~3–4 days)
+### ✅ Sprint 5 — Draft reply + SMTP send (done, commit 0fb8296)
 
-- [ ] `ai_draft_reply` command — context = thread + intent string
-- [ ] Few-shot: pull 5 recent sent messages as style anchor
-- [ ] Reply composer modal: editable textarea + Send button
-- [ ] `smtp_send` via lettre + write to `send_log`
+- [x] `ai_draft_reply` command — context = original message + optional intent string
+- [ ] Few-shot: pull 5 recent sent messages as style anchor (DEFERRED to Sprint 6 —
+      need a "sent items" repo separate from `send_log` to bootstrap the anchor set)
+- [x] Reply composer modal: editable textarea + AI 起草 + 发送
+- [x] `smtp_send` via lettre + write to `send_log` (both success and failure paths)
 
-**Done when:** "Reply" → AI draft → edit → Send → mail arrives in recipient inbox; `send_log` row recorded.
+**Done when:** 回复 → AI 起草 → edit → 发送 → mail arrives; send_log row recorded.
 
 **🎯 MVP cut — Sprint 5 complete = shippable v0.1.**
 
