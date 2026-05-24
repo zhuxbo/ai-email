@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react';
 
 import { AccountList } from './components/account-list';
 import { AddAccountDialog } from './components/add-account-dialog';
+import { AiSettingsDialog } from './components/ai-settings-dialog';
 import { MessageDetail } from './components/message-detail';
 import { MessageList } from './components/message-list';
 import { useMailStore } from './lib/store/mail';
@@ -12,19 +13,25 @@ import './App.css';
 
 function App() {
   const loadAccounts = useMailStore((s) => s.loadAccounts);
+  const loadAiConfig = useMailStore((s) => s.loadAiConfig);
   const error = useMailStore((s) => s.error);
   const clearError = useMailStore((s) => s.clearError);
   const [addOpen, setAddOpen] = useState(false);
+  const [aiSettingsOpen, setAiSettingsOpen] = useState(false);
 
   useEffect(() => {
     void loadAccounts();
-  }, [loadAccounts]);
+    void loadAiConfig();
+  }, [loadAccounts, loadAiConfig]);
 
   return (
     <div className="flex h-screen w-screen overflow-hidden">
       <AccountList
         onAddAccount={() => {
           setAddOpen(true);
+        }}
+        onOpenAiSettings={() => {
+          setAiSettingsOpen(true);
         }}
       />
       <MessageList />
@@ -34,6 +41,12 @@ function App() {
         open={addOpen}
         onClose={() => {
           setAddOpen(false);
+        }}
+      />
+      <AiSettingsDialog
+        open={aiSettingsOpen}
+        onClose={() => {
+          setAiSettingsOpen(false);
         }}
       />
 

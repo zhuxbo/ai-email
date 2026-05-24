@@ -5,9 +5,10 @@ import { useMailStore } from '../lib/store/mail';
 
 interface Props {
   onAddAccount: () => void;
+  onOpenAiSettings: () => void;
 }
 
-export function AccountList({ onAddAccount }: Props) {
+export function AccountList({ onAddAccount, onOpenAiSettings }: Props) {
   const accounts = useMailStore((s) => s.accounts);
   const selectedAccountId = useMailStore((s) => s.selectedAccountId);
   const syncing = useMailStore((s) => s.syncing);
@@ -64,7 +65,7 @@ export function AccountList({ onAddAccount }: Props) {
       </ul>
 
       {selectedAccountId && (
-        <footer className="flex gap-2 border-t border-slate-200 p-2 dark:border-slate-700">
+        <div className="flex gap-2 border-t border-slate-200 p-2 dark:border-slate-700">
           <button
             type="button"
             disabled={syncing}
@@ -86,8 +87,18 @@ export function AccountList({ onAddAccount }: Props) {
           >
             删除
           </button>
-        </footer>
+        </div>
       )}
+
+      <footer className="border-t border-slate-200 p-2 dark:border-slate-700">
+        <button
+          type="button"
+          onClick={onOpenAiSettings}
+          className="block w-full rounded px-2 py-1.5 text-left text-xs font-medium text-slate-600 hover:bg-slate-50 dark:text-slate-300 dark:hover:bg-slate-800"
+        >
+          ⚙ AI 模型配置
+        </button>
+      </footer>
     </aside>
   );
 }

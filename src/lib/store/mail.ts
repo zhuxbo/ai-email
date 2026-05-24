@@ -8,9 +8,13 @@ import * as tauri from '../tauri';
 import type {
   Account,
   AddAccountForm,
+  AddModelForm,
+  AiModel,
+  AiRole,
   Mailbox,
   MessageBody,
   MessageHeader,
+  RoleDefault,
   SummaryResult,
   SyncReport,
 } from '../types';
@@ -27,6 +31,9 @@ interface MailState {
   body: MessageBody | null;
   summary: SummaryResult | null;
 
+  models: AiModel[];
+  roleDefaults: RoleDefault[];
+
   syncing: boolean;
   loadingBody: boolean;
   summarizing: boolean;
@@ -42,6 +49,12 @@ interface MailState {
   selectMailbox: (id: string) => Promise<void>;
   selectMessage: (id: string) => Promise<void>;
   summarizeSelectedMessage: () => Promise<void>;
+
+  loadAiConfig: () => Promise<void>;
+  addModel: (form: AddModelForm) => Promise<AiModel>;
+  removeModel: (id: string) => Promise<void>;
+  setRoleDefault: (role: AiRole, modelId: string) => Promise<void>;
+  clearRoleDefault: (role: AiRole) => Promise<void>;
 
   clearError: () => void;
 }
@@ -72,6 +85,9 @@ export const useMailStore = create<MailState>((set, get) => ({
   selectedMessageId: null,
   body: null,
   summary: null,
+
+  models: [],
+  roleDefaults: [],
 
   syncing: false,
   loadingBody: false,
@@ -218,6 +234,61 @@ export const useMailStore = create<MailState>((set, get) => ({
       set({ error: errMsg(e) });
     } finally {
       set({ summarizing: false });
+    }
+  },
+
+  loadAiConfig: async () => {
+    try {
+      const [models, roleDefaults] = await Promise.all([
+        tauri.modelsList(),
+        tauri.roleDefaultsList(),
+      ]);
+      set({ models, roleDefaults });
+    } catch (e) {
+      set({ error: errMsg(e) });
+    }
+  },
+
+  addModel: async (form) => {
+    try {
+      const model = await tauri.modelAdd(form);
+      set((s) => ({ models: [...s.models, model] }));
+      return model;
+    } catch (e) {
+      set({ error: errMsg(e) });
+      throw e;
+    }
+  },
+
+  removeModel: async (id) => {
+    try {
+      await tauri.modelRemove(id);
+      set((s) => ({ models: s.models.filter((m) => m.id !== id) }));
+    } catch (e) {
+      set({ error: errMsg(e) });
+      throw e;
+    }
+  },
+
+  setRoleDefault: async (role, modelId) => {
+    try {
+      await tauri.roleDefaultSet(role, modelId);
+      set((s) => {
+        const others = s.roleDefaults.filter((r) => r.role !== role);
+        return { roleDefaults: [...others, { role, modelId }] };
+      });
+    } catch (e) {
+      set({ error: errMsg(e) });
+      throw e;
+    }
+  },
+
+  clearRoleDefault: async (role) => {
+    try {
+      await tauri.roleDefaultClear(role);
+      set((s) => ({ roleDefaults: s.roleDefaults.filter((r) => r.role !== role) }));
+    } catch (e) {
+      set({ error: errMsg(e) });
     }
   },
 

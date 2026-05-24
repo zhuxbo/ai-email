@@ -7,9 +7,13 @@ import { invoke } from '@tauri-apps/api/core';
 import type {
   Account,
   AddAccountForm,
+  AddModelForm,
+  AiModel,
+  AiRole,
   Mailbox,
   MessageBody,
   MessageHeader,
+  RoleDefault,
   SummaryResult,
   SyncReport,
 } from './types';
@@ -52,4 +56,28 @@ export async function messageBody(id: string): Promise<MessageBody> {
 
 export async function aiSummarize(id: string): Promise<SummaryResult> {
   return invoke('ai_summarize', { id });
+}
+
+export async function modelsList(): Promise<AiModel[]> {
+  return invoke('models_list');
+}
+
+export async function modelAdd(form: AddModelForm): Promise<AiModel> {
+  return invoke('model_add', { form });
+}
+
+export async function modelRemove(id: string): Promise<void> {
+  await invoke('model_remove', { id });
+}
+
+export async function roleDefaultsList(): Promise<RoleDefault[]> {
+  return invoke('role_defaults_list');
+}
+
+export async function roleDefaultSet(role: AiRole, modelId: string): Promise<void> {
+  await invoke('role_default_set', { form: { role, modelId } });
+}
+
+export async function roleDefaultClear(role: AiRole): Promise<void> {
+  await invoke('role_default_clear', { role });
 }
