@@ -1,0 +1,244 @@
+//! `ai_translate` orchestrator.
+//!
+//! Same shape as [`crate::ai::summarize`]: resolve "translate" role default → keychain key →
+//! body lookup → cache check → API call → persist → return.
+//!
+//! Cache key includes the `target` language so the same message translated to zh-CN and
+//! en-US live as separate `ai_results` rows.
+
+use secrecy::SecretString;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
+
+use crate::ai::{prompts, AiClient, CompletionRequest, SystemBlock, UserMessage};
+use crate::db::ai_results::{self, AiResultInsert};
+use crate::db::messages::MessageHeader;
+use crate::db::{ai_role_defaults, bodies, messages, Pool};
+use crate::error::{AppError, AppResult};
+use crate::keychain;
+
+const ROLE: &str = "translate";
+const KIND: &str = "translate";
+const MAX_OUTPUT_TOKENS: u32 = 4096;
+/// Larger than summary's 50k because translation is roughly 1:1 in tokens — we can fit
+/// most real-world mail with room to spare. Anything longer probably has structural noise
+/// that translation wouldn't recover from anyway.
+const MAX_BODY_CHARS: usize = 30_000;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Translation {
+    pub target: String,
+    pub subject: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranslateResult {
+    #[serde(flatten)]
+    pub translation: Translation,
+    pub source: &'static str, // "fresh" | "cached"
+    pub model: String,
+    pub input_tokens: Option<i32>,
+    pub output_tokens: Option<i32>,
+    pub cache_read_tokens: Option<i32>,
+}
+
+pub async fn translate_message(
+    pool: &Pool,
+    message_id: Uuid,
+    target: &str,
+) -> AppResult<TranslateResult> {
+    let target = normalize_target(target)?;
+
+    let model = ai_role_defaults::resolve_model(pool, ROLE)
+        .await?
+        .ok_or_else(|| {
+            AppError::Config("请先在 AI 设置中配置默认翻译模型 (role = translate)".into())
+        })?;
+    let model_uuid = model.id;
+    let api_key: SecretString =
+        tokio::task::spawn_blocking(move || keychain::get_ai_key(model_uuid))
+            .await
+            .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
+
+    let msg = messages::get(pool, message_id)
+        .await?
+        .ok_or_else(|| AppError::Config(format!("message {message_id} not found")))?;
+    let body = bodies::get(pool, message_id).await?.ok_or_else(|| {
+        AppError::Config(format!(
+            "正文尚未加载，请先打开邮件 (message_id={message_id})"
+        ))
+    })?;
+
+    let body_text = pick_body_for_translate(&body)?;
+    let user_prompt = build_user_prompt(&msg, &body_text, &target);
+    let prompt_hash = compute_prompt_hash(prompts::TRANSLATE_SYSTEM, &target, &user_prompt);
+
+    if let Some(cached) = ai_results::get(pool, message_id, KIND, &prompt_hash).await? {
+        let translation: Translation = serde_json::from_value(cached.output)?;
+        tracing::info!(message_id = %message_id, target = %target, "translate cache hit");
+        return Ok(TranslateResult {
+            translation,
+            source: "cached",
+            model: cached.model,
+            input_tokens: cached.input_tokens,
+            output_tokens: cached.output_tokens,
+            cache_read_tokens: cached.cache_read_tokens,
+        });
+    }
+
+    let client = AiClient::build(&model, api_key)?;
+    let response = client
+        .complete(CompletionRequest {
+            max_tokens: MAX_OUTPUT_TOKENS,
+            system: vec![SystemBlock {
+                text: prompts::TRANSLATE_SYSTEM.to_string(),
+                cache: true,
+            }],
+            messages: vec![UserMessage {
+                content: user_prompt,
+            }],
+        })
+        .await?;
+
+    let mut translation: Translation = serde_json::from_str(&response.text).map_err(|e| {
+        AppError::Ai(format!(
+            "翻译模型未返回合法 JSON：{e}\n原文：{}",
+            truncate_for_log(&response.text)
+        ))
+    })?;
+    // Defensive: the model occasionally returns a slightly different target tag (e.g. "zh"
+    // instead of "zh-CN"). Force the field to match what we asked for so the UI's cache
+    // assumptions hold.
+    translation.target = target.clone();
+
+    let input_tokens = i32::try_from(response.usage.input_tokens).ok();
+    let output_tokens = i32::try_from(response.usage.output_tokens).ok();
+    let cache_read_tokens = response
+        .usage
+        .cache_read_input_tokens
+        .and_then(|v| i32::try_from(v).ok());
+
+    let stored = ai_results::insert(
+        pool,
+        &AiResultInsert {
+            message_id,
+            kind: KIND.into(),
+            model: response.model.clone(),
+            prompt_hash,
+            output: serde_json::to_value(&translation)?,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+        },
+    )
+    .await?;
+
+    tracing::info!(
+        message_id = %message_id,
+        target = %target,
+        input_tokens = ?stored.input_tokens,
+        output_tokens = ?stored.output_tokens,
+        "translate fresh result persisted"
+    );
+
+    Ok(TranslateResult {
+        translation,
+        source: "fresh",
+        model: stored.model,
+        input_tokens: stored.input_tokens,
+        output_tokens: stored.output_tokens,
+        cache_read_tokens: stored.cache_read_tokens,
+    })
+}
+
+fn pick_body_for_translate(body: &crate::db::bodies::MessageBody) -> AppResult<String> {
+    let raw = body
+        .text_plain
+        .as_deref()
+        .or(body.html.as_deref())
+        .ok_or_else(|| AppError::Ai("邮件没有可翻译的正文内容".into()))?;
+    if raw.chars().count() <= MAX_BODY_CHARS {
+        return Ok(raw.to_string());
+    }
+    let truncated: String = raw.chars().take(MAX_BODY_CHARS).collect();
+    Ok(format!(
+        "{truncated}\n\n[... 邮件已截断，仅翻译前 {MAX_BODY_CHARS} 字符]"
+    ))
+}
+
+fn build_user_prompt(msg: &MessageHeader, body: &str, target: &str) -> String {
+    format!(
+        "目标语言：{target}\n\n主题：{subject}\n\n正文：\n{body}",
+        target = target,
+        subject = msg.subject.as_deref().unwrap_or("(无主题)"),
+        body = body,
+    )
+}
+
+fn compute_prompt_hash(system: &str, target: &str, user: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(system.as_bytes());
+    hasher.update(b"\n---\n");
+    hasher.update(target.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(user.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Reject empty / obviously bogus target strings; we don't enforce a closed set since
+/// BCP-47 is large, but the input shouldn't be free-form garbage either.
+fn normalize_target(raw: &str) -> AppResult<String> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return Err(AppError::Ai("target language must not be empty".into()));
+    }
+    if t.len() > 16 {
+        return Err(AppError::Ai(format!(
+            "target language too long: {} (BCP-47 codes are short)",
+            truncate_for_log(t)
+        )));
+    }
+    Ok(t.to_string())
+}
+
+fn truncate_for_log(s: &str) -> String {
+    let limit = 200;
+    if s.chars().count() <= limit {
+        s.to_string()
+    } else {
+        let cut: String = s.chars().take(limit).collect();
+        format!("{cut}…")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_target_trims() {
+        assert_eq!(normalize_target("  zh-CN  ").unwrap(), "zh-CN");
+    }
+
+    #[test]
+    fn normalize_target_rejects_empty() {
+        assert!(normalize_target("").is_err());
+        assert!(normalize_target("   ").is_err());
+    }
+
+    #[test]
+    fn normalize_target_rejects_long_input() {
+        assert!(normalize_target(&"x".repeat(17)).is_err());
+    }
+
+    #[test]
+    fn prompt_hash_includes_target() {
+        let a = compute_prompt_hash("sys", "zh-CN", "u");
+        let b = compute_prompt_hash("sys", "en-US", "u");
+        assert_ne!(a, b, "different targets must yield different hashes");
+    }
+}

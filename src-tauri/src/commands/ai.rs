@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::ai::classify::{self, ClassifyResult};
 use crate::ai::summarize::{self, SummaryResult};
+use crate::ai::translate::{self, TranslateResult};
 use crate::error::AppResult;
 use crate::AppState;
 
@@ -23,4 +24,13 @@ pub async fn ai_classify(
     ids: Vec<Uuid>,
 ) -> AppResult<Vec<ClassifyResult>> {
     classify::classify_message_ids(&state.db, &ids).await
+}
+
+#[tauri::command]
+pub async fn ai_translate(
+    state: State<'_, AppState>,
+    id: Uuid,
+    target: String,
+) -> AppResult<TranslateResult> {
+    translate::translate_message(&state.db, id, &target).await
 }

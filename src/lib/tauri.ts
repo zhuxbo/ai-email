@@ -17,6 +17,7 @@ import type {
   RoleDefault,
   SummaryResult,
   SyncReport,
+  TranslateResult,
 } from './types';
 
 export async function accountsList(): Promise<Account[]> {
@@ -61,6 +62,10 @@ export async function aiSummarize(id: string): Promise<SummaryResult> {
 
 export async function aiClassify(ids: string[]): Promise<ClassifyResult[]> {
   return invoke('ai_classify', { ids });
+}
+
+export async function aiTranslate(id: string, target: string): Promise<TranslateResult> {
+  return invoke('ai_translate', { id, target });
 }
 
 export async function modelsList(): Promise<AiModel[]> {

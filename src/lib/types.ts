@@ -104,6 +104,17 @@ export interface AddModelForm {
   apiKey: string;
 }
 
+export interface TranslateResult {
+  target: string;
+  subject: string;
+  body: string;
+  source: 'fresh' | 'cached';
+  model: string;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cacheReadTokens: number | null;
+}
+
 export interface SummaryResult {
   tldr: string;
   bullets: string[];

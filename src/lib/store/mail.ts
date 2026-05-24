@@ -18,6 +18,7 @@ import type {
   RoleDefault,
   SummaryResult,
   SyncReport,
+  TranslateResult,
 } from '../types';
 
 interface MailState {
@@ -31,6 +32,7 @@ interface MailState {
   selectedMessageId: string | null;
   body: MessageBody | null;
   summary: SummaryResult | null;
+  translation: TranslateResult | null;
 
   models: AiModel[];
   roleDefaults: RoleDefault[];
@@ -42,6 +44,7 @@ interface MailState {
   syncing: boolean;
   loadingBody: boolean;
   summarizing: boolean;
+  translating: boolean;
   error: string | null;
 
   loadAccounts: () => Promise<void>;
@@ -54,6 +57,8 @@ interface MailState {
   selectMailbox: (id: string) => Promise<void>;
   selectMessage: (id: string) => Promise<void>;
   summarizeSelectedMessage: () => Promise<void>;
+  translateSelectedMessage: (target: string) => Promise<void>;
+  clearTranslation: () => void;
 
   loadAiConfig: () => Promise<void>;
   addModel: (form: AddModelForm) => Promise<AiModel>;
@@ -95,6 +100,7 @@ export const useMailStore = create<MailState>((set, get) => ({
   selectedMessageId: null,
   body: null,
   summary: null,
+  translation: null,
 
   models: [],
   roleDefaults: [],
@@ -105,6 +111,7 @@ export const useMailStore = create<MailState>((set, get) => ({
   syncing: false,
   loadingBody: false,
   summarizing: false,
+  translating: false,
   error: null,
 
   loadAccounts: async () => {
@@ -225,9 +232,16 @@ export const useMailStore = create<MailState>((set, get) => ({
   },
 
   selectMessage: async (id) => {
-    // Clear summary too — each message owns its own. Cache lookup on the backend means a
-    // second click on the same message round-trips against ai_results, not the API.
-    set({ selectedMessageId: id, body: null, summary: null, loadingBody: true });
+    // Clear summary + translation too — each message owns its own. Cache lookup on the
+    // backend means a second click on the same message round-trips against ai_results,
+    // not the API.
+    set({
+      selectedMessageId: id,
+      body: null,
+      summary: null,
+      translation: null,
+      loadingBody: true,
+    });
     try {
       const body = await tauri.messageBody(id);
       if (get().selectedMessageId === id) {
@@ -256,6 +270,26 @@ export const useMailStore = create<MailState>((set, get) => ({
     } finally {
       set({ summarizing: false });
     }
+  },
+
+  translateSelectedMessage: async (target) => {
+    const id = get().selectedMessageId;
+    if (id === null) return;
+    set({ translating: true, error: null });
+    try {
+      const translation = await tauri.aiTranslate(id, target);
+      if (get().selectedMessageId === id) {
+        set({ translation });
+      }
+    } catch (e) {
+      set({ error: errMsg(e) });
+    } finally {
+      set({ translating: false });
+    }
+  },
+
+  clearTranslation: () => {
+    set({ translation: null });
   },
 
   loadAiConfig: async () => {
