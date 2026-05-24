@@ -1,30 +1,31 @@
 //! `ai_summarize` orchestrator.
 //!
 //! Flow:
-//!   1. Load message header + cached body from PG. Bail with a clear error if the body
-//!      isn't cached — we want the user to open the message first (which lazy-fetches the
-//!      body) before asking for a summary.
-//!   2. Compute `prompt_hash = sha256(system_prompt || \n---\n || user_prompt)`.
-//!   3. `ai_results::get` by `(message_id, "summary", prompt_hash)` — return immediately
-//!      on hit, with `source = "cached"` so the UI shows zero token cost.
-//!   4. Call Sonnet 4.6 with the system prompt cached (ephemeral) and the user prompt
-//!      assembled from subject + from + body.
-//!   5. Parse the JSON response. Fail loudly on malformed output — we want signal, not
-//!      silent recovery, while iterating on the prompt.
-//!   6. Persist to `ai_results`, return with `source = "fresh"` and the usage breakdown.
+//!   1. Resolve the user-configured "summary" model via `ai_role_defaults`. Bail with a
+//!      clear "请先在 AI 设置中配置默认摘要模型" error if none is configured.
+//!   2. Pull the API key for that model from the OS keychain (spawn_blocking).
+//!   3. Load message header + cached body from PG. Bail if the body isn't cached — we want
+//!      the user to open the message first so the lazy-fetch lands the body.
+//!   4. Compute `prompt_hash = sha256(system_prompt || \n---\n || user_prompt)`.
+//!   5. `ai_results::get` by `(message_id, "summary", prompt_hash)` — return immediately
+//!      on hit, with `source = "cached"`.
+//!   6. Build the AiClient (Anthropic or OpenAI), call complete().
+//!   7. Parse the JSON response. Fail loudly on malformed output.
+//!   8. Persist to `ai_results`, return with `source = "fresh"` + usage breakdown.
 
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::ai::client::{AnthropicClient, CompletionRequest, SystemBlock, UserMessage};
-use crate::ai::prompts;
+use crate::ai::{prompts, AiClient, CompletionRequest, SystemBlock, UserMessage};
 use crate::db::ai_results::{self, AiResultInsert};
 use crate::db::messages::MessageHeader;
-use crate::db::{bodies, messages, Pool};
+use crate::db::{ai_role_defaults, bodies, messages, Pool};
 use crate::error::{AppError, AppResult};
+use crate::keychain;
 
-const MODEL_SONNET: &str = "claude-sonnet-4-6";
+const ROLE: &str = "summary";
 const MAX_OUTPUT_TOKENS: u32 = 1024;
 /// Hard cap on body length sent to the model. ~50k Chinese chars ≈ ~80k tokens, well
 /// within Sonnet's window but already expensive — long mail is rare and the bulk of the
@@ -52,11 +53,18 @@ pub struct SummaryResult {
     pub cache_read_tokens: Option<i32>,
 }
 
-pub async fn summarize_message(
-    pool: &Pool,
-    client: &AnthropicClient,
-    message_id: Uuid,
-) -> AppResult<SummaryResult> {
+pub async fn summarize_message(pool: &Pool, message_id: Uuid) -> AppResult<SummaryResult> {
+    let model = ai_role_defaults::resolve_model(pool, ROLE)
+        .await?
+        .ok_or_else(|| {
+            AppError::Config("请先在 AI 设置中配置默认摘要模型 (role = summary)".into())
+        })?;
+    let model_uuid = model.id;
+    let api_key: SecretString =
+        tokio::task::spawn_blocking(move || keychain::get_ai_key(model_uuid))
+            .await
+            .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
+
     let msg = messages::get(pool, message_id)
         .await?
         .ok_or_else(|| AppError::Config(format!("message {message_id} not found")))?;
@@ -83,9 +91,9 @@ pub async fn summarize_message(
         });
     }
 
+    let client = AiClient::build(&model, api_key)?;
     let response = client
         .complete(CompletionRequest {
-            model: MODEL_SONNET.into(),
             max_tokens: MAX_OUTPUT_TOKENS,
             system: vec![SystemBlock {
                 text: prompts::SUMMARY_SYSTEM.to_string(),
@@ -98,7 +106,7 @@ pub async fn summarize_message(
         .await?;
 
     let summary: Summary = serde_json::from_str(&response.text).map_err(|e| {
-        AppError::Anthropic(format!(
+        AppError::Ai(format!(
             "模型未返回合法 JSON：{e}\n原文：{}",
             truncate_for_log(&response.text)
         ))
@@ -152,7 +160,7 @@ fn pick_body_for_summary(body: &crate::db::bodies::MessageBody) -> AppResult<Str
         .text_plain
         .as_deref()
         .or(body.html.as_deref())
-        .ok_or_else(|| AppError::Anthropic("邮件没有可摘要的正文内容".into()))?;
+        .ok_or_else(|| AppError::Ai("邮件没有可摘要的正文内容".into()))?;
     if raw.chars().count() <= MAX_BODY_CHARS {
         return Ok(raw.to_string());
     }

@@ -12,10 +12,26 @@ export function AiPanel() {
   const summary = useMailStore((s) => s.summary);
   const summarizing = useMailStore((s) => s.summarizing);
   const summarize = useMailStore((s) => s.summarizeSelectedMessage);
+  const roleDefaults = useMailStore((s) => s.roleDefaults);
+  const models = useMailStore((s) => s.models);
 
-  // Body is loaded lazily on message click; without it the backend bails with a clear
-  // error. Disable the button until then so the user doesn't get a useless toast.
-  const ready = body !== null;
+  // Three gates before the button can fire:
+  //   1. body lazy-fetched (backend rejects summarize without a cached body)
+  //   2. summary role default assigned
+  //   3. the assigned model still exists (defensive — DB FK should prevent dangling refs)
+  const summaryDefault = roleDefaults.find((r) => r.role === 'summary');
+  const summaryModelExists =
+    summaryDefault !== undefined && models.some((m) => m.id === summaryDefault.modelId);
+  const ready = body !== null && summaryModelExists;
+
+  let placeholder: string;
+  if (!summaryModelExists) {
+    placeholder = '尚未在 ⚙ AI 模型配置中将模型指派给「摘要」角色。';
+  } else if (body === null) {
+    placeholder = '等待正文加载…';
+  } else {
+    placeholder = '点击「总结」让模型提炼这封邮件的要点。';
+  }
 
   return (
     <section className="mt-4 rounded-lg border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-900">
@@ -34,9 +50,7 @@ export function AiPanel() {
       </header>
 
       {!summary && !summarizing && (
-        <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">
-          {ready ? '点击「总结」让 Claude 提炼这封邮件的要点。' : '等待正文加载…'}
-        </p>
+        <p className="mt-3 text-xs text-slate-500 dark:text-slate-400">{placeholder}</p>
       )}
 
       {summarizing && (

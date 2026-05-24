@@ -57,6 +57,33 @@ export interface SyncReport {
   totalInMailbox: number;
 }
 
+export type AiProvider = 'anthropic' | 'openai';
+
+export type AiRole = 'summary' | 'classify' | 'translate' | 'draft';
+
+export interface AiModel {
+  id: string;
+  displayName: string;
+  provider: AiProvider;
+  modelId: string;
+  /** null = use the provider's default base URL. */
+  baseUrl: string | null;
+  createdAt: string;
+}
+
+export interface RoleDefault {
+  role: AiRole;
+  modelId: string;
+}
+
+export interface AddModelForm {
+  displayName: string;
+  provider: AiProvider;
+  modelId: string;
+  baseUrl: string | null;
+  apiKey: string;
+}
+
 export interface SummaryResult {
   tldr: string;
   bullets: string[];

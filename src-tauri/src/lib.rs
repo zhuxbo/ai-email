@@ -49,6 +49,12 @@ pub fn run() {
             commands::mail::message_get,
             commands::mail::message_body,
             commands::ai::ai_summarize,
+            commands::ai_config::models_list,
+            commands::ai_config::model_add,
+            commands::ai_config::model_remove,
+            commands::ai_config::role_defaults_list,
+            commands::ai_config::role_default_set,
+            commands::ai_config::role_default_clear,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
