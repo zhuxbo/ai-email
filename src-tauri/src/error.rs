@@ -22,6 +22,9 @@ pub enum AppError {
     #[error("imap error: {0}")]
     Imap(String),
 
+    #[error("smtp error: {0}")]
+    Smtp(String),
+
     #[error("mail parse error: {0}")]
     MailParse(String),
 

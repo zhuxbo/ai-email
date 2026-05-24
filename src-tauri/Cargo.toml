@@ -95,6 +95,17 @@ reqwest = { version = "0.12", default-features = false, features = [
 sha2 = "0.10"
 hex = "0.4"
 
+# ── SMTP send ─────────────────────────────────────────────
+# lettre = SMTP wire client + Message builder. Implicit-TLS profile (port 465) used by QQ;
+# tokio1-rustls-tls keeps the TLS stack consistent with sqlx / async-imap / reqwest.
+lettre = { version = "0.11", default-features = false, features = [
+    "tokio1-rustls-tls",
+    "smtp-transport",
+    "builder",
+    "ring",
+    "webpki-roots",
+] }
+
 # OS-native credential vault. Platform features are mutually exclusive on
 # native targets so we list one per `cfg`. Keep `default-features = false`
 # everywhere; the default set drags libsecret into macOS builds.

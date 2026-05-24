@@ -14,6 +14,7 @@
 
 pub mod anthropic;
 pub mod classify;
+pub mod draft;
 pub mod openai;
 pub mod prompts;
 pub mod summarize;
