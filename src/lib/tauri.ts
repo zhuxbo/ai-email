@@ -10,6 +10,7 @@ import type {
   Mailbox,
   MessageBody,
   MessageHeader,
+  SummaryResult,
   SyncReport,
 } from './types';
 
@@ -47,4 +48,8 @@ export async function messageGet(id: string): Promise<MessageHeader> {
 
 export async function messageBody(id: string): Promise<MessageBody> {
   return invoke('message_body', { id });
+}
+
+export async function aiSummarize(id: string): Promise<SummaryResult> {
+  return invoke('ai_summarize', { id });
 }

@@ -25,6 +25,15 @@ pub enum AppError {
     #[error("mail parse error: {0}")]
     MailParse(String),
 
+    #[error("anthropic api error: {0}")]
+    Anthropic(String),
+
+    #[error("json error: {0}")]
+    Json(#[from] serde_json::Error),
+
+    #[error("http error: {0}")]
+    Http(#[from] reqwest::Error),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 

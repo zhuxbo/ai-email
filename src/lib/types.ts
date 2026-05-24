@@ -57,6 +57,18 @@ export interface SyncReport {
   totalInMailbox: number;
 }
 
+export interface SummaryResult {
+  tldr: string;
+  bullets: string[];
+  language: string;
+  /** 'fresh' = new Anthropic API call, 'cached' = served from ai_results without network. */
+  source: 'fresh' | 'cached';
+  model: string;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cacheReadTokens: number | null;
+}
+
 export interface AddAccountForm {
   email: string;
   displayName: string | null;

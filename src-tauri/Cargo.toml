@@ -80,6 +80,21 @@ futures = "0.3"
 # Header parsing now; body parsing (multipart, encoding, charset) in Sprint 1.4.
 mail-parser = "0.10"
 
+# ── HTTP client for Anthropic API ─────────────────────────
+# rustls everywhere (matches sqlx + tokio-rustls). No default-features so we don't drag in
+# the native-tls backend. brotli/gzip on so the API can return compressed responses.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "json",
+    "gzip",
+    "brotli",
+] }
+
+# ── Hashing ───────────────────────────────────────────────
+# Used for prompt_hash dedup keys in ai_results.
+sha2 = "0.10"
+hex = "0.4"
+
 # OS-native credential vault. Platform features are mutually exclusive on
 # native targets so we list one per `cfg`. Keep `default-features = false`
 # everywhere; the default set drags libsecret into macOS builds.
