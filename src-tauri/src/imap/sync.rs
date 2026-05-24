@@ -61,9 +61,10 @@ pub async fn sync_inbox(
     };
 
     let mut inserted = 0_i32;
+    let mut new_ids: Vec<uuid::Uuid> = Vec::with_capacity(fetched.len());
     for fh in &fetched {
         let h = parse::parse_headers(&fh.header_bytes);
-        let new_row = messages::insert(
+        let new_id = messages::insert(
             pool,
             &MessageInsert {
                 account_id: account.id,
@@ -84,8 +85,9 @@ pub async fn sync_inbox(
             },
         )
         .await?;
-        if new_row {
+        if let Some(id) = new_id {
             inserted += 1;
+            new_ids.push(id);
         }
     }
 
@@ -108,6 +110,33 @@ pub async fn sync_inbox(
         total_in_mailbox = selected.exists,
         "inbox sync done"
     );
+
+    // Kick off background classification for the freshly-landed rows. We don't await — UI
+    // gets the sync report immediately and polls a few seconds later (see store.syncInbox).
+    // Errors here are non-fatal: log and move on. The classifier checks `ai_role_defaults`
+    // and silently no-ops when the role isn't configured yet.
+    if !new_ids.is_empty() {
+        let pool_clone = pool.clone();
+        let account_id = account.id;
+        tokio::spawn(async move {
+            match crate::ai::classify::classify_message_ids(&pool_clone, &new_ids).await {
+                Ok(results) => {
+                    tracing::info!(
+                        account_id = %account_id,
+                        classified = results.len(),
+                        "background classify finished"
+                    );
+                }
+                Err(e) => {
+                    // Most common cause: user hasn't configured a classify model yet.
+                    // We don't surface to UI — the next sync will retry, and the user can
+                    // see uncategorised messages and pick a model when they're ready.
+                    tracing::warn!(account_id = %account_id, error = %e, "background classify failed");
+                }
+            }
+        });
+    }
+
     Ok(SyncReport {
         new_message_count: inserted,
         total_in_mailbox: i64::from(selected.exists),

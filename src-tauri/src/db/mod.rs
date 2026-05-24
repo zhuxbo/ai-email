@@ -14,6 +14,7 @@ pub mod ai_results;
 pub mod ai_role_defaults;
 pub mod bodies;
 pub mod mailboxes;
+pub mod message_tags;
 pub mod messages;
 
 use std::env;

@@ -24,6 +24,8 @@ export interface Mailbox {
   lastSyncedAt: string | null;
 }
 
+export type Category = 'personal' | 'work' | 'notification' | 'promotion' | 'spam';
+
 export interface MessageHeader {
   id: string;
   accountId: string;
@@ -42,7 +44,25 @@ export interface MessageHeader {
   hasAttachment: boolean;
   snippet: string | null;
   priority: number | null;
+  /** AI-assigned: 'personal' | 'work' | 'notification' | 'promotion' | 'spam' | null until classified. */
+  category: Category | null;
+  /** AI + user tags joined from message_tags. */
+  tags: string[];
   bodyFetchedAt: string | null;
+}
+
+export interface Classification {
+  category: Category;
+  priority: number;
+  tags: string[];
+}
+
+export interface ClassifyResult {
+  messageId: string;
+  category: Category;
+  priority: number;
+  tags: string[];
+  source: 'fresh' | 'cached';
 }
 
 export interface MessageBody {
@@ -82,6 +102,17 @@ export interface AddModelForm {
   modelId: string;
   baseUrl: string | null;
   apiKey: string;
+}
+
+export interface TranslateResult {
+  target: string;
+  subject: string;
+  body: string;
+  source: 'fresh' | 'cached';
+  model: string;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cacheReadTokens: number | null;
 }
 
 export interface SummaryResult {

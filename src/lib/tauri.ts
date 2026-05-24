@@ -10,12 +10,14 @@ import type {
   AddModelForm,
   AiModel,
   AiRole,
+  ClassifyResult,
   Mailbox,
   MessageBody,
   MessageHeader,
   RoleDefault,
   SummaryResult,
   SyncReport,
+  TranslateResult,
 } from './types';
 
 export async function accountsList(): Promise<Account[]> {
@@ -56,6 +58,14 @@ export async function messageBody(id: string): Promise<MessageBody> {
 
 export async function aiSummarize(id: string): Promise<SummaryResult> {
   return invoke('ai_summarize', { id });
+}
+
+export async function aiClassify(ids: string[]): Promise<ClassifyResult[]> {
+  return invoke('ai_classify', { ids });
+}
+
+export async function aiTranslate(id: string, target: string): Promise<TranslateResult> {
+  return invoke('ai_translate', { id, target });
 }
 
 export async function modelsList(): Promise<AiModel[]> {

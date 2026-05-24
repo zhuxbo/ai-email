@@ -1,5 +1,6 @@
 //! Repository for the `messages` table — header-only rows. Bodies live in `message_bodies`
-//! and are populated lazily on the first detail-view click (Sprint 1.4).
+//! and are populated lazily on the first detail-view click (Sprint 1.4). AI-derived tags
+//! live in `message_tags` and are joined into the returned `MessageHeader` (Sprint 3).
 //!
 //! IMAP UIDs are u32 on the wire but stored as BIGINT in PG (room for higher-UID providers).
 //! The `i64` ↔ `u32` cast at the boundary is widening so always safe.
@@ -34,12 +35,16 @@ pub struct MessageHeader {
     pub has_attachment: bool,
     pub snippet: Option<String>,
     pub priority: Option<i32>,
+    /// AI-assigned bucket: 'personal' | 'work' | 'notification' | 'promotion' | 'spam'.
+    pub category: Option<String>,
+    /// All user + AI tags. Populated via `LEFT JOIN message_tags` in every SELECT.
+    pub tags: Vec<String>,
     #[serde(with = "time::serde::rfc3339::option")]
     pub body_fetched_at: Option<OffsetDateTime>,
 }
 
 /// Owned struct passed to `insert`. Separate from `MessageHeader` so callers don't need to
-/// invent values for the DB-generated columns (`id`, `priority`, `body_fetched_at`).
+/// invent values for the DB-generated columns.
 #[derive(Debug, Clone)]
 pub struct MessageInsert {
     pub account_id: Uuid,
@@ -59,10 +64,23 @@ pub struct MessageInsert {
     pub snippet: Option<String>,
 }
 
-/// `INSERT … ON CONFLICT DO NOTHING`. Returns true iff a new row landed — sync uses the bool
-/// to count "new messages" for the SyncReport.
-pub async fn insert(pool: &Pool, m: &MessageInsert) -> AppResult<bool> {
-    let result = sqlx::query(
+/// `SELECT ... LEFT JOIN message_tags ...` projection used by both `get` and
+/// `list_in_mailbox`. Keeping the column order identical across both saves repeating the
+/// projection logic and lets `FromRow` derive Just Work.
+const SELECT_COLUMNS: &str = r#"
+    m.id, m.account_id, m.mailbox_id, m.imap_uid, m.rfc_message_id, m.thread_id,
+    m.subject, m.from_addr, m.to_addrs, m.cc_addrs, m.sent_at, m.internal_date,
+    m.flags, m.size_bytes, m.has_attachment, m.snippet, m.priority, m.category,
+    COALESCE(array_agg(t.tag ORDER BY t.tag) FILTER (WHERE t.tag IS NOT NULL),
+             ARRAY[]::TEXT[]) AS tags,
+    m.body_fetched_at
+"#;
+
+/// `INSERT … ON CONFLICT DO NOTHING RETURNING id`. Returns `Some(id)` iff a row was
+/// inserted, `None` if the (account_id, mailbox_id, imap_uid) row already existed. Sync
+/// uses the returned id to bulk-classify newly-landed messages.
+pub async fn insert(pool: &Pool, m: &MessageInsert) -> AppResult<Option<Uuid>> {
+    let id = sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO messages (
             account_id, mailbox_id, imap_uid, rfc_message_id, thread_id,
@@ -71,6 +89,7 @@ pub async fn insert(pool: &Pool, m: &MessageInsert) -> AppResult<bool> {
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
         ON CONFLICT (account_id, mailbox_id, imap_uid) DO NOTHING
+        RETURNING id
         "#,
     )
     .bind(m.account_id)
@@ -88,24 +107,25 @@ pub async fn insert(pool: &Pool, m: &MessageInsert) -> AppResult<bool> {
     .bind(m.size_bytes)
     .bind(m.has_attachment)
     .bind(&m.snippet)
-    .execute(pool)
+    .fetch_optional(pool)
     .await?;
-    Ok(result.rows_affected() > 0)
+    Ok(id)
 }
 
 pub async fn get(pool: &Pool, id: Uuid) -> AppResult<Option<MessageHeader>> {
-    let row = sqlx::query_as::<_, MessageHeader>(
+    let sql = format!(
         r#"
-        SELECT id, account_id, mailbox_id, imap_uid, rfc_message_id, thread_id,
-               subject, from_addr, to_addrs, cc_addrs, sent_at, internal_date,
-               flags, size_bytes, has_attachment, snippet, priority, body_fetched_at
-        FROM messages
-        WHERE id = $1
-        "#,
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
+        SELECT {SELECT_COLUMNS}
+        FROM messages m
+        LEFT JOIN message_tags t ON t.message_id = m.id
+        WHERE m.id = $1
+        GROUP BY m.id
+        "#
+    );
+    let row = sqlx::query_as::<_, MessageHeader>(&sql)
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
     Ok(row)
 }
 
@@ -135,6 +155,58 @@ pub async fn mark_body_fetched(
     Ok(())
 }
 
+/// Update the priority + category fields the classifier produced. `category` is stored as a
+/// plain TEXT so we don't have to enforce the closed set at schema level (Sprint 3 spec uses
+/// 5 values; future could refine).
+pub async fn update_classification(
+    pool: &Pool,
+    id: Uuid,
+    priority: i32,
+    category: &str,
+) -> AppResult<()> {
+    sqlx::query(
+        r#"
+        UPDATE messages
+        SET priority = $2,
+            category = $3
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .bind(priority)
+    .bind(category)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Header subset used by the classifier prompt builder. Pulls just what the prompt sees
+/// (id + subject + from + snippet) so we don't waste tokens on internal_date / flags.
+#[derive(Debug, Clone, FromRow)]
+pub struct ClassifyInput {
+    pub id: Uuid,
+    pub subject: Option<String>,
+    pub from_addr: Option<String>,
+    pub snippet: Option<String>,
+}
+
+pub async fn fetch_for_classify(pool: &Pool, ids: &[Uuid]) -> AppResult<Vec<ClassifyInput>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query_as::<_, ClassifyInput>(
+        r#"
+        SELECT id, subject, from_addr, snippet
+        FROM messages
+        WHERE id = ANY($1)
+        "#,
+    )
+    .bind(ids)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 /// List by mailbox, most recent first. `sent_at DESC NULLS LAST` keeps undated junk at the
 /// bottom; the secondary `imap_uid DESC` makes the order deterministic when timestamps tie.
 pub async fn list_in_mailbox(
@@ -143,21 +215,22 @@ pub async fn list_in_mailbox(
     limit: i64,
     offset: i64,
 ) -> AppResult<Vec<MessageHeader>> {
-    let rows = sqlx::query_as::<_, MessageHeader>(
+    let sql = format!(
         r#"
-        SELECT id, account_id, mailbox_id, imap_uid, rfc_message_id, thread_id,
-               subject, from_addr, to_addrs, cc_addrs, sent_at, internal_date,
-               flags, size_bytes, has_attachment, snippet, priority, body_fetched_at
-        FROM messages
-        WHERE mailbox_id = $1
-        ORDER BY sent_at DESC NULLS LAST, imap_uid DESC
+        SELECT {SELECT_COLUMNS}
+        FROM messages m
+        LEFT JOIN message_tags t ON t.message_id = m.id
+        WHERE m.mailbox_id = $1
+        GROUP BY m.id
+        ORDER BY m.sent_at DESC NULLS LAST, m.imap_uid DESC
         LIMIT $2 OFFSET $3
-        "#,
-    )
-    .bind(mailbox_id)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(pool)
-    .await?;
+        "#
+    );
+    let rows = sqlx::query_as::<_, MessageHeader>(&sql)
+        .bind(mailbox_id)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?;
     Ok(rows)
 }
