@@ -1,8 +1,8 @@
 [package]
 name = "ai-email"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "AI-assisted email client (Tauri 2 + Rust core)"
+authors = ["zhuxbo"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -18,8 +18,45 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# ── Tauri / FFI ───────────────────────────────────────────
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# ── Async runtime ─────────────────────────────────────────
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "sync",
+    "time",
+    "net",
+    "fs",
+] }
+
+# ── Database ──────────────────────────────────────────────
+# rustls everywhere — no native-tls dep so the build stays portable.
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio-rustls",
+    "postgres",
+    "uuid",
+    "time",
+    "json",
+    "macros",
+    "migrate",
+] }
+
+# ── Error handling ────────────────────────────────────────
+anyhow = "1"
+thiserror = "2"
+
+# ── Logging / tracing ─────────────────────────────────────
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# ── Common types ──────────────────────────────────────────
+uuid = { version = "1", features = ["v4", "serde"] }
+time = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"] }
+
+# ── Config / env ──────────────────────────────────────────
+dotenvy = "0.15"
