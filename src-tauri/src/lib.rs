@@ -3,6 +3,7 @@
 //! The frontend NEVER speaks to IMAP / SMTP / Anthropic / PG directly — every cross-process call
 //! lands on a `#[tauri::command]` exported from `crate::commands` (added per sprint).
 
+pub mod ai;
 pub mod commands;
 pub mod db;
 pub mod error;
@@ -47,6 +48,7 @@ pub fn run() {
             commands::mail::messages_list,
             commands::mail::message_get,
             commands::mail::message_body,
+            commands::ai::ai_summarize,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
