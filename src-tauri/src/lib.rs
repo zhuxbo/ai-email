@@ -6,6 +6,7 @@
 pub mod commands;
 pub mod db;
 pub mod error;
+pub mod imap;
 pub mod keychain;
 
 use tauri::Manager;
@@ -41,6 +42,11 @@ pub fn run() {
             commands::accounts::accounts_list,
             commands::accounts::account_add,
             commands::accounts::account_remove,
+            commands::mail::inbox_sync,
+            commands::mail::mailboxes_list,
+            commands::mail::messages_list,
+            commands::mail::message_get,
+            commands::mail::message_body,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

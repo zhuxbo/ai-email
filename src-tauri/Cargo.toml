@@ -67,6 +67,19 @@ dotenvy = "0.15"
 # deserialize into a plain `String` we wrap on the next line.
 secrecy = "0.10"
 
+# ── IMAP / TLS ────────────────────────────────────────────
+# rustls everywhere (matches sqlx). webpki-roots ships the Mozilla CA bundle so
+# we don't depend on the OS trust store.
+async-imap = { version = "0.10", default-features = false, features = ["runtime-tokio"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+webpki-roots = "0.26"
+futures = "0.3"
+
+# ── Mail parsing ──────────────────────────────────────────
+# Header parsing now; body parsing (multipart, encoding, charset) in Sprint 1.4.
+mail-parser = "0.10"
+
 # OS-native credential vault. Platform features are mutually exclusive on
 # native targets so we list one per `cfg`. Keep `default-features = false`
 # everywhere; the default set drags libsecret into macOS builds.

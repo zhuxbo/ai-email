@@ -9,6 +9,9 @@
 //! returns the public-facing struct for that table.
 
 pub mod accounts;
+pub mod bodies;
+pub mod mailboxes;
+pub mod messages;
 
 use std::env;
 use std::time::Duration;

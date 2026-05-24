@@ -19,6 +19,12 @@ pub enum AppError {
     #[error("keychain error: {0}")]
     Keychain(String),
 
+    #[error("imap error: {0}")]
+    Imap(String),
+
+    #[error("mail parse error: {0}")]
+    MailParse(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
