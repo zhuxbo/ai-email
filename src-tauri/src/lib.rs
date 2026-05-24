@@ -49,6 +49,7 @@ pub fn run() {
             commands::mail::message_get,
             commands::mail::message_body,
             commands::ai::ai_summarize,
+            commands::ai::ai_classify,
             commands::ai_config::models_list,
             commands::ai_config::model_add,
             commands::ai_config::model_remove,

@@ -10,6 +10,7 @@ import type {
   AddModelForm,
   AiModel,
   AiRole,
+  ClassifyResult,
   Mailbox,
   MessageBody,
   MessageHeader,
@@ -56,6 +57,10 @@ export async function messageBody(id: string): Promise<MessageBody> {
 
 export async function aiSummarize(id: string): Promise<SummaryResult> {
   return invoke('ai_summarize', { id });
+}
+
+export async function aiClassify(ids: string[]): Promise<ClassifyResult[]> {
+  return invoke('ai_classify', { ids });
 }
 
 export async function modelsList(): Promise<AiModel[]> {

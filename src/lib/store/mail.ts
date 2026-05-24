@@ -11,6 +11,7 @@ import type {
   AddModelForm,
   AiModel,
   AiRole,
+  Category,
   Mailbox,
   MessageBody,
   MessageHeader,
@@ -34,6 +35,10 @@ interface MailState {
   models: AiModel[];
   roleDefaults: RoleDefault[];
 
+  /** Filter set — empty array means "show all". */
+  categoryFilter: Category[];
+  sortByPriority: boolean;
+
   syncing: boolean;
   loadingBody: boolean;
   summarizing: boolean;
@@ -55,6 +60,11 @@ interface MailState {
   removeModel: (id: string) => Promise<void>;
   setRoleDefault: (role: AiRole, modelId: string) => Promise<void>;
   clearRoleDefault: (role: AiRole) => Promise<void>;
+
+  reloadMessages: () => Promise<void>;
+  toggleCategoryFilter: (cat: Category) => void;
+  setSortByPriority: (on: boolean) => void;
+  classifySelectedMailbox: () => Promise<void>;
 
   clearError: () => void;
 }
@@ -88,6 +98,9 @@ export const useMailStore = create<MailState>((set, get) => ({
 
   models: [],
   roleDefaults: [],
+
+  categoryFilter: [],
+  sortByPriority: false,
 
   syncing: false,
   loadingBody: false,
@@ -179,6 +192,14 @@ export const useMailStore = create<MailState>((set, get) => ({
       const inbox = pickInbox(mailboxes);
       if (inbox) {
         await get().selectMailbox(inbox.id);
+      }
+      // The background classifier (spawned server-side after sync) usually finishes within
+      // a few seconds. Schedule a re-fetch so tags + priority show up without the user
+      // having to click again.
+      if (report.newMessageCount > 0) {
+        setTimeout(() => {
+          void get().reloadMessages();
+        }, 3500);
       }
       return report;
     } catch (e) {
@@ -287,6 +308,47 @@ export const useMailStore = create<MailState>((set, get) => ({
     try {
       await tauri.roleDefaultClear(role);
       set((s) => ({ roleDefaults: s.roleDefaults.filter((r) => r.role !== role) }));
+    } catch (e) {
+      set({ error: errMsg(e) });
+    }
+  },
+
+  reloadMessages: async () => {
+    const id = get().selectedMailboxId;
+    if (id === null) return;
+    try {
+      const messages = await tauri.messagesList(id, 50, 0);
+      // Don't overwrite if user has switched mailboxes mid-await.
+      if (get().selectedMailboxId === id) {
+        set({ messages });
+      }
+    } catch (e) {
+      set({ error: errMsg(e) });
+    }
+  },
+
+  toggleCategoryFilter: (cat) => {
+    set((s) => {
+      const exists = s.categoryFilter.includes(cat);
+      return {
+        categoryFilter: exists
+          ? s.categoryFilter.filter((c) => c !== cat)
+          : [...s.categoryFilter, cat],
+      };
+    });
+  },
+
+  setSortByPriority: (on) => {
+    set({ sortByPriority: on });
+  },
+
+  classifySelectedMailbox: async () => {
+    const messages = get().messages;
+    const ids = messages.map((m) => m.id);
+    if (ids.length === 0) return;
+    try {
+      await tauri.aiClassify(ids);
+      await get().reloadMessages();
     } catch (e) {
       set({ error: errMsg(e) });
     }

@@ -5,6 +5,7 @@
 use tauri::State;
 use uuid::Uuid;
 
+use crate::ai::classify::{self, ClassifyResult};
 use crate::ai::summarize::{self, SummaryResult};
 use crate::error::AppResult;
 use crate::AppState;
@@ -12,4 +13,14 @@ use crate::AppState;
 #[tauri::command]
 pub async fn ai_summarize(state: State<'_, AppState>, id: Uuid) -> AppResult<SummaryResult> {
     summarize::summarize_message(&state.db, id).await
+}
+
+/// Manual (re-)classify of one or more messages. Sync auto-fires the background path; this
+/// command is the explicit "重新分类" hook the UI can wire to a button later.
+#[tauri::command]
+pub async fn ai_classify(
+    state: State<'_, AppState>,
+    ids: Vec<Uuid>,
+) -> AppResult<Vec<ClassifyResult>> {
+    classify::classify_message_ids(&state.db, &ids).await
 }

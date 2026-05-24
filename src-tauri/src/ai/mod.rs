@@ -13,6 +13,7 @@
 //! provider modules and call-site code agree on shape.
 
 pub mod anthropic;
+pub mod classify;
 pub mod openai;
 pub mod prompts;
 pub mod summarize;
