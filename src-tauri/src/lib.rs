@@ -45,6 +45,8 @@ pub fn run() {
             commands::mail::inbox_sync,
             commands::mail::mailboxes_list,
             commands::mail::messages_list,
+            commands::mail::message_get,
+            commands::mail::message_body,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

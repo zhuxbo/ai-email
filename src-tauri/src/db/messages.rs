@@ -93,6 +93,48 @@ pub async fn insert(pool: &Pool, m: &MessageInsert) -> AppResult<bool> {
     Ok(result.rows_affected() > 0)
 }
 
+pub async fn get(pool: &Pool, id: Uuid) -> AppResult<Option<MessageHeader>> {
+    let row = sqlx::query_as::<_, MessageHeader>(
+        r#"
+        SELECT id, account_id, mailbox_id, imap_uid, rfc_message_id, thread_id,
+               subject, from_addr, to_addrs, cc_addrs, sent_at, internal_date,
+               flags, size_bytes, has_attachment, snippet, priority, body_fetched_at
+        FROM messages
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
+/// Called after a successful body fetch. `snippet` uses COALESCE so a NULL snippet from this
+/// call doesn't wipe an existing one — that way classification can backfill snippet later
+/// without losing it on the next body refetch.
+pub async fn mark_body_fetched(
+    pool: &Pool,
+    id: Uuid,
+    has_attachment: bool,
+    snippet: Option<String>,
+) -> AppResult<()> {
+    sqlx::query(
+        r#"
+        UPDATE messages
+        SET has_attachment = $2,
+            snippet        = COALESCE($3, snippet),
+            body_fetched_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .bind(has_attachment)
+    .bind(snippet)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// List by mailbox, most recent first. `sent_at DESC NULLS LAST` keeps undated junk at the
 /// bottom; the secondary `imap_uid DESC` makes the order deterministic when timestamps tie.
 pub async fn list_in_mailbox(

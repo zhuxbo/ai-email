@@ -3,7 +3,7 @@
 //! Body parsing (text/plain extraction, snippet, attachments) is Sprint 1.4 — this module
 //! only touches the metadata we persist on first sync.
 
-use mail_parser::{Address, HeaderValue, MessageParser};
+use mail_parser::{Address, HeaderValue, MessageParser, MimeHeaders};
 use time::OffsetDateTime;
 
 #[derive(Debug, Default)]
@@ -110,6 +110,56 @@ fn format_addr(name: Option<&str>, email: Option<&str>) -> Option<String> {
     })
 }
 
+/// Body extraction result. Used by Sprint 1.4 lazy-fetch + snippet backfill.
+#[derive(Debug, Default, Clone)]
+pub struct ParsedBody {
+    pub text_plain: Option<String>,
+    pub html: Option<String>,
+    pub has_attachment: bool,
+}
+
+/// Parse the full RFC 822 payload into `text/plain`, `text/html`, and an attachment flag.
+///
+/// We walk `msg.parts` ourselves rather than calling `body_text(0)` / `body_html(0)` because
+/// those helpers fall back across types — asking for HTML on a plain-text-only message
+/// returns the plain text. That confuses the UI into rendering the body twice.
+pub fn parse_body(raw: &[u8]) -> ParsedBody {
+    let Some(msg) = MessageParser::default().parse(raw) else {
+        return ParsedBody::default();
+    };
+
+    let mut text_plain: Option<String> = None;
+    let mut html: Option<String> = None;
+
+    for part in &msg.parts {
+        if text_plain.is_none() && part.is_content_type("text", "plain") {
+            text_plain = part.text_contents().map(str::to_string);
+        } else if html.is_none() && part.is_content_type("text", "html") {
+            html = part.text_contents().map(str::to_string);
+        }
+    }
+
+    ParsedBody {
+        text_plain,
+        html,
+        has_attachment: msg.attachment_count() > 0,
+    }
+}
+
+/// Collapse whitespace and trim to `char_limit` characters (NOT bytes — multi-byte safe).
+/// Returns `None` if the input is empty after trimming. Appends `…` only when truncated.
+pub fn snippet(text: &str, char_limit: usize) -> Option<String> {
+    let collapsed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    if collapsed.chars().count() <= char_limit {
+        return Some(collapsed);
+    }
+    let truncated: String = collapsed.chars().take(char_limit).collect();
+    Some(format!("{truncated}…"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,6 +171,8 @@ Cc: \"Dave Q.\" <dave@example.com>\r\n\
 Subject: hello\r\n\
 Date: Mon, 19 May 2025 14:00:00 +0800\r\n\
 Message-ID: <abc@example.com>\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: text/plain; charset=utf-8\r\n\
 \r\n\
 body here\r\n";
 
@@ -149,5 +201,57 @@ body here\r\n";
         assert!(p.subject.is_none());
         assert!(p.from_addr.is_none());
         assert!(p.to_addrs.is_empty());
+    }
+
+    #[test]
+    fn parses_plain_text_body() {
+        let p = parse_body(SAMPLE);
+        assert_eq!(p.text_plain.as_deref().map(str::trim), Some("body here"));
+        assert!(p.html.is_none());
+        assert!(!p.has_attachment);
+    }
+
+    const MULTIPART: &[u8] = b"\
+From: a@x\r\n\
+Subject: m\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: multipart/alternative; boundary=\"X\"\r\n\
+\r\n\
+--X\r\n\
+Content-Type: text/plain\r\n\
+\r\n\
+plain side\r\n\
+--X\r\n\
+Content-Type: text/html\r\n\
+\r\n\
+<p>html side</p>\r\n\
+--X--\r\n";
+
+    #[test]
+    fn parses_multipart_alternative() {
+        let p = parse_body(MULTIPART);
+        assert_eq!(p.text_plain.as_deref().map(str::trim), Some("plain side"));
+        assert!(p.html.as_deref().unwrap_or("").contains("html side"));
+        assert!(!p.has_attachment);
+    }
+
+    #[test]
+    fn snippet_truncates_with_ellipsis() {
+        let s = "hello   world\n\nthis is a long line of text we will truncate";
+        let out = snippet(s, 20).expect("non-empty input");
+        assert!(out.ends_with('…'));
+        assert!(out.chars().count() <= 21); // 20 + the ellipsis char
+    }
+
+    #[test]
+    fn snippet_short_input_passes_through() {
+        let out = snippet("a b c", 20).expect("non-empty input");
+        assert_eq!(out, "a b c");
+    }
+
+    #[test]
+    fn snippet_empty_input_is_none() {
+        assert!(snippet("", 20).is_none());
+        assert!(snippet("   \t\n  ", 20).is_none());
     }
 }

@@ -132,6 +132,25 @@ impl ImapClient {
         drain_fetch_stream(stream).await
     }
 
+    /// `UID FETCH <uid> (BODY.PEEK[])`. Returns the full RFC 822 bytes for one message —
+    /// callers parse them with [`crate::imap::parse::parse_body`]. Errors if the UID is
+    /// missing from the currently-selected mailbox.
+    pub async fn uid_fetch_body(&mut self, uid: u32) -> AppResult<Vec<u8>> {
+        let mut stream = self
+            .session
+            .uid_fetch(uid.to_string(), "(BODY.PEEK[])")
+            .await
+            .map_err(|e| AppError::Imap(e.to_string()))?;
+        let Some(item) = stream.next().await else {
+            return Err(AppError::Imap(format!("UID {uid} not found in mailbox")));
+        };
+        let f = item.map_err(|e| AppError::Imap(e.to_string()))?;
+        let body = f
+            .body()
+            .ok_or_else(|| AppError::Imap(format!("UID {uid} returned no BODY[]")))?;
+        Ok(body.to_vec())
+    }
+
     pub async fn logout(mut self) -> AppResult<()> {
         self.session
             .logout()

@@ -59,6 +59,20 @@ pub async fn get_by_name(pool: &Pool, account_id: Uuid, name: &str) -> AppResult
     Ok(row)
 }
 
+pub async fn get(pool: &Pool, id: Uuid) -> AppResult<Option<Mailbox>> {
+    let row = sqlx::query_as::<_, Mailbox>(
+        r#"
+        SELECT id, account_id, name, delimiter, uid_validity, uid_next, last_synced_at
+        FROM mailboxes
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
 pub async fn list(pool: &Pool, account_id: Uuid) -> AppResult<Vec<Mailbox>> {
     let rows = sqlx::query_as::<_, Mailbox>(
         r#"
