@@ -1,52 +1,61 @@
-import { useState } from 'react';
-import reactLogo from './assets/react.svg';
-import { invoke } from '@tauri-apps/api/core';
+// Top-level shell. Loads accounts on mount, owns the dialog open-state, renders the
+// 3-pane layout and an error toast for transient store errors.
+
+import { useEffect, useState } from 'react';
+
+import { AccountList } from './components/account-list';
+import { AddAccountDialog } from './components/add-account-dialog';
+import { MessageDetail } from './components/message-detail';
+import { MessageList } from './components/message-list';
+import { useMailStore } from './lib/store/mail';
 import './App.css';
 
 function App() {
-  const [greetMsg, setGreetMsg] = useState('');
-  const [name, setName] = useState('');
+  const loadAccounts = useMailStore((s) => s.loadAccounts);
+  const error = useMailStore((s) => s.error);
+  const clearError = useMailStore((s) => s.clearError);
+  const [addOpen, setAddOpen] = useState(false);
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke('greet', { name }));
-  }
+  useEffect(() => {
+    void loadAccounts();
+  }, [loadAccounts]);
 
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vite.dev" target="_blank" rel="noreferrer">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank" rel="noreferrer">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank" rel="noreferrer">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void greet();
+    <div className="flex h-screen w-screen overflow-hidden">
+      <AccountList
+        onAddAccount={() => {
+          setAddOpen(true);
         }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => {
-            setName(e.currentTarget.value);
-          }}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
+      />
+      <MessageList />
+      <MessageDetail />
+
+      <AddAccountDialog
+        open={addOpen}
+        onClose={() => {
+          setAddOpen(false);
+        }}
+      />
+
+      {error && (
+        <div
+          role="alert"
+          className="fixed bottom-4 left-4 z-40 max-w-md rounded bg-red-600 px-3 py-2 text-xs text-white shadow-lg"
+        >
+          <div className="flex items-start gap-2">
+            <span className="flex-1 break-words">{error}</span>
+            <button
+              type="button"
+              onClick={clearError}
+              className="text-red-100 hover:text-white"
+              aria-label="关闭错误提示"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 

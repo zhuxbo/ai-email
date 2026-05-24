@@ -260,15 +260,15 @@ smtp_send(draft)                           -> SendReceipt        // explicit use
 
 Quality baseline (Tier 1+3) + Tauri scaffold + PG container via OrbStack.
 
-### Sprint 1 — Read-only inbox (S · ~3–4 days)
+### ✅ Sprint 1 — Read-only inbox (done, commits 2dfa20a → e024f92)
 
-- [ ] `0001_initial.sql` migration + sqlx-cli setup
-- [ ] Cargo deps: `sqlx`, `tokio`, `async-imap`, `lettre`, `secrecy`, `keyring`, `anyhow`, `thiserror`, `tracing`, `uuid`, `time`
-- [ ] `db::Pool` + run-migrations-on-boot
-- [ ] Add-account flow: UI form → `account_add` command → keychain + DB
-- [ ] `inbox_sync` for QQ — TLS, ID command, UID-based incremental
-- [ ] 3-pane shell + list view of last 50 INBOX rows
-- [ ] Detail view with body fetched on click
+- [x] `0001_initial.sql` migration + sqlx-cli setup
+- [x] Cargo deps: `sqlx`, `tokio`, `async-imap`, `secrecy`, `keyring`, `anyhow`, `thiserror`, `tracing`, `uuid`, `time` (lettre lands in Sprint 5 with the send path)
+- [x] `db::Pool` + run-migrations-on-boot
+- [x] Add-account flow: UI form → `account_add` command → keychain + DB
+- [x] `inbox_sync` for QQ — TLS, ID command, UID-based incremental
+- [x] 3-pane shell + list view of last 50 INBOX rows
+- [x] Detail view with body fetched on click
 
 **Done when:** add my QQ account → see latest 50 mails → click one → read body.
 
@@ -378,13 +378,13 @@ After **Sprint 5**:
 
 ## 11. Open questions
 
-| #   | Question                                                                                     | Decide by  |
-| --- | -------------------------------------------------------------------------------------------- | ---------- |
-| 1   | UI library — plain Tailwind, shadcn/ui, or none?                                             | Sprint 1.5 |
-| 2   | State management — Zustand vs Jotai vs Context+useReducer?                                   | Sprint 1.5 |
-| 3   | Migrations tool — `sqlx-cli` (recommended), `refinery`, or hand-rolled?                      | Sprint 1.1 |
-| 4   | AI system-prompt language — English (cheaper tokens) vs Chinese (better Chinese tone match)? | Sprint 2   |
-| 5   | Android sync model — foreground service every N min, or only on app open?                    | Sprint 7   |
+| #   | Question                                                                                     | Decide by                                     |
+| --- | -------------------------------------------------------------------------------------------- | --------------------------------------------- |
+| 1   | ~~UI library — plain Tailwind, shadcn/ui, or none?~~                                         | ✅ Tailwind 4, no shadcn (Sprint 1.5)         |
+| 2   | ~~State management — Zustand vs Jotai vs Context+useReducer?~~                               | ✅ Zustand 5 (Sprint 1.5)                     |
+| 3   | ~~Migrations tool — `sqlx-cli` (recommended), `refinery`, or hand-rolled?~~                  | ✅ sqlx-cli + `sqlx::migrate!()` (Sprint 1.1) |
+| 4   | AI system-prompt language — English (cheaper tokens) vs Chinese (better Chinese tone match)? | Sprint 2                                      |
+| 5   | Android sync model — foreground service every N min, or only on app open?                    | Sprint 7                                      |
 
 ## 12. Risks (with mitigations)
 
