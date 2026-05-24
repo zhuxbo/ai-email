@@ -67,6 +67,31 @@ pub async fn insert(pool: &Pool, input: &AccountInput) -> AppResult<Account> {
     Ok(row)
 }
 
+pub async fn get(pool: &Pool, id: Uuid) -> AppResult<Option<Account>> {
+    let row = sqlx::query_as::<_, Account>(
+        r#"
+        SELECT
+            id, email, display_name, provider,
+            imap_host, imap_port, smtp_host, smtp_port,
+            created_at, last_synced_at
+        FROM accounts
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
+pub async fn update_last_synced(pool: &Pool, id: Uuid) -> AppResult<()> {
+    sqlx::query("UPDATE accounts SET last_synced_at = NOW() WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn list(pool: &Pool) -> AppResult<Vec<Account>> {
     let rows = sqlx::query_as::<_, Account>(
         r#"

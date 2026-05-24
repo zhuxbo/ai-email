@@ -5,3 +5,4 @@
 //! so the UI gets one shape to render.
 
 pub mod accounts;
+pub mod mail;
