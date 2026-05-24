@@ -11,6 +11,7 @@ import type {
   Mailbox,
   MessageBody,
   MessageHeader,
+  SummaryResult,
   SyncReport,
 } from '../types';
 
@@ -24,9 +25,11 @@ interface MailState {
   messages: MessageHeader[];
   selectedMessageId: string | null;
   body: MessageBody | null;
+  summary: SummaryResult | null;
 
   syncing: boolean;
   loadingBody: boolean;
+  summarizing: boolean;
   error: string | null;
 
   loadAccounts: () => Promise<void>;
@@ -38,6 +41,7 @@ interface MailState {
 
   selectMailbox: (id: string) => Promise<void>;
   selectMessage: (id: string) => Promise<void>;
+  summarizeSelectedMessage: () => Promise<void>;
 
   clearError: () => void;
 }
@@ -67,9 +71,11 @@ export const useMailStore = create<MailState>((set, get) => ({
   messages: [],
   selectedMessageId: null,
   body: null,
+  summary: null,
 
   syncing: false,
   loadingBody: false,
+  summarizing: false,
   error: null,
 
   loadAccounts: async () => {
@@ -182,7 +188,9 @@ export const useMailStore = create<MailState>((set, get) => ({
   },
 
   selectMessage: async (id) => {
-    set({ selectedMessageId: id, body: null, loadingBody: true });
+    // Clear summary too — each message owns its own. Cache lookup on the backend means a
+    // second click on the same message round-trips against ai_results, not the API.
+    set({ selectedMessageId: id, body: null, summary: null, loadingBody: true });
     try {
       const body = await tauri.messageBody(id);
       if (get().selectedMessageId === id) {
@@ -192,6 +200,24 @@ export const useMailStore = create<MailState>((set, get) => ({
       set({ error: errMsg(e) });
     } finally {
       set({ loadingBody: false });
+    }
+  },
+
+  summarizeSelectedMessage: async () => {
+    const id = get().selectedMessageId;
+    if (id === null) return;
+    set({ summarizing: true, error: null });
+    try {
+      const summary = await tauri.aiSummarize(id);
+      // Drop the result if the user already switched away — late-arriving responses
+      // shouldn't repaint the panel for a different message.
+      if (get().selectedMessageId === id) {
+        set({ summary });
+      }
+    } catch (e) {
+      set({ error: errMsg(e) });
+    } finally {
+      set({ summarizing: false });
     }
   },
 

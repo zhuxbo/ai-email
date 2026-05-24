@@ -8,6 +8,7 @@ import { useMemo } from 'react';
 
 import { useMailStore } from '../lib/store/mail';
 import type { MessageHeader } from '../lib/types';
+import { AiPanel } from './ai-panel';
 
 function selectedMessage(messages: MessageHeader[], id: string | null): MessageHeader | null {
   if (id === null) return null;
@@ -80,6 +81,7 @@ export function MessageDetail() {
         {!loadingBody && !body && (
           <div className="text-sm text-slate-500">无法加载正文 — 检查左下角错误提示。</div>
         )}
+        <AiPanel />
       </div>
     </section>
   );
