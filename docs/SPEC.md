@@ -272,14 +272,14 @@ Quality baseline (Tier 1+3) + Tauri scaffold + PG container via OrbStack.
 
 **Done when:** add my QQ account → see latest 50 mails → click one → read body.
 
-### Sprint 2 — AI summary (S · ~2 days)
+### ✅ Sprint 2 — AI summary (done, commits fd440a0 + a43f41a)
 
-- [ ] `ai::AnthropicClient` with prompt caching (system prompt cached 5 min)
-- [ ] `ai_summarize` command (Sonnet 4.6)
-- [ ] `<AiPanel />` in detail view: button → result → token-count footer
-- [ ] `ai_results` cache lookup before API call
+- [x] `ai::AnthropicClient` with prompt caching (system prompt cached 5 min ephemeral)
+- [x] `ai_summarize` command (Sonnet 4.6)
+- [x] `<AiPanel />` in detail view: button → result → token-count footer
+- [x] `ai_results` cache lookup before API call (sha256 over system+user prompt)
 
-**Done when:** click "Summarize" → tldr + bullets in ≤3s; second call instant (cache hit).
+**Done when:** click "总结" → tldr + bullets in ≤3s; second call instant (cache hit).
 
 ### Sprint 3 — Classification + priority (M · ~3 days)
 
@@ -378,13 +378,13 @@ After **Sprint 5**:
 
 ## 11. Open questions
 
-| #   | Question                                                                                     | Decide by                                     |
-| --- | -------------------------------------------------------------------------------------------- | --------------------------------------------- |
-| 1   | ~~UI library — plain Tailwind, shadcn/ui, or none?~~                                         | ✅ Tailwind 4, no shadcn (Sprint 1.5)         |
-| 2   | ~~State management — Zustand vs Jotai vs Context+useReducer?~~                               | ✅ Zustand 5 (Sprint 1.5)                     |
-| 3   | ~~Migrations tool — `sqlx-cli` (recommended), `refinery`, or hand-rolled?~~                  | ✅ sqlx-cli + `sqlx::migrate!()` (Sprint 1.1) |
-| 4   | AI system-prompt language — English (cheaper tokens) vs Chinese (better Chinese tone match)? | Sprint 2                                      |
-| 5   | Android sync model — foreground service every N min, or only on app open?                    | Sprint 7                                      |
+| #   | Question                                                                                         | Decide by                                       |
+| --- | ------------------------------------------------------------------------------------------------ | ----------------------------------------------- |
+| 1   | ~~UI library — plain Tailwind, shadcn/ui, or none?~~                                             | ✅ Tailwind 4, no shadcn (Sprint 1.5)           |
+| 2   | ~~State management — Zustand vs Jotai vs Context+useReducer?~~                                   | ✅ Zustand 5 (Sprint 1.5)                       |
+| 3   | ~~Migrations tool — `sqlx-cli` (recommended), `refinery`, or hand-rolled?~~                      | ✅ sqlx-cli + `sqlx::migrate!()` (Sprint 1.1)   |
+| 4   | ~~AI system-prompt language — English (cheaper tokens) vs Chinese (better Chinese tone match)?~~ | ✅ 中文 (Sprint 2 — 用户读中文邮件，少一道翻译) |
+| 5   | Android sync model — foreground service every N min, or only on app open?                        | Sprint 7                                        |
 
 ## 12. Risks (with mitigations)
 
