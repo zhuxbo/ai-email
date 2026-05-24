@@ -9,7 +9,9 @@
 //! returns the public-facing struct for that table.
 
 pub mod accounts;
+pub mod ai_models;
 pub mod ai_results;
+pub mod ai_role_defaults;
 pub mod bodies;
 pub mod mailboxes;
 pub mod messages;
