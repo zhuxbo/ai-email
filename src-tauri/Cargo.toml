@@ -60,3 +60,27 @@ time = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"
 
 # ── Config / env ──────────────────────────────────────────
 dotenvy = "0.15"
+
+# ── Secrets ───────────────────────────────────────────────
+# `secrecy` wraps every string we shouldn't log; `expose_secret()` is the only
+# way to read it back. The serde feature isn't enabled — Tauri forms
+# deserialize into a plain `String` we wrap on the next line.
+secrecy = "0.10"
+
+# OS-native credential vault. Platform features are mutually exclusive on
+# native targets so we list one per `cfg`. Keep `default-features = false`
+# everywhere; the default set drags libsecret into macOS builds.
+[target.'cfg(target_os = "macos")'.dependencies.keyring]
+version = "3"
+default-features = false
+features = ["apple-native"]
+
+[target.'cfg(target_os = "windows")'.dependencies.keyring]
+version = "3"
+default-features = false
+features = ["windows-native"]
+
+[target.'cfg(target_os = "linux")'.dependencies.keyring]
+version = "3"
+default-features = false
+features = ["sync-secret-service", "crypto-rust"]

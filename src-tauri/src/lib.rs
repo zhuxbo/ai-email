@@ -3,8 +3,10 @@
 //! The frontend NEVER speaks to IMAP / SMTP / Anthropic / PG directly — every cross-process call
 //! lands on a `#[tauri::command]` exported from `crate::commands` (added per sprint).
 
+pub mod commands;
 pub mod db;
 pub mod error;
+pub mod keychain;
 
 use tauri::Manager;
 use tracing_subscriber::EnvFilter;
@@ -35,6 +37,11 @@ pub fn run() {
             tracing::info!("app state initialized");
             Ok(())
         })
+        .invoke_handler(tauri::generate_handler![
+            commands::accounts::accounts_list,
+            commands::accounts::account_add,
+            commands::accounts::account_remove,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

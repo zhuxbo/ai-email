@@ -4,6 +4,11 @@
 //! re-export so we can swap the underlying driver if needed. [`init`] reads `DATABASE_URL`, opens
 //! the pool, and runs every migration in `src-tauri/migrations/` exactly once via
 //! [`sqlx::migrate!`].
+//!
+//! Per-table repositories live in submodules (e.g. [`accounts`]). Each owns its own queries and
+//! returns the public-facing struct for that table.
+
+pub mod accounts;
 
 use std::env;
 use std::time::Duration;
