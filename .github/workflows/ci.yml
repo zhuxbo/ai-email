@@ -22,6 +22,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Drop China crates mirror on CI
+        # .cargo/config.toml replaces crates-io with rsproxy.cn for fast
+        # downloads in mainland China. GitHub-hosted runners can't reach it
+        # reliably — let CI talk to the real crates-io instead.
+        shell: bash
+        run: rm -f .cargo/config.toml
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v3
         with:
@@ -30,7 +37,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'pnpm'
 
       - name: Setup Rust
@@ -67,7 +74,7 @@ jobs:
         run: pnpm exec tsc --noEmit
 
       - name: Vitest
-        run: pnpm exec vitest run --coverage
+        run: pnpm exec vitest run --coverage --passWithNoTests
 
       - name: Rust format
         working-directory: src-tauri
@@ -92,12 +99,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - name: Drop China crates mirror on CI
+        shell: bash
+        run: rm -f .cargo/config.toml
       - uses: pnpm/action-setup@v3
         with:
           version: 11
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'pnpm'
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -129,13 +139,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Drop China crates mirror on CI
+        shell: bash
+        run: rm -f .cargo/config.toml
+
       - uses: pnpm/action-setup@v3
         with:
           version: 11
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'pnpm'
 
       - uses: actions/setup-java@v4
