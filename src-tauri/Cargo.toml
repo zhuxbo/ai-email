@@ -123,3 +123,12 @@ features = ["windows-native"]
 version = "3"
 default-features = false
 features = ["sync-secret-service", "crypto-rust"]
+
+# Android has no OS keychain reachable through the NDK FFI, so `keyring` ships no
+# Android backend. `android-keyring` bridges to the Android KeyStore + app-private
+# SharedPreferences over JNI and registers itself as keyring's default credential
+# builder (see `run()` in lib.rs), so `crate::keychain` compiles and runs unchanged.
+# Tauri Mobile already initializes ndk-context, so no Kotlin glue is required.
+[target.'cfg(target_os = "android")'.dependencies]
+keyring = { version = "3", default-features = false }
+android-keyring = "0.2"

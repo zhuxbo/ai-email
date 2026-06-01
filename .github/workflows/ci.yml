@@ -163,6 +163,16 @@ jobs:
         with:
           ndk-version: r26b
 
+      # Runner-preinstalled SDK only guarantees API 34+ after the 2026-01 image
+      # change; tauri's generated project targets compileSdk = 36. Install it
+      # explicitly so the build never depends on AGP's best-effort auto-download.
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK platform + build-tools (compileSdk = 36)
+        run: |
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android

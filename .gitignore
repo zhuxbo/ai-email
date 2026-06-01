@@ -8,7 +8,8 @@ target/
 
 # Tauri
 src-tauri/target/
-src-tauri/gen/
+# gen/schemas is auto-generated; gen/android is the committed Android project
+src-tauri/gen/schemas/
 src-tauri/WixTools/
 src-tauri/*.app
 
@@ -63,3 +64,4 @@ coverage/
 *.tsbuildinfo
 .lefthook-local.yml
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
