@@ -132,3 +132,13 @@ features = ["sync-secret-service", "crypto-rust"]
 [target.'cfg(target_os = "android")'.dependencies]
 keyring = { version = "3", default-features = false }
 android-keyring = "0.2"
+
+# Release profile tuned for binary size — the Android APK ships a Rust .so per ABI
+# (4 of them), so size matters there most. Shared by ALL targets incl. desktop:
+# strip/lto/opt-z shrink desktop binaries too. `panic = "abort"` also prevents
+# unwinding across the Tauri FFI boundary (CLAUDE.md: never panic across FFI).
+[profile.release]
+strip = true
+opt-level = "z"
+lto = true
+panic = "abort"

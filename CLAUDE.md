@@ -8,7 +8,7 @@ Keep this file short. When in doubt, ask the user.
 
 ## What this is
 
-AI-assisted email client. Tauri 2 desktop (macOS / Windows / Linux) + Android.
+AI-assisted email client. Tauri 2 desktop (macOS) + Android (arm64-v8a).
 Primary email provider: **QQ Mail** (IMAP/SMTP + authorization code).
 AI calls go to **Anthropic API** — Haiku 4.5 for classification, Sonnet 4.6 for summarization / translation / drafting, Opus 4.7 only for complex threads.
 
@@ -116,7 +116,7 @@ Pre-push adds:
 ## Security
 
 - Never commit `.env`, credentials, or anything matching `.gitleaks.toml`
-- QQ Mail auth code lives in OS keychain via the `keyring` crate (macOS Keychain / Windows Credential Manager / Android Keystore) — NEVER in plaintext config or DB
+- QQ Mail auth code lives in the OS keychain via the `keyring` crate (macOS Keychain; Android KeyStore via `android-keyring`) — NEVER in plaintext config or DB
 - Anthropic API key: dev = `.env` (gitignored), prod = OS keychain
 - All HTTP calls (IMAP / SMTP / Anthropic) use TLS — no exceptions
 
