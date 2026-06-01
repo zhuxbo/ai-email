@@ -32,6 +32,7 @@ dependencies = [
 name = "ai-email"
 version = "0.1.0"
 dependencies = [
+ "android-keyring",
  "anyhow",
  "async-imap",
  "dotenvy",
@@ -80,6 +81,20 @@ name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+
+[[package]]
+name = "android-keyring"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b051e1fab4f4c15e384424252c57321173b8fb274d50f30bd46145c35cd0a6a2"
+dependencies = [
+ "base64 0.22.1",
+ "jni",
+ "keyring",
+ "ndk-context",
+ "thiserror 2.0.18",
+ "tracing",
+]
 
 [[package]]
 name = "android_system_properties"
@@ -2578,6 +2593,12 @@ dependencies = [
  "raw-window-handle",
  "thiserror 1.0.69",
 ]
+
+[[package]]
+name = "ndk-context"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27b02d87554356db9e9a873add8782d4ea6e3e58ea071a9adb9a2e8ddb884a8b"
 
 [[package]]
 name = "ndk-sys"

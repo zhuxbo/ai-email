@@ -23,6 +23,13 @@ pub struct AppState {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Android has no NDK-reachable OS keychain, so `keyring` ships no Android backend.
+    // `android-keyring` bridges to the Android KeyStore over JNI and registers itself as
+    // keyring's default credential builder, so `crate::keychain` works unchanged on-device.
+    #[cfg(target_os = "android")]
+    android_keyring::set_android_keyring_credential_builder()
+        .expect("failed to register Android keyring credential builder");
+
     init_tracing();
     // Dev convenience: load .env so `DATABASE_URL` etc. are available. Failure is non-fatal —
     // in release builds env vars come from the OS / launchd.
