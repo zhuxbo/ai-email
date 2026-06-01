@@ -30,7 +30,7 @@ jobs:
         run: rm -f .cargo/config.toml
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v3
+        uses: pnpm/action-setup@v6
         with:
           version: 11
 
@@ -102,7 +102,7 @@ jobs:
       - name: Drop China crates mirror on CI
         shell: bash
         run: rm -f .cargo/config.toml
-      - uses: pnpm/action-setup@v3
+      - uses: pnpm/action-setup@v6
         with:
           version: 11
       - uses: actions/setup-node@v4
@@ -143,7 +143,7 @@ jobs:
         shell: bash
         run: rm -f .cargo/config.toml
 
-      - uses: pnpm/action-setup@v3
+      - uses: pnpm/action-setup@v6
         with:
           version: 11
 
