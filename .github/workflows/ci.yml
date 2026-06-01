@@ -19,7 +19,7 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Drop China crates mirror on CI
         # .cargo/config.toml replaces crates-io with rsproxy.cn for fast
@@ -82,7 +82,7 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Drop China crates mirror on CI
         shell: bash
         run: rm -f .cargo/config.toml
@@ -110,7 +110,7 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Drop China crates mirror on CI
         shell: bash

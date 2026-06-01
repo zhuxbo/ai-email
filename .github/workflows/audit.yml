@@ -25,7 +25,7 @@ jobs:
     name: pnpm audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: pnpm/action-setup@v3
         with:
           version: 11
@@ -42,7 +42,7 @@ jobs:
     name: cargo audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Drop China crates mirror on CI
         run: rm -f .cargo/config.toml
       - uses: dtolnay/rust-toolchain@stable
