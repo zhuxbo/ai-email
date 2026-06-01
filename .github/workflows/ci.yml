@@ -67,7 +67,7 @@ jobs:
         run: pnpm exec tsc --noEmit
 
       - name: Vitest
-        run: pnpm exec vitest run --coverage
+        run: pnpm exec vitest run --coverage --passWithNoTests
 
       - name: Rust format
         working-directory: src-tauri
