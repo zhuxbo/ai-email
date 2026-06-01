@@ -1,11 +1,9 @@
 name: Dependency Audit
 
-# Weekly cron + on dependency-manifest changes touching main / PRs targeting main.
-# Feature-branch pushes do NOT trigger this — keeps the Actions tab quiet during sprint
-# iteration. Reopen / push to main when you want a fresh audit.
+# Runs on dependency-manifest changes touching main + PRs targeting main, plus manual
+# dispatch. No cron — keeps the Actions tab quiet during sprint iteration; trigger a fresh
+# audit from the Actions tab (workflow_dispatch) or by touching a manifest on main.
 on:
-  schedule:
-    - cron: '0 0 * * 0' # Weekly Sunday 00:00 UTC
   workflow_dispatch:
   push:
     branches: [main]
@@ -33,7 +31,7 @@ jobs:
           version: 11
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
       - run: pnpm install --frozen-lockfile
       # `.npmrc` points at npmmirror for fast installs, but npmmirror doesn't implement the
       # audit endpoint. Override the registry just for this command so we hit the real one.
