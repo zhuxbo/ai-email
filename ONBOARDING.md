@@ -11,15 +11,14 @@ For the rules of engagement see [`CLAUDE.md`](CLAUDE.md).
 
 ## Prerequisites
 
-| Tool              | Install (macOS via Homebrew)                                                                           |
-| ----------------- | ------------------------------------------------------------------------------------------------------ |
-| Node 20+          | `brew install node`                                                                                    |
-| pnpm 9+           | `brew install pnpm`                                                                                    |
-| Rust (stable)     | `brew install rustup && rustup toolchain install stable --profile default && brew link --force rustup` |
-| OrbStack (Docker) | `brew install --cask orbstack`                                                                         |
-| lefthook          | `brew install lefthook`                                                                                |
-| gitleaks          | `brew install gitleaks`                                                                                |
-| jq                | `brew install jq` (usually pre-installed)                                                              |
+| Tool          | Install (macOS via Homebrew)                                                                           |
+| ------------- | ------------------------------------------------------------------------------------------------------ |
+| Node 20+      | `brew install node`                                                                                    |
+| pnpm 9+       | `brew install pnpm`                                                                                    |
+| Rust (stable) | `brew install rustup && rustup toolchain install stable --profile default && brew link --force rustup` |
+| lefthook      | `brew install lefthook`                                                                                |
+| gitleaks      | `brew install gitleaks`                                                                                |
+| jq            | `brew install jq` (usually pre-installed)                                                              |
 
 Optional for Android builds: Android Studio + NDK r26b, Java 17 (`brew install --cask android-studio temurin@17`).
 
@@ -41,16 +40,13 @@ pnpm install
 # 2. Install git hooks
 lefthook install
 
-# 3. Start local PostgreSQL 18 (via OrbStack)
-docker compose up -d postgres
-docker compose ps                  # verify "healthy"
-
-# 4. Set up env
+# 3. Set up env
 cp .env.example .env
 # Edit .env: add your Anthropic API key, and (dev only) QQ Mail credentials.
-# DATABASE_URL defaults already match the local compose container.
+# 数据库为本地 SQLite，首次启动 (pnpm tauri dev) 自动创建于 OS app-data 目录并
+# 跑 migrations，无需额外步骤。
 
-# 5. Verify everything is wired
+# 4. Verify everything is wired
 lefthook run pre-commit --all-files
 ```
 

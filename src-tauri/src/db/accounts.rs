@@ -45,16 +45,17 @@ pub async fn insert(pool: &Pool, input: &AccountInput) -> AppResult<Account> {
     let row = sqlx::query_as::<_, Account>(
         r#"
         INSERT INTO accounts (
-            email, display_name, provider,
+            id, email, display_name, provider,
             imap_host, imap_port, smtp_host, smtp_port
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
         RETURNING
             id, email, display_name, provider,
             imap_host, imap_port, smtp_host, smtp_port,
             created_at, last_synced_at
         "#,
     )
+    .bind(Uuid::new_v4())
     .bind(&input.email)
     .bind(&input.display_name)
     .bind(&input.provider)
@@ -75,7 +76,7 @@ pub async fn get(pool: &Pool, id: Uuid) -> AppResult<Option<Account>> {
             imap_host, imap_port, smtp_host, smtp_port,
             created_at, last_synced_at
         FROM accounts
-        WHERE id = $1
+        WHERE id = ?1
         "#,
     )
     .bind(id)
@@ -85,10 +86,12 @@ pub async fn get(pool: &Pool, id: Uuid) -> AppResult<Option<Account>> {
 }
 
 pub async fn update_last_synced(pool: &Pool, id: Uuid) -> AppResult<()> {
-    sqlx::query("UPDATE accounts SET last_synced_at = NOW() WHERE id = $1")
-        .bind(id)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE accounts SET last_synced_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') WHERE id = ?1",
+    )
+    .bind(id)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -109,7 +112,7 @@ pub async fn list(pool: &Pool) -> AppResult<Vec<Account>> {
 }
 
 pub async fn delete(pool: &Pool, id: Uuid) -> AppResult<()> {
-    sqlx::query("DELETE FROM accounts WHERE id = $1")
+    sqlx::query("DELETE FROM accounts WHERE id = ?1")
         .bind(id)
         .execute(pool)
         .await?;

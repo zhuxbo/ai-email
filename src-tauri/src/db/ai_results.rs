@@ -22,6 +22,8 @@ pub struct AiResult {
     pub kind: String,
     pub model: String,
     pub prompt_hash: String,
+    // Stored as JSON TEXT in SQLite; decoded back into a serde_json::Value.
+    #[sqlx(json)]
     pub output: serde_json::Value,
     pub input_tokens: Option<i32>,
     pub output_tokens: Option<i32>,
@@ -53,7 +55,7 @@ pub async fn get(
         SELECT id, message_id, kind, model, prompt_hash, output,
                input_tokens, output_tokens, cache_read_tokens, created_at
         FROM ai_results
-        WHERE message_id = $1 AND kind = $2 AND prompt_hash = $3
+        WHERE message_id = ?1 AND kind = ?2 AND prompt_hash = ?3
         "#,
     )
     .bind(message_id)
@@ -64,28 +66,29 @@ pub async fn get(
     Ok(row)
 }
 
-/// INSERT ... ON CONFLICT DO NOTHING. Returns the resulting row regardless of whether we
+/// INSERT ... ON CONFLICT DO UPDATE. Returns the resulting row regardless of whether we
 /// inserted or another caller raced us — useful so callers always have a stable AiResult to
 /// hand back to the UI.
 pub async fn insert(pool: &Pool, r: &AiResultInsert) -> AppResult<AiResult> {
     let row = sqlx::query_as::<_, AiResult>(
         r#"
         INSERT INTO ai_results (
-            message_id, kind, model, prompt_hash, output,
+            id, message_id, kind, model, prompt_hash, output,
             input_tokens, output_tokens, cache_read_tokens
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
         ON CONFLICT (message_id, kind, prompt_hash) DO UPDATE
-        SET output = EXCLUDED.output
+        SET output = excluded.output
         RETURNING id, message_id, kind, model, prompt_hash, output,
                   input_tokens, output_tokens, cache_read_tokens, created_at
         "#,
     )
+    .bind(Uuid::new_v4())
     .bind(r.message_id)
     .bind(&r.kind)
     .bind(&r.model)
     .bind(&r.prompt_hash)
-    .bind(&r.output)
+    .bind(r.output.to_string())
     .bind(r.input_tokens)
     .bind(r.output_tokens)
     .bind(r.cache_read_tokens)

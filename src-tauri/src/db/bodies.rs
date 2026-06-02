@@ -27,7 +27,7 @@ pub async fn get(pool: &Pool, message_id: Uuid) -> AppResult<Option<MessageBody>
         r#"
         SELECT message_id, text_plain, html, fetched_at
         FROM message_bodies
-        WHERE message_id = $1
+        WHERE message_id = ?1
         "#,
     )
     .bind(message_id)
@@ -41,11 +41,11 @@ pub async fn upsert(pool: &Pool, message_id: Uuid, body: &ParsedBody) -> AppResu
     let row = sqlx::query_as::<_, MessageBody>(
         r#"
         INSERT INTO message_bodies (message_id, text_plain, html)
-        VALUES ($1, $2, $3)
+        VALUES (?1, ?2, ?3)
         ON CONFLICT (message_id) DO UPDATE
-        SET text_plain = EXCLUDED.text_plain,
-            html       = EXCLUDED.html,
-            fetched_at = NOW()
+        SET text_plain = excluded.text_plain,
+            html       = excluded.html,
+            fetched_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
         RETURNING message_id, text_plain, html, fetched_at
         "#,
     )

@@ -1,9 +1,12 @@
-//! PostgreSQL access layer.
+//! SQLite access layer.
 //!
-//! [`Pool`] is a thin alias around [`sqlx::PgPool`]; the rest of the crate depends only on this
-//! re-export so we can swap the underlying driver if needed. [`init`] reads `DATABASE_URL`, opens
-//! the pool, and runs every migration in `src-tauri/migrations/` exactly once via
-//! [`sqlx::migrate!`].
+//! [`Pool`] is a thin alias around [`sqlx::SqlitePool`]; the rest of the crate depends only on
+//! this re-export. [`connect`] opens the on-disk database (creating the file + parent dir if
+//! missing), enables foreign keys, and runs every migration in `migrations/` exactly once.
+//!
+//! The DB file lives in the OS app-data dir (path resolved by the Tauri layer in `lib.rs`), so
+//! the app is zero-config: first launch creates and migrates the database automatically — no
+//! external server, no `DATABASE_URL`.
 //!
 //! Per-table repositories live in submodules (e.g. [`accounts`]). Each owns its own queries and
 //! returns the public-facing struct for that table.
@@ -18,39 +21,38 @@ pub mod message_tags;
 pub mod messages;
 pub mod send_log;
 
-use std::env;
-use std::time::Duration;
+use std::path::Path;
 
-use sqlx::postgres::PgPoolOptions;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 
-use crate::error::{AppError, AppResult};
+use crate::error::AppResult;
 
 /// Shared connection pool. Cloning is cheap (it's an `Arc`).
-pub type Pool = sqlx::PgPool;
+pub type Pool = sqlx::SqlitePool;
 
-/// Embeds every `.sql` file under `src-tauri/migrations/` at compile time, then applies any that
-/// the target DB hasn't seen. Idempotent.
+/// Embeds every `.sql` file under `migrations/` at compile time, then applies any that the
+/// target DB hasn't seen. Idempotent.
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
-/// Connect to Postgres and run pending migrations.
-///
-/// Reads `DATABASE_URL` from the process environment (populated from `.env` by the caller for dev).
-/// Returns an [`AppError::Config`] if it's unset so the UI surfaces a clear message rather than a
-/// generic connection failure.
-pub async fn init() -> AppResult<Pool> {
-    let url =
-        env::var("DATABASE_URL").map_err(|_| AppError::Config("DATABASE_URL not set".into()))?;
+/// Open the SQLite database at `db_path`, creating the file (and its parent directory) if
+/// missing, then run pending migrations. Foreign keys are enforced and WAL is enabled so the
+/// UI can read while a sync writes.
+pub async fn connect(db_path: &Path) -> AppResult<Pool> {
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
 
-    tracing::info!("connecting to database");
-    let pool = PgPoolOptions::new()
-        .max_connections(10)
-        .min_connections(1)
-        .acquire_timeout(Duration::from_secs(5))
-        .connect(&url)
+    let opts = SqliteConnectOptions::new()
+        .filename(db_path)
+        .create_if_missing(true)
+        .foreign_keys(true)
+        .journal_mode(SqliteJournalMode::Wal);
+
+    let pool = SqlitePoolOptions::new()
+        .max_connections(5)
+        .connect_with(opts)
         .await?;
 
-    tracing::info!("running migrations");
     MIGRATOR.run(&pool).await?;
-
     Ok(pool)
 }

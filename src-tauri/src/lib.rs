@@ -42,9 +42,12 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let pool = tauri::async_runtime::block_on(db::init())?;
+            // SQLite lives in the OS app-data dir — created + migrated on first launch, so the
+            // app is zero-config (no DATABASE_URL, no external server).
+            let db_path = app.path().app_data_dir()?.join("ai-email.db");
+            let pool = tauri::async_runtime::block_on(db::connect(&db_path))?;
             app.manage(AppState { db: pool });
-            tracing::info!("app state initialized");
+            tracing::info!(db_path = %db_path.display(), "app state initialized");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

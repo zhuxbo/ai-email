@@ -6,11 +6,12 @@
 ## 0. Prerequisites
 
 ```bash
-docker compose up -d postgres                          # PG 18 on :5432
 cp .env.example .env                                   # if not already
-# Edit .env if you need to override DATABASE_URL — defaults match docker-compose
 pnpm tauri dev                                         # launches the desktop app
 ```
+
+The database is a local SQLite file, created automatically on first launch in the
+OS app-data directory — no DATABASE_URL, no docker, no external service.
 
 You'll also need:
 
@@ -78,10 +79,10 @@ chips matching your selection.
 6. Edit the body / subject / To as needed.
 7. Click **发送**. Confirm the popup.
 8. Expected: success toast with `send_log <8-char-id>` appears, modal closes.
-9. Verify in PG:
+9. Verify in the SQLite DB:
    ```bash
-   docker exec ai-email-pg psql -U aiemail -d ai_email_dev \
-     -c "SELECT id, subject, ai_assisted, smtp_response FROM send_log ORDER BY sent_at DESC LIMIT 5;"
+   sqlite3 "$HOME/Library/Application Support/com.zhuxbo.aiemail/ai-email.db" \
+     "SELECT subject, ai_assisted, smtp_response FROM send_log ORDER BY sent_at DESC LIMIT 5;"
    ```
    You should see your row, with `smtp_response` containing the SMTP code.
 10. Open your own inbox in another client — the reply should be there.
