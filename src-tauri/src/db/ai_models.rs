@@ -35,11 +35,12 @@ pub struct AiModelInput {
 pub async fn insert(pool: &Pool, input: &AiModelInput) -> AppResult<AiModel> {
     let row = sqlx::query_as::<_, AiModel>(
         r#"
-        INSERT INTO ai_models (display_name, provider, model_id, base_url)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO ai_models (id, display_name, provider, model_id, base_url)
+        VALUES (?1, ?2, ?3, ?4, ?5)
         RETURNING id, display_name, provider, model_id, base_url, created_at
         "#,
     )
+    .bind(Uuid::new_v4())
     .bind(&input.display_name)
     .bind(&input.provider)
     .bind(&input.model_id)
@@ -54,7 +55,7 @@ pub async fn get(pool: &Pool, id: Uuid) -> AppResult<Option<AiModel>> {
         r#"
         SELECT id, display_name, provider, model_id, base_url, created_at
         FROM ai_models
-        WHERE id = $1
+        WHERE id = ?1
         "#,
     )
     .bind(id)
@@ -76,12 +77,12 @@ pub async fn list(pool: &Pool) -> AppResult<Vec<AiModel>> {
     Ok(rows)
 }
 
-/// Delete the row. The `ai_role_defaults` FK has ON DELETE RESTRICT — Postgres errors out
+/// Delete the row. The `ai_role_defaults` FK has ON DELETE RESTRICT — SQLite errors out
 /// (and so do we) if any role still points here. The caller (UI) is expected to reassign
 /// first; we surface the FK error verbatim so the user sees "this model is still the
 /// default for: summary" rather than a generic failure.
 pub async fn delete(pool: &Pool, id: Uuid) -> AppResult<()> {
-    sqlx::query("DELETE FROM ai_models WHERE id = $1")
+    sqlx::query("DELETE FROM ai_models WHERE id = ?1")
         .bind(id)
         .execute(pool)
         .await?;

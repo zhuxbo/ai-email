@@ -34,8 +34,8 @@ pub async fn set(pool: &Pool, role: &str, model_id: Uuid) -> AppResult<()> {
     sqlx::query(
         r#"
         INSERT INTO ai_role_defaults (role, model_id)
-        VALUES ($1, $2)
-        ON CONFLICT (role) DO UPDATE SET model_id = EXCLUDED.model_id
+        VALUES (?1, ?2)
+        ON CONFLICT (role) DO UPDATE SET model_id = excluded.model_id
         "#,
     )
     .bind(role)
@@ -46,7 +46,7 @@ pub async fn set(pool: &Pool, role: &str, model_id: Uuid) -> AppResult<()> {
 }
 
 pub async fn clear(pool: &Pool, role: &str) -> AppResult<()> {
-    sqlx::query("DELETE FROM ai_role_defaults WHERE role = $1")
+    sqlx::query("DELETE FROM ai_role_defaults WHERE role = ?1")
         .bind(role)
         .execute(pool)
         .await?;
@@ -62,7 +62,7 @@ pub async fn resolve_model(pool: &Pool, role: &str) -> AppResult<Option<AiModel>
         SELECT m.id, m.display_name, m.provider, m.model_id, m.base_url, m.created_at
         FROM ai_role_defaults d
         JOIN ai_models m ON m.id = d.model_id
-        WHERE d.role = $1
+        WHERE d.role = ?1
         "#,
     )
     .bind(role)

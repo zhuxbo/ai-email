@@ -13,7 +13,7 @@ This document is the single source of truth for _what_ we're building. `CLAUDE.m
 Email overhead — triage, reading long threads, multilingual senders, drafting replies — eats focus time. Off-the-shelf clients can't be customised to a personal workflow, and most cloud-AI email products send everything you read into a third-party server. This client:
 
 - runs on your own desktop (and later Android),
-- stores email in **your** Postgres (dev = local docker; prod = your managed PG),
+- stores email in a **local SQLite** database on your own device (zero-config, offline),
 - calls **Claude API directly** with prompt caching, and
 - **never auto-sends** at MVP — every reply gets human review.
 
@@ -51,77 +51,80 @@ Email overhead — triage, reading long threads, multilingual senders, drafting 
 │  imap/      async-imap → fetch headers / bodies   │
 │  smtp/      lettre     → send drafts              │
 │  ai/        reqwest    → Anthropic + prompt cache │
-│  db/        sqlx       → PostgreSQL 18            │
+│  db/        sqlx       → SQLite (embedded)        │
 │  keychain/  keyring    → OS-native credential vault│
 │  commands/  #[tauri::command] handlers (API)      │
 └───────────────────────┬───────────────────────────┘
                         │ TLS
-       ┌────────────────┼────────────────┐
-       ▼                ▼                ▼
-   QQ IMAP/SMTP    Anthropic API     PostgreSQL 18
-                                     (dev: docker / prod: managed)
+       ┌────────────────┴────────────────┐
+       ▼                                 ▼
+   QQ IMAP/SMTP                     Anthropic API
+
+   SQLite (embedded, local file in OS app-data dir — no network)
 ```
 
 ### Architectural rules
 
-1. **All I/O in Rust.** The frontend never speaks IMAP / SMTP / Anthropic / PG directly. Tauri commands are the only API surface.
-2. **PostgreSQL, not SQLite.** Decided 2026-05-23 for dev↔prod parity and eventual multi-device sync via the same remote PG.
+1. **All I/O in Rust.** The frontend never speaks IMAP / SMTP / Anthropic / DB directly. Tauri commands are the only API surface.
+2. **SQLite, not PostgreSQL.** `2026-06-02 由 PostgreSQL 改为 SQLite`（原 2026-05-23 选 PG）。理由：开箱即用——嵌入式本地库，零配置、离线、用户无需自建任何数据库服务；桌面与移动端（Android）用本地嵌入式存储是标准做法，手机 app 也无法直连远程 PG。多设备同步降级为未来可选项（如需，可在 SQLite 之上加一层同步），不再作为选型理由。
 3. **No third-party AI wrappers.** Direct `reqwest` calls to Anthropic give full control over prompt caching, model routing, retry.
 4. **Credentials never in DB or config.** All auth codes / API keys live in OS keychain via `keyring` crate.
 5. **Tauri 2 over Electron.** Smaller bundle, native menus, and Tauri 2 mobile is the planned Android port path.
 
 ## 3. Data model (v1)
 
-Migrations live in `src-tauri/migrations/`. Initial migration is `0001_initial.sql`:
+Migrations live in `src-tauri/migrations/` (SQLite dialect). Initial migration is `0001_initial.sql`.
+
+SQLite mapping vs the original PostgreSQL types: `UUID → BLOB` (16 bytes, generated app-side via `Uuid::new_v4()` — no `gen_random_uuid()`); `TIMESTAMPTZ → TEXT` (RFC3339/UTC, DB default via `strftime`); `TEXT[] → TEXT` (JSON array); `JSONB → TEXT` (JSON value); `BOOL → INTEGER` (0/1). Tables / columns / constraints / semantics are unchanged.
 
 ```sql
 -- Email accounts. Credentials live in OS keychain keyed by accounts.id —
 -- this table holds only non-secret metadata.
 CREATE TABLE accounts (
-  id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  email           TEXT        NOT NULL UNIQUE,
+  id              BLOB    PRIMARY KEY,
+  email           TEXT    NOT NULL UNIQUE,
   display_name    TEXT,
-  provider        TEXT        NOT NULL,    -- 'qq' | '163' | 'gmail' | 'outlook' | 'imap'
-  imap_host       TEXT        NOT NULL,
-  imap_port       INT         NOT NULL DEFAULT 993,
-  smtp_host       TEXT        NOT NULL,
-  smtp_port       INT         NOT NULL DEFAULT 465,
-  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  last_synced_at  TIMESTAMPTZ
+  provider        TEXT    NOT NULL,    -- 'qq' | '163' | 'gmail' | 'outlook' | 'imap'
+  imap_host       TEXT    NOT NULL,
+  imap_port       INTEGER NOT NULL DEFAULT 993,
+  smtp_host       TEXT    NOT NULL,
+  smtp_port       INTEGER NOT NULL DEFAULT 465,
+  created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
+  last_synced_at  TEXT
 );
 
 -- IMAP folders, mirrored per account.
 CREATE TABLE mailboxes (
-  id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  account_id      UUID        NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-  name            TEXT        NOT NULL,                  -- 'INBOX' | '已发送' | '收件箱' …
+  id              BLOB    PRIMARY KEY,
+  account_id      BLOB    NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  name            TEXT    NOT NULL,                  -- 'INBOX' | '已发送' | '收件箱' …
   delimiter       TEXT,
-  uid_validity    BIGINT,
-  uid_next        BIGINT,
-  last_synced_at  TIMESTAMPTZ,
+  uid_validity    INTEGER,
+  uid_next        INTEGER,
+  last_synced_at  TEXT,
   UNIQUE (account_id, name)
 );
 
 -- Header-only rows, keyed by IMAP UID. Bodies live in message_bodies.
 CREATE TABLE messages (
-  id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  account_id      UUID        NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-  mailbox_id      UUID        NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
-  imap_uid        BIGINT      NOT NULL,
+  id              BLOB    PRIMARY KEY,
+  account_id      BLOB    NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  mailbox_id      BLOB    NOT NULL REFERENCES mailboxes(id) ON DELETE CASCADE,
+  imap_uid        INTEGER NOT NULL,
   rfc_message_id  TEXT,       -- RFC 822 Message-ID
   thread_id       TEXT,       -- derived from References / In-Reply-To
   subject         TEXT,
   from_addr       TEXT,
-  to_addrs        TEXT[],
-  cc_addrs        TEXT[],
-  sent_at         TIMESTAMPTZ,
-  internal_date   TIMESTAMPTZ,
-  flags           TEXT[]      NOT NULL DEFAULT '{}',     -- '\Seen' | '\Flagged' …
-  size_bytes      INT,
-  has_attachment  BOOL        NOT NULL DEFAULT FALSE,
-  snippet         TEXT,                                  -- first ~200 chars, for list view
-  priority        INT,                                   -- 1=top, 2=med, 3=low; NULL = unset
-  body_fetched_at TIMESTAMPTZ,
+  to_addrs        TEXT    NOT NULL DEFAULT '[]',     -- JSON array of strings
+  cc_addrs        TEXT    NOT NULL DEFAULT '[]',     -- JSON array of strings
+  sent_at         TEXT,
+  internal_date   TEXT,
+  flags           TEXT    NOT NULL DEFAULT '[]',     -- JSON array, e.g. ["\\Seen","\\Flagged"]
+  size_bytes      INTEGER,
+  has_attachment  INTEGER NOT NULL DEFAULT 0,        -- 0/1 boolean
+  snippet         TEXT,                              -- first ~200 chars, for list view
+  priority        INTEGER,                           -- 1=top, 2=med, 3=low; NULL = unset
+  body_fetched_at TEXT,
   UNIQUE (account_id, mailbox_id, imap_uid)
 );
 
@@ -130,24 +133,24 @@ CREATE INDEX idx_messages_thread       ON messages (thread_id);
 
 -- Bodies are big; lazy-fetch & cache.
 CREATE TABLE message_bodies (
-  message_id      UUID        PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+  message_id      BLOB PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
   text_plain      TEXT,
   html            TEXT,
-  fetched_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  fetched_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now'))
 );
 
 -- AI outputs. prompt_hash dedupes identical inputs (free cache hit).
 CREATE TABLE ai_results (
-  id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  message_id        UUID        NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-  kind              TEXT        NOT NULL,   -- 'summary' | 'translate' | 'classify' | 'draft'
-  model             TEXT        NOT NULL,   -- 'claude-haiku-4-5' | 'claude-sonnet-4-6' …
-  prompt_hash       TEXT        NOT NULL,   -- sha256(system + user_input)
-  output            JSONB       NOT NULL,
-  input_tokens      INT,
-  output_tokens     INT,
-  cache_read_tokens INT,
-  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  id                BLOB    PRIMARY KEY,
+  message_id        BLOB    NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  kind              TEXT    NOT NULL,   -- 'summary' | 'translate' | 'classify' | 'draft'
+  model             TEXT    NOT NULL,   -- 'claude-haiku-4-5' | 'claude-sonnet-4-6' …
+  prompt_hash       TEXT    NOT NULL,   -- sha256(system + user_input)
+  output            TEXT    NOT NULL,   -- JSON value
+  input_tokens      INTEGER,
+  output_tokens     INTEGER,
+  cache_read_tokens INTEGER,
+  created_at        TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
   UNIQUE (message_id, kind, prompt_hash)
 );
 
@@ -155,28 +158,28 @@ CREATE INDEX idx_ai_results_message ON ai_results (message_id);
 
 -- Tags (AI- or user-applied).
 CREATE TABLE message_tags (
-  message_id  UUID        NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-  tag         TEXT        NOT NULL,
-  source      TEXT        NOT NULL,   -- 'ai' | 'user'
-  confidence  REAL,                   -- 0..1 for AI, NULL for user
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  message_id  BLOB NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+  tag         TEXT NOT NULL,
+  source      TEXT NOT NULL,   -- 'ai' | 'user'
+  confidence  REAL,            -- 0..1 for AI, NULL for user
+  created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
   PRIMARY KEY (message_id, tag)
 );
 
 -- Audit log of every outbound SMTP send. Mandatory at MVP.
 CREATE TABLE send_log (
-  id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  account_id      UUID        NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-  in_reply_to     UUID        REFERENCES messages(id),
-  to_addrs        TEXT[]      NOT NULL,
-  subject         TEXT        NOT NULL,
-  ai_assisted     BOOL        NOT NULL,
-  sent_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  id              BLOB    PRIMARY KEY,
+  account_id      BLOB    NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  in_reply_to     BLOB    REFERENCES messages(id),
+  to_addrs        TEXT    NOT NULL DEFAULT '[]',     -- JSON array of strings
+  subject         TEXT    NOT NULL,
+  ai_assisted     INTEGER NOT NULL,                  -- 0/1 boolean
+  sent_at         TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
   smtp_response   TEXT
 );
 ```
 
-### AI output shapes (JSONB)
+### AI output shapes (JSON)
 
 | `kind`      | Shape                                                                                                 |
 | ----------- | ----------------------------------------------------------------------------------------------------- |
@@ -210,7 +213,7 @@ CREATE TABLE send_log (
 
 ### `src-tauri/src/db/`
 
-- `Pool` = `sqlx::PgPool`, 5–10 connections at MVP.
+- `Pool` = `sqlx::SqlitePool` over a local DB file in the OS app-data dir; created + migrated on first launch by `db::connect`.
 - Repositories: `AccountRepo`, `MessageRepo`, `AiRepo`, `TagRepo`, `SendLogRepo`.
 - `sqlx::migrate!()` macro runs migrations on app startup.
 
@@ -258,7 +261,7 @@ smtp_send(draft)                           -> SendReceipt        // explicit use
 
 ### ✅ Sprint 0 — Bootstrap (done, commit `d11d96f`)
 
-Quality baseline (Tier 1+3) + Tauri scaffold + PG container via OrbStack.
+Quality baseline (Tier 1+3) + Tauri scaffold + embedded SQLite (auto-created on first launch).
 
 ### ✅ Sprint 1 — Read-only inbox (done, commits 2dfa20a → e024f92)
 
@@ -354,7 +357,7 @@ hits ai_results cache (separate entry per target language).
 - Auto-reply with whitelist + templates (the original 全自动 feature, gated)
 - 163 / Gmail OAuth providers
 - iOS port
-- Cross-device sync via shared remote PG
+- Cross-device sync (optional sync layer on top of local SQLite)
 - Bundle-size + perf budget enforcement
 
 ## 7. MVP definition of done
@@ -386,8 +389,8 @@ After **Sprint 5**:
 
 - **Credentials:** OS keychain via `keyring` crate. NEVER in DB or config.
 - **Anthropic API key:** dev = `.env` (gitignored); prod = OS keychain.
-- **TLS-only:** IMAP `:993`, SMTP `:465`, Anthropic HTTPS, PG over TLS in prod. No fallback.
-- **Local dev PG password:** plaintext in `docker-compose.yml` is OK — port `5432` is bound to localhost only.
+- **TLS-only:** IMAP `:993`, SMTP `:465`, Anthropic HTTPS. No fallback.
+- **Local SQLite file:** lives in the OS app-data dir; never network-exposed. No DB password to manage.
 - **Audit log:** every SMTP send (`send_log`); every AI call (`ai_results`); every account add/remove (server log via `tracing`).
 - **gitleaks:** pre-commit + CI scan; custom rules for QQ 授权码 + `sk-ant-*`.
 - **No auto-send at MVP.** Hard rule. Auto-reply waits until Sprint 8 with whitelist + audit.
@@ -395,7 +398,7 @@ After **Sprint 5**:
 ## 10. Testing strategy
 
 - **Rust unit:** `#[cfg(test)] mod tests` next to source; ≥70 % coverage at Sprint 3 close (`cargo-llvm-cov`).
-- **Rust integration:** `src-tauri/tests/` using `testcontainers` for PG + a custom in-memory IMAP fixture (NEVER real QQ).
+- **Rust integration:** `src-tauri/tests/` using a temp-file (or in-memory) SQLite DB + a custom in-memory IMAP fixture (NEVER real QQ).
 - **TS unit:** `vitest` + React Testing Library, ≥60 % coverage at Sprint 3 close.
 - **AI prompt regression:** fixture inputs → semantic-match outputs via embedding similarity. NEVER literal string compare. Runs on every PR touching `ai/`.
 - **E2E (post-MVP):** Playwright against the Tauri dev server. Deferred.
@@ -433,7 +436,7 @@ ai-email/
 │   │   └── store/                         zustand stores, one per domain
 │   └── main.tsx
 ├── src-tauri/
-│   ├── migrations/                        sqlx-cli managed
+│   ├── migrations/                        sqlx-cli managed (SQLite)
 │   │   └── 0001_initial.sql
 │   ├── src/
 │   │   ├── imap/
@@ -447,7 +450,6 @@ ai-email/
 │   └── tests/                             integration tests
 ├── .github/                               CI workflows, dependabot
 ├── .claude/                               PostToolUse + Stop hooks
-├── docker-compose.yml                     local PG 18 via OrbStack
 ├── CLAUDE.md                              constitution
 └── ONBOARDING.md                          quick-start
 ```

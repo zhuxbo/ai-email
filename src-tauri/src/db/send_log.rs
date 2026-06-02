@@ -17,6 +17,8 @@ pub struct SendLog {
     pub id: Uuid,
     pub account_id: Uuid,
     pub in_reply_to: Option<Uuid>,
+    // Stored as JSON TEXT in SQLite (no native array type).
+    #[sqlx(json)]
     pub to_addrs: Vec<String>,
     pub subject: String,
     pub ai_assisted: bool,
@@ -39,16 +41,17 @@ pub async fn insert(pool: &Pool, row: &SendLogInsert) -> AppResult<SendLog> {
     let stored = sqlx::query_as::<_, SendLog>(
         r#"
         INSERT INTO send_log (
-            account_id, in_reply_to, to_addrs, subject, ai_assisted, smtp_response
+            id, account_id, in_reply_to, to_addrs, subject, ai_assisted, smtp_response
         )
-        VALUES ($1, $2, $3, $4, $5, $6)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
         RETURNING id, account_id, in_reply_to, to_addrs, subject, ai_assisted,
                   sent_at, smtp_response
         "#,
     )
+    .bind(Uuid::new_v4())
     .bind(row.account_id)
     .bind(row.in_reply_to)
-    .bind(&row.to_addrs)
+    .bind(serde_json::to_string(&row.to_addrs)?)
     .bind(&row.subject)
     .bind(row.ai_assisted)
     .bind(&row.smtp_response)

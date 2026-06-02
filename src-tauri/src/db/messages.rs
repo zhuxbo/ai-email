@@ -2,8 +2,11 @@
 //! and are populated lazily on the first detail-view click (Sprint 1.4). AI-derived tags
 //! live in `message_tags` and are joined into the returned `MessageHeader` (Sprint 3).
 //!
-//! IMAP UIDs are u32 on the wire but stored as BIGINT in PG (room for higher-UID providers).
-//! The `i64` ↔ `u32` cast at the boundary is widening so always safe.
+//! IMAP UIDs are u32 on the wire but stored as INTEGER in SQLite (room for higher-UID
+//! providers). The `i64` ↔ `u32` cast at the boundary is widening so always safe.
+//!
+//! Array columns (to_addrs / cc_addrs / flags) and the aggregated `tags` are JSON TEXT,
+//! decoded with `#[sqlx(json)]` — SQLite has no native array type.
 
 use serde::Serialize;
 use sqlx::FromRow;
@@ -24,12 +27,15 @@ pub struct MessageHeader {
     pub thread_id: Option<String>,
     pub subject: Option<String>,
     pub from_addr: Option<String>,
+    #[sqlx(json)]
     pub to_addrs: Vec<String>,
+    #[sqlx(json)]
     pub cc_addrs: Vec<String>,
     #[serde(with = "time::serde::rfc3339::option")]
     pub sent_at: Option<OffsetDateTime>,
     #[serde(with = "time::serde::rfc3339::option")]
     pub internal_date: Option<OffsetDateTime>,
+    #[sqlx(json)]
     pub flags: Vec<String>,
     pub size_bytes: Option<i32>,
     pub has_attachment: bool,
@@ -38,6 +44,7 @@ pub struct MessageHeader {
     /// AI-assigned bucket: 'personal' | 'work' | 'notification' | 'promotion' | 'spam'.
     pub category: Option<String>,
     /// All user + AI tags. Populated via `LEFT JOIN message_tags` in every SELECT.
+    #[sqlx(json)]
     pub tags: Vec<String>,
     #[serde(with = "time::serde::rfc3339::option")]
     pub body_fetched_at: Option<OffsetDateTime>,
@@ -66,13 +73,13 @@ pub struct MessageInsert {
 
 /// `SELECT ... LEFT JOIN message_tags ...` projection used by both `get` and
 /// `list_in_mailbox`. Keeping the column order identical across both saves repeating the
-/// projection logic and lets `FromRow` derive Just Work.
+/// projection logic and lets `FromRow` derive Just Work. `json_group_array` aggregates the
+/// joined tags into a JSON array (SQLite's equivalent of PG's `array_agg`).
 const SELECT_COLUMNS: &str = r#"
     m.id, m.account_id, m.mailbox_id, m.imap_uid, m.rfc_message_id, m.thread_id,
     m.subject, m.from_addr, m.to_addrs, m.cc_addrs, m.sent_at, m.internal_date,
     m.flags, m.size_bytes, m.has_attachment, m.snippet, m.priority, m.category,
-    COALESCE(array_agg(t.tag ORDER BY t.tag) FILTER (WHERE t.tag IS NOT NULL),
-             ARRAY[]::TEXT[]) AS tags,
+    COALESCE(json_group_array(t.tag) FILTER (WHERE t.tag IS NOT NULL), '[]') AS tags,
     m.body_fetched_at
 "#;
 
@@ -83,15 +90,16 @@ pub async fn insert(pool: &Pool, m: &MessageInsert) -> AppResult<Option<Uuid>> {
     let id = sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO messages (
-            account_id, mailbox_id, imap_uid, rfc_message_id, thread_id,
+            id, account_id, mailbox_id, imap_uid, rfc_message_id, thread_id,
             subject, from_addr, to_addrs, cc_addrs, sent_at,
             internal_date, flags, size_bytes, has_attachment, snippet
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
         ON CONFLICT (account_id, mailbox_id, imap_uid) DO NOTHING
         RETURNING id
         "#,
     )
+    .bind(Uuid::new_v4())
     .bind(m.account_id)
     .bind(m.mailbox_id)
     .bind(m.imap_uid)
@@ -99,11 +107,11 @@ pub async fn insert(pool: &Pool, m: &MessageInsert) -> AppResult<Option<Uuid>> {
     .bind(&m.thread_id)
     .bind(&m.subject)
     .bind(&m.from_addr)
-    .bind(&m.to_addrs)
-    .bind(&m.cc_addrs)
+    .bind(serde_json::to_string(&m.to_addrs)?)
+    .bind(serde_json::to_string(&m.cc_addrs)?)
     .bind(m.sent_at)
     .bind(m.internal_date)
-    .bind(&m.flags)
+    .bind(serde_json::to_string(&m.flags)?)
     .bind(m.size_bytes)
     .bind(m.has_attachment)
     .bind(&m.snippet)
@@ -118,7 +126,7 @@ pub async fn get(pool: &Pool, id: Uuid) -> AppResult<Option<MessageHeader>> {
         SELECT {SELECT_COLUMNS}
         FROM messages m
         LEFT JOIN message_tags t ON t.message_id = m.id
-        WHERE m.id = $1
+        WHERE m.id = ?1
         GROUP BY m.id
         "#
     );
@@ -141,10 +149,10 @@ pub async fn mark_body_fetched(
     sqlx::query(
         r#"
         UPDATE messages
-        SET has_attachment = $2,
-            snippet        = COALESCE($3, snippet),
-            body_fetched_at = NOW()
-        WHERE id = $1
+        SET has_attachment = ?2,
+            snippet        = COALESCE(?3, snippet),
+            body_fetched_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+        WHERE id = ?1
         "#,
     )
     .bind(id)
@@ -167,9 +175,9 @@ pub async fn update_classification(
     sqlx::query(
         r#"
         UPDATE messages
-        SET priority = $2,
-            category = $3
-        WHERE id = $1
+        SET priority = ?2,
+            category = ?3
+        WHERE id = ?1
         "#,
     )
     .bind(id)
@@ -194,21 +202,26 @@ pub async fn fetch_for_classify(pool: &Pool, ids: &[Uuid]) -> AppResult<Vec<Clas
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let rows = sqlx::query_as::<_, ClassifyInput>(
+    // SQLite has no `= ANY($1)`; build an `IN (?, ?, …)` list and bind each id in turn.
+    let placeholders = vec!["?"; ids.len()].join(", ");
+    let sql = format!(
         r#"
         SELECT id, subject, from_addr, snippet
         FROM messages
-        WHERE id = ANY($1)
-        "#,
-    )
-    .bind(ids)
-    .fetch_all(pool)
-    .await?;
+        WHERE id IN ({placeholders})
+        "#
+    );
+    let mut query = sqlx::query_as::<_, ClassifyInput>(&sql);
+    for id in ids {
+        query = query.bind(id);
+    }
+    let rows = query.fetch_all(pool).await?;
     Ok(rows)
 }
 
-/// List by mailbox, most recent first. `sent_at DESC NULLS LAST` keeps undated junk at the
-/// bottom; the secondary `imap_uid DESC` makes the order deterministic when timestamps tie.
+/// List by mailbox, most recent first. SQLite sorts NULLs last under `DESC` by default, so
+/// undated junk falls to the bottom; the secondary `imap_uid DESC` makes the order
+/// deterministic when timestamps tie.
 pub async fn list_in_mailbox(
     pool: &Pool,
     mailbox_id: Uuid,
@@ -220,10 +233,10 @@ pub async fn list_in_mailbox(
         SELECT {SELECT_COLUMNS}
         FROM messages m
         LEFT JOIN message_tags t ON t.message_id = m.id
-        WHERE m.mailbox_id = $1
+        WHERE m.mailbox_id = ?1
         GROUP BY m.id
-        ORDER BY m.sent_at DESC NULLS LAST, m.imap_uid DESC
-        LIMIT $2 OFFSET $3
+        ORDER BY m.sent_at DESC, m.imap_uid DESC
+        LIMIT ?2 OFFSET ?3
         "#
     );
     let rows = sqlx::query_as::<_, MessageHeader>(&sql)

@@ -22,7 +22,7 @@ ai-email/
 │       ├── imap/             # IMAP client + parsing
 │       ├── smtp/             # SMTP send
 │       ├── ai/               # Anthropic client + prompts
-│       ├── db/               # PostgreSQL layer (sqlx + migrations)
+│       ├── db/               # SQLite layer (sqlx + migrations)
 │       └── commands/         # #[tauri::command] handlers
 ├── .github/                  # CI workflows, dependabot, PR template
 ├── .claude/                  # Claude Code settings + hooks
@@ -35,7 +35,7 @@ ai-email/
 - **Tauri 2** — no Electron, no separate web server
 - **React + TypeScript**, strict mode everywhere
 - **Rust** for the core (IMAP / SMTP / DB / AI / Tauri commands)
-- **PostgreSQL 18** via `sqlx` (dev: local docker via OrbStack; prod: managed PG over TLS)
+- **SQLite** via `sqlx` (embedded, bundled libsqlite3 — no server). DB file lives in the OS app-data dir, created + migrated on first launch → zero-config, offline, works on desktop + Android
 - **`async-imap`** + **`lettre`** for mail
 - **Anthropic API** via `reqwest` (no third-party AI wrappers)
 - **pnpm** as package manager (NOT npm or yarn)

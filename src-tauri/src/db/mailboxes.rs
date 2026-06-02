@@ -1,6 +1,6 @@
 //! Repository for the `mailboxes` table — per-account IMAP folder metadata.
 //!
-//! `uid_next` and `uid_validity` drive incremental sync. They're stored as `BIGINT` in PG so
+//! `uid_next` and `uid_validity` drive incremental sync. They're stored as INTEGER in SQLite so
 //! we accept and return `i64` here even though IMAP wire UIDs fit in u32.
 
 use serde::Serialize;
@@ -26,16 +26,18 @@ pub struct Mailbox {
 }
 
 /// Insert-or-no-op based on `(account_id, name)`. Refreshes `delimiter` since servers can in
-/// principle return a different value (rare, but cheap to handle).
+/// principle return a different value (rare, but cheap to handle). A fresh UUID is supplied for
+/// the insert path; on conflict the existing row keeps its id.
 pub async fn upsert(pool: &Pool, account_id: Uuid, info: &MailboxInfo) -> AppResult<()> {
     sqlx::query(
         r#"
-        INSERT INTO mailboxes (account_id, name, delimiter)
-        VALUES ($1, $2, $3)
+        INSERT INTO mailboxes (id, account_id, name, delimiter)
+        VALUES (?1, ?2, ?3, ?4)
         ON CONFLICT (account_id, name) DO UPDATE
-        SET delimiter = EXCLUDED.delimiter
+        SET delimiter = excluded.delimiter
         "#,
     )
+    .bind(Uuid::new_v4())
     .bind(account_id)
     .bind(&info.name)
     .bind(&info.delimiter)
@@ -49,7 +51,7 @@ pub async fn get_by_name(pool: &Pool, account_id: Uuid, name: &str) -> AppResult
         r#"
         SELECT id, account_id, name, delimiter, uid_validity, uid_next, last_synced_at
         FROM mailboxes
-        WHERE account_id = $1 AND name = $2
+        WHERE account_id = ?1 AND name = ?2
         "#,
     )
     .bind(account_id)
@@ -64,7 +66,7 @@ pub async fn get(pool: &Pool, id: Uuid) -> AppResult<Option<Mailbox>> {
         r#"
         SELECT id, account_id, name, delimiter, uid_validity, uid_next, last_synced_at
         FROM mailboxes
-        WHERE id = $1
+        WHERE id = ?1
         "#,
     )
     .bind(id)
@@ -78,7 +80,7 @@ pub async fn list(pool: &Pool, account_id: Uuid) -> AppResult<Vec<Mailbox>> {
         r#"
         SELECT id, account_id, name, delimiter, uid_validity, uid_next, last_synced_at
         FROM mailboxes
-        WHERE account_id = $1
+        WHERE account_id = ?1
         ORDER BY name
         "#,
     )
@@ -99,10 +101,10 @@ pub async fn update_after_sync(
     sqlx::query(
         r#"
         UPDATE mailboxes
-        SET uid_next = COALESCE($2, uid_next),
-            uid_validity = COALESCE($3, uid_validity),
-            last_synced_at = NOW()
-        WHERE id = $1
+        SET uid_next = COALESCE(?2, uid_next),
+            uid_validity = COALESCE(?3, uid_validity),
+            last_synced_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+        WHERE id = ?1
         "#,
     )
     .bind(id)

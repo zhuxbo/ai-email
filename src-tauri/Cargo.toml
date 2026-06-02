@@ -35,10 +35,11 @@ tokio = { version = "1", features = [
 ] }
 
 # ── Database ──────────────────────────────────────────────
-# rustls everywhere — no native-tls dep so the build stays portable.
+# Embedded SQLite (bundled libsqlite3 — no system dependency). The DB file lives in the OS
+# app-data dir and is created + migrated on first launch, so the app is zero-config / offline.
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio-rustls",
-    "postgres",
+    "sqlite",
     "uuid",
     "time",
     "json",

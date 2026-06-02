@@ -12,7 +12,7 @@ use uuid::Uuid;
 /// Runs inside a transaction so a partial update can never leave conflicting state.
 pub async fn replace_ai_tags(pool: &Pool, message_id: Uuid, tags: &[String]) -> AppResult<()> {
     let mut tx = pool.begin().await?;
-    sqlx::query("DELETE FROM message_tags WHERE message_id = $1 AND source = 'ai'")
+    sqlx::query("DELETE FROM message_tags WHERE message_id = ?1 AND source = 'ai'")
         .bind(message_id)
         .execute(&mut *tx)
         .await?;
@@ -24,7 +24,7 @@ pub async fn replace_ai_tags(pool: &Pool, message_id: Uuid, tags: &[String]) -> 
         sqlx::query(
             r#"
             INSERT INTO message_tags (message_id, tag, source)
-            VALUES ($1, $2, 'ai')
+            VALUES (?1, ?2, 'ai')
             ON CONFLICT (message_id, tag) DO NOTHING
             "#,
         )
