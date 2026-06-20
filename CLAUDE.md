@@ -114,6 +114,8 @@ Pre-push adds:
 
 **Never bypass with `--no-verify`.** If a check fails, fix the underlying issue.
 
+**完成守卫**：实质改动提交前跑 `/finish-check` —— 在上述自动门之上叠加范围审查、删除审核与独立 reviewer 循环（落盘 `REVIEW_PASS:` 签字才算完成）。主指令见 `.claude/commands/finish-check.md`，反模式与 reviewer 模板见 `skills/review-checklist.md`。
+
 ## Claude hooks (this repo's `.claude/settings.json`)
 
 - `PostToolUse` on `*.rs` edits → `rustfmt --check`, non-zero blocks the tool result
