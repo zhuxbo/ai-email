@@ -110,7 +110,7 @@ export function MessageList() {
   }, [messages, categoryFilter, sortByPriority]);
 
   return (
-    <section className="flex h-full w-96 flex-col border-r border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900">
+    <section className="flex h-full w-full flex-col bg-white md:w-96 md:border-r border-slate-200 dark:border-slate-700 dark:bg-slate-900">
       <header className="border-b border-slate-200 px-3 py-3 dark:border-slate-700">
         <div className="flex items-center justify-between">
           <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-200">

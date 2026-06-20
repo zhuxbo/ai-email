@@ -30,6 +30,7 @@ interface MailState {
 
   messages: MessageHeader[];
   selectedMessageId: string | null;
+  messageOpenSeq: number;
   body: MessageBody | null;
   summary: SummaryResult | null;
   translation: TranslateResult | null;
@@ -103,6 +104,7 @@ export const useMailStore = create<MailState>((set, get) => ({
 
   messages: [],
   selectedMessageId: null,
+  messageOpenSeq: 0,
   body: null,
   summary: null,
   translation: null,
@@ -248,6 +250,7 @@ export const useMailStore = create<MailState>((set, get) => ({
       summary: null,
       translation: null,
       loadingBody: true,
+      messageOpenSeq: get().messageOpenSeq + 1,
     });
     try {
       const body = await tauri.messageBody(id);
