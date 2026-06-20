@@ -17,9 +17,9 @@ import type {
   MessageHeader,
   RoleDefault,
   SummaryResult,
-  SyncReport,
   TranslateResult,
 } from '../types';
+import { useAiStore } from './ai';
 
 interface MailState {
   accounts: Account[];
@@ -44,6 +44,9 @@ interface MailState {
 
   composerOpen: boolean;
 
+  query: string;
+  syncErrors: Record<string, string>;
+
   syncing: boolean;
   loadingBody: boolean;
   summarizing: boolean;
@@ -55,7 +58,7 @@ interface MailState {
   removeAccount: (id: string) => Promise<void>;
 
   selectAccount: (id: string) => Promise<void>;
-  syncInbox: (accountId: string) => Promise<SyncReport>;
+  syncInbox: (accountId?: string) => Promise<void>;
 
   selectMailbox: (id: string) => Promise<void>;
   selectMessage: (id: string) => Promise<void>;
@@ -73,6 +76,9 @@ interface MailState {
   clearRoleDefault: (role: AiRole) => Promise<void>;
 
   reloadMessages: () => Promise<void>;
+  setFilter: (accountId: string | null) => Promise<void>;
+  setQuery: (q: string) => void;
+  classifyVisibleMessages: () => Promise<void>;
   toggleCategoryFilter: (cat: Category) => void;
   setSortByPriority: (on: boolean) => void;
   classifySelectedMailbox: () => Promise<void>;
@@ -116,6 +122,9 @@ export const useMailStore = create<MailState>((set, get) => ({
   sortByPriority: false,
 
   composerOpen: false,
+
+  query: '',
+  syncErrors: {},
 
   syncing: false,
   loadingBody: false,
@@ -198,32 +207,22 @@ export const useMailStore = create<MailState>((set, get) => ({
     }
   },
 
-  syncInbox: async (accountId) => {
-    set({ syncing: true, error: null });
-    try {
-      const report = await tauri.inboxSync(accountId);
-      // Refresh mailbox list (sync may have created INBOX on first run) and message list.
-      const mailboxes = await tauri.mailboxesList(accountId);
-      set({ mailboxes });
-      const inbox = pickInbox(mailboxes);
-      if (inbox) {
-        await get().selectMailbox(inbox.id);
-      }
-      // The background classifier (spawned server-side after sync) usually finishes within
-      // a few seconds. Schedule a re-fetch so tags + priority show up without the user
-      // having to click again.
-      if (report.newMessageCount > 0) {
-        setTimeout(() => {
-          void get().reloadMessages();
-        }, 3500);
-      }
-      return report;
-    } catch (e) {
-      set({ error: errMsg(e) });
-      throw e;
-    } finally {
-      set({ syncing: false });
-    }
+  syncInbox: async (accountId?: string) => {
+    const filter = accountId ?? get().selectedAccountId;
+    const targets = filter == null ? get().accounts.map((a) => a.id) : [filter];
+    set({ syncing: true, error: null, syncErrors: {} });
+    const results = await Promise.allSettled(targets.map((id) => tauri.inboxSync(id)));
+    const errors: Record<string, string> = {};
+    results.forEach((r, i) => {
+      if (r.status === 'rejected') errors[targets[i] ?? ''] = errMsg(r.reason);
+    });
+    const anyNew = results.some((r) => r.status === 'fulfilled' && r.value.newMessageCount > 0);
+    set({ syncing: false, syncErrors: errors });
+    await get().reloadMessages();
+    if (anyNew)
+      setTimeout(() => {
+        void get().reloadMessages();
+      }, 3500); // 有新邮件才延迟 reload（复用带 filter 守卫的 reloadMessages）
   },
 
   selectMailbox: async (id) => {
@@ -252,6 +251,7 @@ export const useMailStore = create<MailState>((set, get) => ({
       loadingBody: true,
       messageOpenSeq: get().messageOpenSeq + 1,
     });
+    useAiStore.getState().resetForMessage(id);
     try {
       const body = await tauri.messageBody(id);
       if (get().selectedMessageId === id) {
@@ -365,14 +365,31 @@ export const useMailStore = create<MailState>((set, get) => ({
   },
 
   reloadMessages: async () => {
-    const id = get().selectedMailboxId;
-    if (id === null) return;
+    const filter = get().selectedAccountId;
     try {
-      const messages = await tauri.messagesList(id, 50, 0);
-      // Don't overwrite if user has switched mailboxes mid-await.
-      if (get().selectedMailboxId === id) {
-        set({ messages });
-      }
+      const messages = await tauri.unifiedInbox({ accountId: filter });
+      if (get().selectedAccountId === filter) set({ messages }); // filter 守卫，防迟到 reload 覆盖
+    } catch (e) {
+      set({ error: errMsg(e) });
+    }
+  },
+
+  setFilter: async (accountId: string | null) => {
+    set({ selectedAccountId: accountId, selectedMessageId: null, body: null }); // 不 bump messageOpenSeq
+    useAiStore.getState().resetForMessage('');
+    await get().reloadMessages();
+  },
+
+  setQuery: (q: string) => {
+    set({ query: q });
+  },
+
+  classifyVisibleMessages: async () => {
+    const ids = get().messages.map((m) => m.id);
+    if (ids.length === 0) return;
+    try {
+      await tauri.aiClassify(ids);
+      await get().reloadMessages();
     } catch (e) {
       set({ error: errMsg(e) });
     }
