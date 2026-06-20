@@ -102,3 +102,30 @@ export async function roleDefaultSet(role: AiRole, modelId: string): Promise<voi
 export async function roleDefaultClear(role: AiRole): Promise<void> {
   await invoke('role_default_clear', { role });
 }
+
+export function mergeBySentAt(lists: MessageHeader[][]): MessageHeader[] {
+  return lists.flat().sort((x, y) => {
+    if (x.sentAt === null && y.sentAt === null) return 0;
+    if (x.sentAt === null) return 1;
+    if (y.sentAt === null) return -1;
+    return y.sentAt.localeCompare(x.sentAt);
+  });
+}
+
+/** 前端聚合。accountId 省略/null=全部。P2 不分页（每账户前 50）。allSettled：单账户失败仅丢该账户，不整体 reject。 */
+export async function unifiedInbox(opts: { accountId?: string | null }): Promise<MessageHeader[]> {
+  const accounts = await accountsList();
+  const targets =
+    opts.accountId == null ? accounts : accounts.filter((a) => a.id === opts.accountId);
+  const settled = await Promise.allSettled(
+    targets.map(async (acc) => {
+      const inbox = (await mailboxesList(acc.id)).find((m) => m.name.toUpperCase() === 'INBOX');
+      return inbox ? messagesList(inbox.id, 50, 0) : [];
+    }),
+  );
+  return mergeBySentAt(
+    settled
+      .filter((r): r is PromiseFulfilledResult<MessageHeader[]> => r.status === 'fulfilled')
+      .map((r) => r.value),
+  );
+}
