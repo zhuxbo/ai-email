@@ -6,6 +6,7 @@ import { AiSettingsDialog } from './components/ai-settings-dialog';
 import { MessageDetail } from './components/message-detail';
 import { MessageList } from './components/message-list';
 import { ReplyComposer } from './components/reply-composer';
+import { useAiStore } from './lib/store/ai';
 import { useMailStore } from './lib/store/mail';
 import { useUiStore, applyTheme } from './lib/store/ui';
 import './App.css';
@@ -34,6 +35,7 @@ function App() {
   useEffect(() => {
     void loadAccounts();
     void loadAiConfig();
+    void useAiStore.getState().loadAiConfig();
   }, [loadAccounts, loadAiConfig]);
 
   return (
