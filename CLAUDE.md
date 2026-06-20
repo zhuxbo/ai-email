@@ -1,7 +1,7 @@
 # CLAUDE.md — AI Email Project Constitution
 
 Source of truth for **how** Claude (and humans) work in this codebase.
-For **what** we're building, see [`docs/SPEC.md`](docs/SPEC.md).
+For **what** we're building, see [`README.md`](README.md).
 Keep this file short. When in doubt, ask the user.
 
 ---
@@ -26,9 +26,16 @@ ai-email/
 │       └── commands/         # #[tauri::command] handlers
 ├── .github/                  # CI workflows, dependabot, PR template
 ├── .claude/                  # Claude Code settings + hooks
+├── skills/                   # 系统技能文档(开发细节 / 操作手册)
 ├── CLAUDE.md                 # this file
 └── ONBOARDING.md             # quick-start context
 ```
+
+## 文档组织
+
+- **系统技能文档**(开发细节、操作手册)→ 根目录 `skills/`,入库。
+- **过程文档**(plan / 设计稿 / 调试记录)→ `.superpowers/`,git 忽略,**不被任何代码、注释或入库文档引用**。
+- `CLAUDE.md` / `README.md` 保持精简;细节进对应 skill。
 
 ## Tech decisions (LOCKED — confirm with user before changing)
 

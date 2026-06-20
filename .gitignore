@@ -65,3 +65,6 @@ coverage/
 .lefthook-local.yml
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
+
+# Superpowers (process docs / brainstorm artifacts — never committed)
+.superpowers/
