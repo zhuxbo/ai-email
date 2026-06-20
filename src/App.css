@@ -1,4 +1,8 @@
 @import 'tailwindcss';
+@import './styles/theme.css';
+
+/* `dark:` 变体跟随 .dark class（v4 默认跟系统；手动切换必须改 class 策略） */
+@custom-variant dark (&:where(.dark, .dark *));
 
 /* Reset the default Vite/React showcase styles — we lay things out with Tailwind utilities. */
 :root {
@@ -12,7 +16,7 @@
     sans-serif;
   font-size: 14px;
   line-height: 1.5;
-  color-scheme: light dark;
+  color-scheme: light;
 }
 
 html,
@@ -24,13 +28,14 @@ body,
   background-color: #f8fafc;
 }
 
-@media (prefers-color-scheme: dark) {
-  html,
-  body,
-  #root {
-    background-color: #0f172a;
-    color: #e2e8f0;
-  }
+.dark {
+  color-scheme: dark;
+}
+.dark,
+.dark body,
+.dark #root {
+  background-color: var(--color-app);
+  color: var(--color-text-1);
 }
 
 /* Long HTML mail bodies inherit container width; tame the embedded styles. */
@@ -42,8 +47,6 @@ body,
   color: #2563eb;
   text-decoration: underline;
 }
-@media (prefers-color-scheme: dark) {
-  .html-body a {
-    color: #60a5fa;
-  }
+.dark .html-body a {
+  color: #60a5fa;
 }
