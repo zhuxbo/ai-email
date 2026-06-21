@@ -12,7 +12,7 @@
 import { useEffect, useState } from 'react';
 
 import { PRESETS, presetById, type AiPreset } from '../lib/ai-presets';
-import { useMailStore } from '../lib/store/mail';
+import { useAiStore } from '../lib/store/ai';
 import type { AiModel, AiRole } from '../lib/types';
 
 interface Props {
@@ -28,9 +28,9 @@ const ROLE_LABELS: { role: AiRole; label: string; description: string }[] = [
 ];
 
 export function AiSettingsDialog({ open, onClose }: Props) {
-  const models = useMailStore((s) => s.models);
-  const roleDefaults = useMailStore((s) => s.roleDefaults);
-  const loadAiConfig = useMailStore((s) => s.loadAiConfig);
+  const models = useAiStore((s) => s.models);
+  const roleDefaults = useAiStore((s) => s.roleDefaults);
+  const loadAiConfig = useAiStore((s) => s.loadAiConfig);
 
   useEffect(() => {
     if (open) {
@@ -84,7 +84,7 @@ function ModelsSection({
   models: AiModel[];
   roleDefaults: { role: AiRole; modelId: string }[];
 }) {
-  const removeModel = useMailStore((s) => s.removeModel);
+  const removeModel = useAiStore((s) => s.removeModel);
 
   if (models.length === 0) {
     return (
@@ -169,7 +169,7 @@ function ModelsSection({
 // ── Add model form ──────────────────────────────────────────────────────────
 
 function AddModelSection() {
-  const addModel = useMailStore((s) => s.addModel);
+  const addModel = useAiStore((s) => s.addModel);
 
   const [presetId, setPresetId] = useState<string>(PRESETS[0]?.id ?? 'anthropic');
   const preset = presetById(presetId);
@@ -342,8 +342,8 @@ function RoleAssignmentsSection({
   models: AiModel[];
   roleDefaults: { role: AiRole; modelId: string }[];
 }) {
-  const setRoleDefault = useMailStore((s) => s.setRoleDefault);
-  const clearRoleDefault = useMailStore((s) => s.clearRoleDefault);
+  const setRoleDefault = useAiStore((s) => s.setRoleDefault);
+  const clearRoleDefault = useAiStore((s) => s.clearRoleDefault);
 
   if (models.length === 0) {
     return null;

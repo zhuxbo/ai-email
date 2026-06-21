@@ -13,16 +13,17 @@ import './App.css';
 
 function App() {
   const loadAccounts = useMailStore((s) => s.loadAccounts);
-  const loadAiConfig = useMailStore((s) => s.loadAiConfig);
   const accounts = useMailStore((s) => s.accounts);
   const selectedAccountId = useMailStore((s) => s.selectedAccountId);
   const messageOpenSeq = useMailStore((s) => s.messageOpenSeq);
   const syncing = useMailStore((s) => s.syncing);
   const setFilter = useMailStore((s) => s.setFilter);
+  const setQuery = useMailStore((s) => s.setQuery);
   const syncInbox = useMailStore((s) => s.syncInbox);
   const removeAccount = useMailStore((s) => s.removeAccount);
   const error = useMailStore((s) => s.error);
   const clearError = useMailStore((s) => s.clearError);
+  const aiError = useAiStore((s) => s.error);
 
   const [addOpen, setAddOpen] = useState(false);
   const [aiSettingsOpen, setAiSettingsOpen] = useState(false);
@@ -34,9 +35,8 @@ function App() {
 
   useEffect(() => {
     void loadAccounts();
-    void loadAiConfig();
     void useAiStore.getState().loadAiConfig();
-  }, [loadAccounts, loadAiConfig]);
+  }, [loadAccounts]);
 
   return (
     <>
@@ -62,8 +62,8 @@ function App() {
             /* Plan 3: auto-reply center */
           },
         }}
-        onQueryChange={() => {
-          /* Plan 2: list filtering by query */
+        onQueryChange={(q) => {
+          setQuery(q);
         }}
         messageOpenSeq={messageOpenSeq}
         list={<MessageList />}
@@ -89,16 +89,19 @@ function App() {
       />
       <ReplyComposer />
 
-      {error && (
+      {(error ?? aiError) && (
         <div
           role="alert"
           className="fixed bottom-4 left-4 z-50 max-w-md rounded bg-danger px-3 py-2 text-xs text-white shadow-lg"
         >
           <div className="flex items-start gap-2">
-            <span className="flex-1 break-words">{error}</span>
+            <span className="flex-1 break-words">{error ?? aiError}</span>
             <button
               type="button"
-              onClick={clearError}
+              onClick={() => {
+                clearError();
+                useAiStore.getState().clearError();
+              }}
               aria-label="关闭错误提示"
               className="text-white/70 transition-colors hover:text-white"
             >
