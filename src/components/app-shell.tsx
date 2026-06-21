@@ -4,6 +4,8 @@ import { NavRail } from './nav-rail';
 import { Drawer } from './ui/drawer';
 import { useBreakpoint } from '../lib/hooks/use-breakpoint';
 import { useUiStore } from '../lib/store/ui';
+import { useMailStore } from '../lib/store/mail';
+import { useComposeStore } from '../lib/store/compose';
 import type { Account } from '../lib/types';
 
 interface NavProps {
@@ -52,6 +54,12 @@ export function AppShell({ nav, onQueryChange, messageOpenSeq, list, detail, dra
       <CommandBar
         onQueryChange={onQueryChange}
         onAiCommand={() => {
+          const { selectedMessageId, messages } = useMailStore.getState();
+          const msg = selectedMessageId
+            ? messages.find((m) => m.id === selectedMessageId)
+            : undefined;
+          if (msg) useComposeStore.getState().openReply(msg);
+          else useComposeStore.getState().openBlank();
           openDrawer('compose');
         }}
       />

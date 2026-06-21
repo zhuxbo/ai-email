@@ -1,14 +1,14 @@
-// Right pane: header + AI summary card + body (text or html with sandbox) + actions bar.
+// Right pane: header + body (text or html with sandbox) + actions bar.
 //
 // HTML rendering uses an iframe with `srcDoc` + a `sandbox` attribute that disables scripts
 // and same-origin escape — so a malicious email can't pull cookies, exec JS, or beacon out.
 // Plain-text fallback if the message has no HTML. Reply moved into the actions bar.
+// AI 摘要/翻译/写信通过操作条触发右侧抽屉展示。
 
 import { useMemo } from 'react';
 
 import { useMailStore } from '../lib/store/mail';
 import type { MessageHeader } from '../lib/types';
-import { AiSummaryCard } from './ai-summary-card';
 import { MessageActions } from './message-actions';
 
 function selectedMessage(messages: MessageHeader[], id: string | null): MessageHeader | null {
@@ -77,7 +77,6 @@ export function MessageDetail() {
       </header>
 
       <div className="flex-1 overflow-auto p-6">
-        <AiSummaryCard />
         {loadingBody && <div className="text-sm text-slate-500">正在加载正文…</div>}
         {!loadingBody && body && <BodyView body={body} />}
         {!loadingBody && !body && (

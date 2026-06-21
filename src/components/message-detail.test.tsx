@@ -3,11 +3,9 @@ import { render, screen } from '@testing-library/react';
 
 import { MessageDetail } from './message-detail';
 import { useMailStore } from '../lib/store/mail';
-import { useAiStore } from '../lib/store/ai';
 
 describe('MessageDetail', () => {
   beforeEach(() => {
-    useAiStore.setState({ summary: null, models: [], roleDefaults: [] } as never);
     useMailStore.setState({
       messages: [
         {
@@ -26,9 +24,9 @@ describe('MessageDetail', () => {
       loadingBody: false,
     } as never);
   });
-  it('渲染主题与回复按钮', () => {
+  it('渲染主题与正文', () => {
     render(<MessageDetail />);
     expect(screen.getByText('S')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /回复/ })).toBeInTheDocument();
+    expect(screen.getByText('B')).toBeInTheDocument();
   });
 });
