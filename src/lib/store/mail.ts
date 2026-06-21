@@ -24,7 +24,8 @@ interface MailState {
   composerOpen: boolean;
 
   query: string;
-  syncErrors: Record<string, string>;
+  /** 部分账户当前加载/同步失败：accountId → 错误信息。聚合层不再静默吞掉部分失败。 */
+  accountErrors: Record<string, string>;
 
   syncing: boolean;
   loadingBody: boolean;
@@ -75,7 +76,7 @@ export const useMailStore = create<MailState>((set, get) => ({
   composerOpen: false,
 
   query: '',
-  syncErrors: {},
+  accountErrors: {},
 
   syncing: false,
   loadingBody: false,
@@ -130,15 +131,19 @@ export const useMailStore = create<MailState>((set, get) => ({
   syncInbox: async (accountId?: string) => {
     const filter = accountId ?? get().selectedAccountId;
     const targets = filter == null ? get().accounts.map((a) => a.id) : [filter];
-    set({ syncing: true, error: null, syncErrors: {} });
+    set({ syncing: true, error: null });
     const results = await Promise.allSettled(targets.map((id) => tauri.inboxSync(id)));
-    const errors: Record<string, string> = {};
+    const syncErrs: Record<string, string> = {};
     results.forEach((r, i) => {
-      if (r.status === 'rejected') errors[targets[i] ?? ''] = errMsg(r.reason);
+      if (r.status === 'rejected') syncErrs[targets[i] ?? ''] = errMsg(r.reason);
     });
     const anyNew = results.some((r) => r.status === 'fulfilled' && r.value.newMessageCount > 0);
-    set({ syncing: false, syncErrors: errors });
+    set({ syncing: false });
     await get().reloadMessages();
+    // 同步阶段失败叠加在加载失败之上 —— 两类失败汇入同一个 accountErrors 通道。
+    if (Object.keys(syncErrs).length > 0) {
+      set((s) => ({ accountErrors: { ...s.accountErrors, ...syncErrs } }));
+    }
     if (anyNew)
       setTimeout(() => {
         void get().reloadMessages();
@@ -177,8 +182,9 @@ export const useMailStore = create<MailState>((set, get) => ({
   reloadMessages: async () => {
     const filter = get().selectedAccountId;
     try {
-      const messages = await tauri.unifiedInbox({ accountId: filter });
-      if (get().selectedAccountId === filter) set({ messages }); // filter 守卫，防迟到 reload 覆盖
+      const { messages, errors } = await tauri.unifiedInbox({ accountId: filter });
+      // filter 守卫：迟到 reload 不覆盖已切换的筛选。
+      if (get().selectedAccountId === filter) set({ messages, accountErrors: errors });
     } catch (e) {
       set({ error: errMsg(e) });
     }

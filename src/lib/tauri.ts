@@ -112,8 +112,16 @@ export function mergeBySentAt(lists: MessageHeader[][]): MessageHeader[] {
   });
 }
 
-/** 前端聚合。accountId 省略/null=全部。P2 不分页（每账户前 50）。allSettled：单账户失败仅丢该账户，不整体 reject。 */
-export async function unifiedInbox(opts: { accountId?: string | null }): Promise<MessageHeader[]> {
+export interface UnifiedInboxResult {
+  messages: MessageHeader[];
+  /** 加载失败的账户：accountId → 错误信息。allSettled 下单账户失败不丢，集中上报供 UI 提示。 */
+  errors: Record<string, string>;
+}
+
+/** 前端聚合。accountId 省略/null=全部。P2 不分页（每账户前 50）。单账户失败只标记该账户、不整体 reject。 */
+export async function unifiedInbox(opts: {
+  accountId?: string | null;
+}): Promise<UnifiedInboxResult> {
   const accounts = await accountsList();
   const targets =
     opts.accountId == null ? accounts : accounts.filter((a) => a.id === opts.accountId);
@@ -123,9 +131,15 @@ export async function unifiedInbox(opts: { accountId?: string | null }): Promise
       return inbox ? messagesList(inbox.id, 50, 0) : [];
     }),
   );
-  return mergeBySentAt(
-    settled
-      .filter((r): r is PromiseFulfilledResult<MessageHeader[]> => r.status === 'fulfilled')
-      .map((r) => r.value),
-  );
+  const lists: MessageHeader[][] = [];
+  const errors: Record<string, string> = {};
+  settled.forEach((r, i) => {
+    const acc = targets[i];
+    if (r.status === 'fulfilled') {
+      lists.push(r.value);
+    } else if (acc) {
+      errors[acc.id] = r.reason instanceof Error ? r.reason.message : String(r.reason);
+    }
+  });
+  return { messages: mergeBySentAt(lists), errors };
 }

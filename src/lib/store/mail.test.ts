@@ -3,7 +3,9 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { useMailStore } from './mail';
 vi.mock('../tauri', () => ({
   accountsList: vi.fn().mockResolvedValue([{ id: 'a1' }, { id: 'a2' }]),
-  unifiedInbox: vi.fn().mockResolvedValue([{ id: 'm1', accountId: 'a1' }]),
+  unifiedInbox: vi
+    .fn()
+    .mockResolvedValue({ messages: [{ id: 'm1', accountId: 'a1' }], errors: {} }),
   inboxSync: vi.fn().mockResolvedValue({ newMessageCount: 0, totalInMailbox: 0 }),
   messageBody: vi
     .fn()
@@ -23,7 +25,7 @@ describe('mail store 聚合新成员', () => {
       messages: [],
       selectedMessageId: 'm1',
       messageOpenSeq: 5,
-      syncErrors: {},
+      accountErrors: {},
     } as never);
     vi.clearAllMocks();
   });
@@ -35,14 +37,14 @@ describe('mail store 聚合新成员', () => {
     expect(s.messageOpenSeq).toBe(5);
     expect(tauri.unifiedInbox).toHaveBeenCalledWith({ accountId: 'a1' });
   });
-  it('syncInbox 聚合并行：a1 失败不阻塞 a2，记 syncErrors', async () => {
+  it('syncInbox 聚合并行：a1 失败不阻塞 a2，记 accountErrors', async () => {
     vi.mocked(tauri.inboxSync).mockImplementation((id: string) =>
       id === 'a1'
         ? Promise.reject(new Error('boom'))
         : Promise.resolve({ newMessageCount: 1, totalInMailbox: 1 }),
     );
     await useMailStore.getState().syncInbox();
-    expect(useMailStore.getState().syncErrors.a1).toContain('boom');
-    expect(useMailStore.getState().syncErrors.a2).toBeUndefined();
+    expect(useMailStore.getState().accountErrors.a1).toContain('boom');
+    expect(useMailStore.getState().accountErrors.a2).toBeUndefined();
   });
 });

@@ -15,6 +15,7 @@ export function MessageList() {
   const categoryFilter = useMailStore((s) => s.categoryFilter);
   const sortByPriority = useMailStore((s) => s.sortByPriority);
   const query = useMailStore((s) => s.query);
+  const accountErrors = useMailStore((s) => s.accountErrors);
   const toggleCategoryFilter = useMailStore((s) => s.toggleCategoryFilter);
   const setSortByPriority = useMailStore((s) => s.setSortByPriority);
 
@@ -43,6 +44,12 @@ export function MessageList() {
       return ap - bp;
     });
   }, [messages, categoryFilter, sortByPriority, query]);
+
+  // 聚合层把部分账户的加载/同步失败汇到 accountErrors；这里映射成邮箱地址做提示。
+  const failedAccounts = useMemo(
+    () => Object.keys(accountErrors).map((id) => accounts.find((a) => a.id === id)?.email ?? id),
+    [accountErrors, accounts],
+  );
 
   const hasFilter = categoryFilter.length > 0 || query.trim() !== '';
 
@@ -107,6 +114,15 @@ export function MessageList() {
           )}
         </div>
       </header>
+
+      {failedAccounts.length > 0 && (
+        <div
+          role="alert"
+          className="border-b border-amber-200 bg-amber-50 px-3 py-1.5 text-[11px] text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300"
+        >
+          ⚠ {failedAccounts.length} 个账户加载失败：{failedAccounts.join('、')}
+        </div>
+      )}
 
       <ul className="flex-1 overflow-auto">
         {accounts.length === 0 ? (

@@ -13,6 +13,7 @@ describe('MessageList 空态', () => {
       categoryFilter: [],
       sortByPriority: false,
       query: '',
+      accountErrors: {},
     } as never);
   });
   it('0 账户引导添加', () => {
@@ -23,5 +24,13 @@ describe('MessageList 空态', () => {
     useMailStore.setState({ accounts: [{ id: 'a1' }] as never } as never);
     render(<MessageList />);
     expect(screen.getByText('收件箱为空，点左侧 🔄 同步。')).toBeInTheDocument();
+  });
+  it('部分账户加载失败时显示提示并映射邮箱', () => {
+    useMailStore.setState({
+      accounts: [{ id: 'a1', email: 'amy@qq.com' }] as never,
+      accountErrors: { a1: 'boom' },
+    } as never);
+    render(<MessageList />);
+    expect(screen.getByText(/1 个账户加载失败：amy@qq.com/)).toBeInTheDocument();
   });
 });
