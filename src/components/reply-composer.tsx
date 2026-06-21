@@ -14,6 +14,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 
 import * as tauri from '../lib/tauri';
 import { useMailStore } from '../lib/store/mail';
+import { useAiStore } from '../lib/store/ai';
 import type { MessageHeader } from '../lib/types';
 
 function findMessage(messages: MessageHeader[], id: string | null): MessageHeader | null {
@@ -33,9 +34,8 @@ export function ReplyComposer() {
   const close = useMailStore((s) => s.closeComposer);
   const messages = useMailStore((s) => s.messages);
   const selectedMessageId = useMailStore((s) => s.selectedMessageId);
-  const selectedAccountId = useMailStore((s) => s.selectedAccountId);
-  const roleDefaults = useMailStore((s) => s.roleDefaults);
-  const models = useMailStore((s) => s.models);
+  const roleDefaults = useAiStore((s) => s.roleDefaults);
+  const models = useAiStore((s) => s.models);
 
   const message = useMemo(
     () => findMessage(messages, selectedMessageId),
@@ -75,7 +75,7 @@ export function ReplyComposer() {
 
   if (!open) return null;
 
-  if (message === null || selectedAccountId === null) {
+  if (message === null) {
     return (
       <div
         role="dialog"
@@ -114,13 +114,13 @@ export function ReplyComposer() {
   }
 
   async function runSend() {
-    if (selectedAccountId === null) return;
+    if (message === null) return;
     if (!window.confirm('确认发送？此操作不可撤销，并会写入 send_log 审计表。')) return;
     setSending(true);
     setLocalError(null);
     try {
       const receipt = await tauri.smtpSend({
-        accountId: selectedAccountId,
+        accountId: message.accountId,
         to: to
           .split(',')
           .map((s) => s.trim())
@@ -131,7 +131,7 @@ export function ReplyComposer() {
           .filter((s) => s !== ''),
         subject: subject.trim(),
         body,
-        inReplyTo: message?.id ?? null,
+        inReplyTo: message.id,
         aiAssisted,
       });
       setReceiptInfo(
