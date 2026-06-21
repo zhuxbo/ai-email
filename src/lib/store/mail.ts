@@ -186,7 +186,8 @@ export const useMailStore = create<MailState>((set, get) => ({
       // filter 守卫：迟到 reload 不覆盖已切换的筛选。
       if (get().selectedAccountId === filter) set({ messages, accountErrors: errors });
     } catch (e) {
-      set({ error: errMsg(e) });
+      // 整体聚合失败（如 accountsList 抛错）：清掉过时的 per-account 错误，由全局 error 接管。
+      set({ error: errMsg(e), accountErrors: {} });
     }
   },
 

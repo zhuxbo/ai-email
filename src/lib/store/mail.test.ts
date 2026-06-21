@@ -47,4 +47,11 @@ describe('mail store 聚合新成员', () => {
     expect(useMailStore.getState().accountErrors.a1).toContain('boom');
     expect(useMailStore.getState().accountErrors.a2).toBeUndefined();
   });
+  it('reloadMessages 整体失败时清空 accountErrors，不残留过时 per-account 错误', async () => {
+    useMailStore.setState({ accountErrors: { a1: 'old' } } as never);
+    vi.mocked(tauri.unifiedInbox).mockRejectedValueOnce(new Error('accountsList boom'));
+    await useMailStore.getState().reloadMessages();
+    expect(useMailStore.getState().accountErrors).toEqual({});
+    expect(useMailStore.getState().error).toContain('boom');
+  });
 });
