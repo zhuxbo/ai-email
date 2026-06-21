@@ -8,6 +8,7 @@ import { MessageDetail } from './components/message-detail';
 import { MessageList } from './components/message-list';
 import { ReplyComposer } from './components/reply-composer';
 import { useAiStore } from './lib/store/ai';
+import { useComposeStore } from './lib/store/compose';
 import { useMailStore } from './lib/store/mail';
 import { useUiStore, applyTheme } from './lib/store/ui';
 import './App.css';
@@ -25,6 +26,7 @@ function App() {
   const error = useMailStore((s) => s.error);
   const clearError = useMailStore((s) => s.clearError);
   const aiError = useAiStore((s) => s.error);
+  const composeError = useComposeStore((s) => s.error);
 
   const [addOpen, setAddOpen] = useState(false);
   const [aiSettingsOpen, setAiSettingsOpen] = useState(false);
@@ -39,7 +41,7 @@ function App() {
     void useAiStore.getState().loadAiConfig();
   }, [loadAccounts]);
 
-  // mail 与 ai 两路错误各自成条，互不掩盖；各自独立关闭，不连带清掉对方未读的错误。
+  // mail / ai / compose 三路错误各自成条，互不掩盖；各自独立关闭，不连带清掉对方未读的错误。
   const errorToasts: { key: string; text: string; clear: () => void }[] = [];
   if (error !== null) errorToasts.push({ key: 'mail', text: error, clear: clearError });
   if (aiError !== null)
@@ -48,6 +50,14 @@ function App() {
       text: aiError,
       clear: () => {
         useAiStore.getState().clearError();
+      },
+    });
+  if (composeError !== null)
+    errorToasts.push({
+      key: 'compose',
+      text: composeError,
+      clear: () => {
+        useComposeStore.setState({ error: null });
       },
     });
 
