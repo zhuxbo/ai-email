@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 
 import { AppShell } from './components/app-shell';
 import { AddAccountDialog } from './components/add-account-dialog';
+import { AiDrawer } from './components/ai-drawer';
 import { AiSettingsDialog } from './components/ai-settings-dialog';
 import { MessageDetail } from './components/message-detail';
 import { MessageList } from './components/message-list';
@@ -80,11 +81,7 @@ function App() {
         messageOpenSeq={messageOpenSeq}
         list={<MessageList />}
         detail={<MessageDetail />}
-        drawer={
-          <div className="p-4 text-xs text-text-3">
-            AI 指令面板将在后续版本上线；当前摘要/翻译请在右侧邮件详情中使用。
-          </div>
-        }
+        drawer={<AiDrawer />}
       />
 
       <AddAccountDialog
