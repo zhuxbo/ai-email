@@ -22,6 +22,17 @@ describe('Drawer', () => {
     expect(screen.queryByRole('presentation')).not.toBeInTheDocument();
   });
 
+  it('desktop: 加宽容纳表单、配色用 panel', () => {
+    const { container } = render(
+      <Drawer open onClose={vi.fn()}>
+        <div>X</div>
+      </Drawer>,
+    );
+    const aside = container.querySelector('aside');
+    expect(aside?.className).toContain('bg-panel');
+    expect(aside?.className).toMatch(/w-\[(4[2-8]0|5[0-2]0)px\]/);
+  });
+
   it('mobile: clicking overlay fires onClose', async () => {
     bpMock.mockReturnValue('mobile');
     const onClose = vi.fn();
