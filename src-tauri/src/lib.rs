@@ -62,6 +62,7 @@ pub fn run() {
             commands::ai::ai_summarize,
             commands::ai::ai_classify,
             commands::ai::ai_translate,
+            commands::ai::ai_translate_text,
             commands::ai::ai_draft_reply,
             commands::mail::smtp_send,
             commands::ai_config::models_list,

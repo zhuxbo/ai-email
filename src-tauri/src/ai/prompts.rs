@@ -88,3 +88,6 @@ pub const DRAFT_SYSTEM: &str = "你是邮件回复起草助手。给你一封原
 - 不要包含 To: / From: / Date: 之类的邮件头字段
 - 如果需要表达列表、步骤、链接，使用纯文本形式（无 Markdown）
 - 只返回 JSON 对象本身，不要 markdown 代码块标记、不要前言或解释";
+
+pub const TRANSLATE_TEXT_SYSTEM: &str = "你是文本翻译助手。把给定文本翻译为目标语言。\
+只输出译文本身，保留换行与段落，不要任何解释、前言、markdown 代码块或 JSON 包装。";

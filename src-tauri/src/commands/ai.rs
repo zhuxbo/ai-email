@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::ai::classify::{self, ClassifyResult};
 use crate::ai::draft::{self, DraftResult};
 use crate::ai::summarize::{self, SummaryResult};
-use crate::ai::translate::{self, TranslateResult};
+use crate::ai::translate::{self, TextTranslation, TranslateResult};
 use crate::error::AppResult;
 use crate::AppState;
 
@@ -34,6 +34,15 @@ pub async fn ai_translate(
     target: String,
 ) -> AppResult<TranslateResult> {
     translate::translate_message(&state.db, id, &target).await
+}
+
+#[tauri::command]
+pub async fn ai_translate_text(
+    state: State<'_, AppState>,
+    text: String,
+    target: String,
+) -> AppResult<TextTranslation> {
+    translate::translate_text(&state.db, &text, &target).await
 }
 
 #[tauri::command]

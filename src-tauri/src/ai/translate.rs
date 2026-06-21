@@ -21,6 +21,7 @@ use crate::keychain;
 const ROLE: &str = "translate";
 const KIND: &str = "translate";
 const MAX_OUTPUT_TOKENS: u32 = 4096;
+const MAX_TEXT_TRANSLATION_TOKENS: u32 = 2048;
 /// Larger than summary's 50k because translation is roughly 1:1 in tokens — we can fit
 /// most real-world mail with room to spare. Anything longer probably has structural noise
 /// that translation wouldn't recover from anyway.
@@ -215,6 +216,50 @@ fn truncate_for_log(s: &str) -> String {
     }
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextTranslation {
+    pub text: String,
+}
+
+fn build_text_user_prompt(target: &str, text: &str) -> String {
+    format!("目标语言：{target}\n\n文本：\n{text}")
+}
+
+/// 翻译自由文本（草稿回译）。复用 translate 角色模型；不读 DB、不缓存。
+pub async fn translate_text(pool: &Pool, text: &str, target: &str) -> AppResult<TextTranslation> {
+    let target = normalize_target(target)?;
+    let model = ai_role_defaults::resolve_model(pool, ROLE)
+        .await?
+        .ok_or_else(|| AppError::Config(format!("未指派 {ROLE} 角色模型")))?;
+    let model_uuid = model.id;
+    let api_key: SecretString =
+        tokio::task::spawn_blocking(move || keychain::get_ai_key(model_uuid))
+            .await
+            .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
+    let client = AiClient::build(&model, api_key)?;
+    let req = CompletionRequest {
+        max_tokens: MAX_TEXT_TRANSLATION_TOKENS,
+        system: vec![SystemBlock {
+            text: prompts::TRANSLATE_TEXT_SYSTEM.to_string(),
+            cache: false,
+        }],
+        messages: vec![UserMessage {
+            content: build_text_user_prompt(&target, text),
+        }],
+    };
+    let resp = client.complete(req).await?;
+    tracing::info!(
+        target = %target,
+        input_tokens = resp.usage.input_tokens,
+        output_tokens = resp.usage.output_tokens,
+        "translate_text fresh"
+    );
+    Ok(TextTranslation {
+        text: resp.text.trim().to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,5 +285,12 @@ mod tests {
         let a = compute_prompt_hash("sys", "zh-CN", "u");
         let b = compute_prompt_hash("sys", "en-US", "u");
         assert_ne!(a, b, "different targets must yield different hashes");
+    }
+
+    #[test]
+    fn text_user_prompt_includes_target_and_body() {
+        let p = build_text_user_prompt("en-US", "你好世界");
+        assert!(p.contains("目标语言：en-US"));
+        assert!(p.contains("文本：\n你好世界"));
     }
 }
