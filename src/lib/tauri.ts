@@ -20,6 +20,7 @@ import type {
   SendReceipt,
   SummaryResult,
   SyncReport,
+  TextTranslation,
   TranslateResult,
 } from './types';
 
@@ -69,6 +70,10 @@ export async function aiClassify(ids: string[]): Promise<ClassifyResult[]> {
 
 export async function aiTranslate(id: string, target: string): Promise<TranslateResult> {
   return invoke('ai_translate', { id, target });
+}
+
+export async function aiTranslateText(text: string, target: string): Promise<TextTranslation> {
+  return invoke('ai_translate_text', { text, target });
 }
 
 export async function aiDraftReply(id: string, intent: string | null): Promise<DraftResult> {

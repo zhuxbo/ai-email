@@ -173,3 +173,7 @@ export interface AddAccountForm {
   smtpPort: number;
   authCode: string;
 }
+
+export interface TextTranslation {
+  text: string;
+}
