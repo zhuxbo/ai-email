@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { useComposeStore } from './compose';
+import { useMailStore } from './mail';
 import type { MessageHeader } from '../types';
 
 vi.mock('../tauri', () => ({
@@ -68,6 +69,7 @@ describe('compose store', () => {
       sendLog: { id: 'log-aaaa', smtpResponse: 'OK' },
     } as never);
     vi.stubGlobal('confirm', () => true);
+    useMailStore.setState({ selectedAccountId: 'acc-OTHER', accounts: [] } as never);
     useComposeStore.getState().openReply(enMsg);
     useComposeStore.getState().setField({ bodyForeign: 'hi' });
     await useComposeStore.getState().runSend();
@@ -97,5 +99,22 @@ describe('compose store', () => {
     await pending;
     // the stale draft must NOT have written into the (now-reset) state
     expect(useComposeStore.getState().bodyForeign).toBe('');
+  });
+
+  it('refreshBackTranslation 迟到回译被守卫丢弃（切邮件不串台）', async () => {
+    let resolveBack!: (v: unknown) => void;
+    vi.mocked(tauri.aiTranslateText).mockReturnValue(
+      new Promise((res) => {
+        resolveBack = res;
+      }) as never,
+    );
+    useComposeStore.getState().openReply(enMsg); // replyContext = m-en, bilingual=true
+    useComposeStore.setState({ bodyForeign: 'hello' } as never);
+    const pending = useComposeStore.getState().refreshBackTranslation();
+    // switch to a different reply before the back-translation resolves
+    useComposeStore.getState().openReply({ ...enMsg, id: 'm-other' });
+    resolveBack({ text: '迟到回译' });
+    await pending;
+    expect(useComposeStore.getState().bodyZhBack).toBeNull(); // not polluted into m-other
   });
 });

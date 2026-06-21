@@ -143,11 +143,11 @@ export const useComposeStore = create<ComposeState>((set, get) => ({
     set({ backTranslating: true, error: null });
     try {
       const back = await tauri.aiTranslateText(get().bodyForeign, 'zh-CN');
-      set({ bodyZhBack: back.text });
+      if (get().replyContext?.messageId === ctx.messageId) set({ bodyZhBack: back.text });
     } catch (e) {
-      set({ error: errMsg(e) });
+      if (get().replyContext?.messageId === ctx.messageId) set({ error: errMsg(e) });
     } finally {
-      set({ backTranslating: false });
+      if (get().replyContext?.messageId === ctx.messageId) set({ backTranslating: false });
     }
   },
 
