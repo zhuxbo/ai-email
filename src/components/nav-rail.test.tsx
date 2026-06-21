@@ -59,9 +59,24 @@ describe('NavRail', () => {
     expect(p.onRemoveAccount).toHaveBeenCalledWith('a');
   });
 
-  it('disables sync when no account selected', () => {
-    const p = { ...baseProps(), selectedAccountId: null };
+  it('disables sync only when no accounts', () => {
+    const p = { ...baseProps(), accounts: [], selectedAccountId: null };
     render(<NavRail {...p} />);
     expect(screen.getByRole('button', { name: '同步收件箱' })).toBeDisabled();
+  });
+
+  it('keeps sync enabled in 全部 view (accounts present, none selected)', () => {
+    const p = { ...baseProps(), selectedAccountId: null };
+    render(<NavRail {...p} />);
+    expect(screen.getByRole('button', { name: '同步收件箱' })).toBeEnabled();
+  });
+
+  it('fires select(null) on 全部 click and marks it pressed while aggregating', async () => {
+    const p = { ...baseProps(), selectedAccountId: null };
+    render(<NavRail {...p} />);
+    const all = screen.getByRole('button', { name: '全部账户' });
+    expect(all).toHaveAttribute('aria-pressed', 'true');
+    await userEvent.click(all);
+    expect(p.onSelectAccount).toHaveBeenCalledWith(null);
   });
 });

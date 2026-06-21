@@ -6,7 +6,7 @@ interface Props {
   accounts: Account[];
   selectedAccountId: string | null;
   syncing: boolean;
-  onSelectAccount: (id: string) => void;
+  onSelectAccount: (id: string | null) => void;
   onAddAccount: () => void;
   onSync: () => void;
   onRemoveAccount: (id: string) => void;
@@ -27,6 +27,22 @@ export function NavRail({
 }: Props) {
   return (
     <nav className="flex w-[54px] shrink-0 flex-col items-center gap-3 bg-ink py-3">
+      <button
+        type="button"
+        aria-label="全部账户"
+        aria-pressed={selectedAccountId === null}
+        title="全部账户（聚合收件箱）"
+        onClick={() => {
+          onSelectAccount(null);
+        }}
+        className={`flex h-[30px] w-[30px] items-center justify-center rounded-full bg-slate-700 text-xs font-medium text-slate-200 hover:bg-slate-600 ${
+          selectedAccountId === null
+            ? 'ring-2 ring-accent ring-offset-2 ring-offset-[var(--color-ink)]'
+            : ''
+        }`}
+      >
+        全
+      </button>
       {accounts.map((a) => (
         <button
           key={a.id}
@@ -57,7 +73,7 @@ export function NavRail({
       <IconButton
         label="同步收件箱"
         onClick={onSync}
-        disabled={syncing || selectedAccountId === null}
+        disabled={syncing || accounts.length === 0}
         className="h-8 w-8 text-slate-200 hover:bg-slate-700"
       >
         {syncing ? '⟳' : '🔄'}

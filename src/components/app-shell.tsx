@@ -10,7 +10,7 @@ interface NavProps {
   accounts: Account[];
   selectedAccountId: string | null;
   syncing: boolean;
-  onSelectAccount: (id: string) => void;
+  onSelectAccount: (id: string | null) => void;
   onAddAccount: () => void;
   onSync: () => void;
   onRemoveAccount: (id: string) => void;

@@ -18,7 +18,7 @@ function App() {
   const selectedAccountId = useMailStore((s) => s.selectedAccountId);
   const messageOpenSeq = useMailStore((s) => s.messageOpenSeq);
   const syncing = useMailStore((s) => s.syncing);
-  const selectAccount = useMailStore((s) => s.selectAccount);
+  const setFilter = useMailStore((s) => s.setFilter);
   const syncInbox = useMailStore((s) => s.syncInbox);
   const removeAccount = useMailStore((s) => s.removeAccount);
   const error = useMailStore((s) => s.error);
@@ -45,13 +45,11 @@ function App() {
           accounts,
           selectedAccountId,
           syncing,
-          onSelectAccount: (id) => void selectAccount(id),
+          onSelectAccount: (id) => void setFilter(id),
           onAddAccount: () => {
             setAddOpen(true);
           },
-          onSync: () => {
-            if (selectedAccountId !== null) void syncInbox(selectedAccountId);
-          },
+          onSync: () => void syncInbox(),
           onRemoveAccount: (id) => {
             if (window.confirm('确认移除该账户？授权码会从 keychain 删除，本地邮件清空。')) {
               void removeAccount(id);
