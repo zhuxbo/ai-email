@@ -6,7 +6,6 @@ import { AiDrawer } from './components/ai-drawer';
 import { AiSettingsDialog } from './components/ai-settings-dialog';
 import { MessageDetail } from './components/message-detail';
 import { MessageList } from './components/message-list';
-import { ReplyComposer } from './components/reply-composer';
 import { useAiStore } from './lib/store/ai';
 import { useComposeStore } from './lib/store/compose';
 import { useMailStore } from './lib/store/mail';
@@ -106,8 +105,6 @@ function App() {
           setAiSettingsOpen(false);
         }}
       />
-      <ReplyComposer />
-
       {errorToasts.length > 0 && (
         <div className="fixed bottom-4 left-4 z-50 flex max-w-md flex-col gap-2">
           {errorToasts.map((t) => (

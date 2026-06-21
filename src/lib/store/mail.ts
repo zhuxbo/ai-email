@@ -21,8 +21,6 @@ interface MailState {
   categoryFilter: Category[];
   sortByPriority: boolean;
 
-  composerOpen: boolean;
-
   query: string;
   /** 部分账户当前加载/同步失败：accountId → 错误信息。聚合层不再静默吞掉部分失败。 */
   accountErrors: Record<string, string>;
@@ -37,9 +35,6 @@ interface MailState {
 
   syncInbox: (accountId?: string) => Promise<void>;
   selectMessage: (id: string) => Promise<void>;
-
-  openComposer: () => void;
-  closeComposer: () => void;
 
   reloadMessages: () => Promise<void>;
   setFilter: (accountId: string | null) => Promise<void>;
@@ -72,8 +67,6 @@ export const useMailStore = create<MailState>((set, get) => ({
 
   categoryFilter: [],
   sortByPriority: false,
-
-  composerOpen: false,
 
   query: '',
   accountErrors: {},
@@ -170,13 +163,6 @@ export const useMailStore = create<MailState>((set, get) => ({
     } finally {
       set({ loadingBody: false });
     }
-  },
-
-  openComposer: () => {
-    set({ composerOpen: true });
-  },
-  closeComposer: () => {
-    set({ composerOpen: false });
   },
 
   reloadMessages: async () => {
