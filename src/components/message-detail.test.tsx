@@ -17,6 +17,7 @@ describe('MessageDetail', () => {
           fromAddr: 'x',
           sentAt: null,
           hasAttachment: false,
+          flags: [],
         },
       ] as never,
       selectedMessageId: 'm1',
