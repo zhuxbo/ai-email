@@ -33,6 +33,9 @@ tokio = { version = "1", features = [
     "net",
     "fs",
 ] }
+# tokio-util：提供 CancellationToken，用于后台 classify/evaluate_rules 任务的干净退出。
+# tokio 官方维护，weekly 下载 >3000 万，与 tokio 版本锁定。
+tokio-util = { version = "0.7", features = ["rt"] }
 
 # ── Database ──────────────────────────────────────────────
 # Embedded SQLite (bundled libsqlite3 — no system dependency). The DB file lives in the OS
@@ -138,6 +141,10 @@ android-keyring = "0.2"
 # (4 of them), so size matters there most. Shared by ALL targets incl. desktop:
 # strip/lto/opt-z shrink desktop binaries too. `panic = "abort"` also prevents
 # unwinding across the Tauri FFI boundary (CLAUDE.md: never panic across FFI).
+[dev-dependencies]
+# 提供自动清理的临时目录，用于 #26 超时路径测试（优于 std::env::temp_dir 的不清理写法）。
+tempfile = "3"
+
 [profile.release]
 strip = true
 opt-level = "z"
