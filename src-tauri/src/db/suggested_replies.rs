@@ -7,7 +7,7 @@ use sqlx::FromRow;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::db::Pool;
+use crate::db::{is_fk_violation, Pool};
 use crate::error::AppResult;
 
 #[derive(Debug, Clone, Serialize, FromRow)]
@@ -57,7 +57,7 @@ pub async fn insert_if_absent(
 
     match result {
         Ok(_) => Ok(()),
-        Err(sqlx::Error::Database(e)) if e.message().contains("FOREIGN KEY constraint failed") => {
+        Err(ref e) if is_fk_violation(e) => {
             // rule_id 在插入前已被并发删除——FK 约束触发。建议已有 *_snapshot 仍可展示，
             // 但写入失败。记 warn 后返回 Ok，不阻断整批评估；不留孤儿行。
             tracing::warn!(

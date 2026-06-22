@@ -28,7 +28,7 @@ use uuid::Uuid;
 use crate::ai::{extract_json, prompts, AiClient, CompletionRequest, SystemBlock, UserMessage};
 use crate::db::ai_results::{self, AiResultInsert};
 use crate::db::messages::{self, ClassifyInput};
-use crate::db::{ai_role_defaults, message_tags, Pool};
+use crate::db::{ai_role_defaults, is_fk_violation, message_tags, Pool};
 use crate::error::{AppError, AppResult};
 use crate::keychain;
 
@@ -245,7 +245,7 @@ async fn classify_chunk(
                     source: "fresh",
                 });
             }
-            Err(ref e) if is_fk_error(e) => {
+            Err(ref e @ AppError::Db(ref inner)) if is_fk_violation(inner) => {
                 tracing::warn!(
                     message_id = %msg.id,
                     error = %e,
@@ -324,16 +324,6 @@ fn normalize_category(raw: &str) -> String {
 
 fn clamp_priority(p: i32) -> i32 {
     p.clamp(1, 3)
-}
-
-/// 判断错误是否为 SQLite FOREIGN KEY 约束失败（并发删除消息时可发生）。
-fn is_fk_error(e: &AppError) -> bool {
-    match e {
-        AppError::Db(sqlx::Error::Database(db_err)) => {
-            db_err.message().contains("FOREIGN KEY constraint failed")
-        }
-        _ => false,
-    }
 }
 
 fn truncate_for_log(s: &str) -> String {

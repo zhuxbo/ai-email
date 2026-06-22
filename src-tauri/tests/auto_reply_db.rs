@@ -416,16 +416,20 @@ async fn list_enabled_by_account_deterministic_on_same_created_at() {
     // 手动插入两条 created_at 完全相同的规则，id 不同
     let id_a = Uuid::new_v4();
     let id_b = Uuid::new_v4();
-    // 确保 id_a < id_b（UUID 比较用字节序）
+    // 确保 id_first < id_second（UUID 比较用字节序）
     let (id_first, id_second) = if id_a < id_b {
         (id_a, id_b)
     } else {
         (id_b, id_a)
     };
+    // name 字典序故意与 id 字节序相反：id_first（字节序小）对应字典序靠后的 name "z-rule"，
+    // id_second（字节序大）对应字典序靠前的 name "a-rule"。
+    // 这样只有真正按 id 做 tie-break 才会让 id_first 排在前面；
+    // 若 ORDER BY 误写成 created_at, name 则会把 "a-rule" (id_second) 错放第一，断言即失败。
     let same_ts = "2026-01-01T00:00:00.000+00:00";
     sqlx::query(
         "INSERT INTO auto_reply_rules (id, account_id, name, draft_intent, created_at)
-         VALUES (?1, ?2, 'rule-first', 'i', ?3)",
+         VALUES (?1, ?2, 'z-rule', 'i', ?3)",
     )
     .bind(id_first)
     .bind(account_id)
@@ -435,7 +439,7 @@ async fn list_enabled_by_account_deterministic_on_same_created_at() {
     .unwrap();
     sqlx::query(
         "INSERT INTO auto_reply_rules (id, account_id, name, draft_intent, created_at)
-         VALUES (?1, ?2, 'rule-second', 'i', ?3)",
+         VALUES (?1, ?2, 'a-rule', 'i', ?3)",
     )
     .bind(id_second)
     .bind(account_id)

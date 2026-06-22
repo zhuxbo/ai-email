@@ -61,3 +61,11 @@ pub async fn connect(db_path: &Path) -> AppResult<Pool> {
     MIGRATOR.run(&pool).await?;
     Ok(pool)
 }
+
+/// 判断 sqlx 错误是否为 SQLite FOREIGN KEY 约束失败。
+///
+/// 使用扩展错误码 787（稳定，sqlx 0.8+），不依赖内部英文文案字符串匹配。
+/// 并发删除父行时可触发此错误；调用方应 warn 后跳过，而非传播。
+pub(crate) fn is_fk_violation(e: &sqlx::Error) -> bool {
+    matches!(e, sqlx::Error::Database(db) if db.is_foreign_key_violation())
+}

@@ -481,4 +481,13 @@ async fn connect_sets_synchronous_normal() {
         val, 1,
         "WAL 模式下应设置 synchronous=NORMAL (1)，当前值: {val}"
     );
+    // NORMAL 必须配在 WAL 模式下才安全；断言 journal_mode=wal 确认前提成立。
+    let mode: String = sqlx::query_scalar("PRAGMA journal_mode")
+        .fetch_one(&pool)
+        .await
+        .expect("query journal_mode");
+    assert_eq!(
+        mode, "wal",
+        "synchronous=NORMAL 仅在 WAL 模式下安全，当前 journal_mode: {mode}"
+    );
 }
