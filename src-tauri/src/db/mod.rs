@@ -21,6 +21,7 @@ pub mod mailboxes;
 pub mod message_tags;
 pub mod messages;
 pub mod send_log;
+pub mod suggested_replies;
 
 use std::path::Path;
 

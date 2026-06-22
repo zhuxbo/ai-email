@@ -205,3 +205,51 @@ async fn auto_reply_rules_crud_roundtrip() {
         .unwrap()
         .is_empty());
 }
+
+#[tokio::test]
+async fn list_pending_excludes_replied() {
+    use ai_email_lib::db::suggested_replies as q;
+    let pool = mem_pool().await;
+    let (account_id, msg_id) = seed_account_and_message(&pool).await;
+    let rule_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO auto_reply_rules (id, account_id, name, draft_intent) VALUES (?1, ?2, 'r', 'i')")
+        .bind(rule_id).bind(account_id).execute(&pool).await.unwrap();
+
+    q::insert_if_absent(&pool, msg_id, rule_id, "i", "r")
+        .await
+        .unwrap();
+    assert_eq!(q::list_pending(&pool).await.unwrap().len(), 1);
+
+    // 写一条 send_log 回复该邮件 → 派生为已回复 → 不在 pending 列表
+    sqlx::query(
+        "INSERT INTO send_log (id, account_id, in_reply_to, to_addrs, subject, ai_assisted, smtp_response)
+         VALUES (?1, ?2, ?3, '[]', 's', 1, 'OK')",
+    ).bind(Uuid::new_v4()).bind(account_id).bind(msg_id).execute(&pool).await.unwrap();
+    assert!(
+        q::list_pending(&pool).await.unwrap().is_empty(),
+        "已回复邮件应从队列派生消失"
+    );
+}
+
+#[tokio::test]
+async fn dismiss_removes_suggestion_from_pending() {
+    use ai_email_lib::db::suggested_replies as q;
+    let pool = mem_pool().await;
+    let (account_id, msg_id) = seed_account_and_message(&pool).await;
+    let rule_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO auto_reply_rules (id, account_id, name, draft_intent) VALUES (?1, ?2, 'r', 'i')")
+        .bind(rule_id).bind(account_id).execute(&pool).await.unwrap();
+
+    q::insert_if_absent(&pool, msg_id, rule_id, "i", "r")
+        .await
+        .unwrap();
+    let pending = q::list_pending(&pool).await.unwrap();
+    assert_eq!(pending.len(), 1);
+
+    // 忽略该建议 → status='dismissed' → 从 pending 队列消失
+    q::dismiss(&pool, pending[0].id).await.unwrap();
+    assert!(
+        q::list_pending(&pool).await.unwrap().is_empty(),
+        "dismissed 建议应从 pending 队列消失"
+    );
+}
