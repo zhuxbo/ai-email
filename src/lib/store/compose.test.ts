@@ -33,16 +33,18 @@ const enMsg: MessageHeader = {
   bodyFetchedAt: null,
 };
 
-// mock ui store 的 closeDrawer（runSend 会调用）
+// M2：提为模块级稳定 spy，使"未关抽屉"可断言（而非每次 getState() 返回不同实例）
+const closeDrawerSpy = vi.fn();
 vi.mock('./ui', () => ({
   useUiStore: {
-    getState: () => ({ closeDrawer: vi.fn() }),
+    getState: () => ({ closeDrawer: closeDrawerSpy }),
   },
 }));
 
 describe('compose store', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    closeDrawerSpy.mockClear();
     vi.useFakeTimers();
     useComposeStore.getState().reset();
   });
@@ -237,5 +239,32 @@ describe('compose store', () => {
     await useComposeStore.getState().runDraft();
 
     expect(useComposeStore.getState().draftSource).toBe('cached');
+  });
+
+  it('#13 对抗：发送邮件 A 后对同一封 A 重开 reply，linger 不清新草稿', async () => {
+    // 同封邮件（同 messageId + accountId）重开是 bug 的核心边界：
+    // 旧守卫仅比对 messageId+accountId，两者相同 → 误判为同一会话 → 清掉新草稿。
+    vi.mocked(tauri.smtpSend).mockResolvedValue({
+      sendLog: { id: 'log-cc', smtpResponse: 'OK' },
+    } as never);
+    vi.stubGlobal('confirm', () => true);
+
+    // 发送邮件 A
+    useComposeStore.getState().openReply(enMsg); // enMsg.id = 'm-en', accountId = 'acc-9'
+    useComposeStore.getState().setField({ bodyForeign: 'first reply' });
+    await useComposeStore.getState().runSend();
+
+    // linger 触发前，对同一封 A（相同 messageId+accountId）重开并键入新内容
+    useComposeStore.getState().openReply(enMsg); // 同 id='m-en', accountId='acc-9'
+    useComposeStore.getState().setField({ bodyForeign: 'second reply to same mail' });
+
+    // 推进 linger 计时器
+    vi.runAllTimers();
+
+    // 新草稿不应被清除
+    expect(useComposeStore.getState().bodyForeign).toBe('second reply to same mail');
+    expect(useComposeStore.getState().replyContext?.messageId).toBe('m-en');
+    // closeDrawer 不应被调用（抽屉未关）
+    expect(closeDrawerSpy).not.toHaveBeenCalled();
   });
 });

@@ -9,10 +9,14 @@ import type { Account, AddAccountForm, Category, MessageBody, MessageHeader } fr
 import { errMsg } from '../utils';
 import { useAiStore } from './ai';
 
-function patchFlag(flags: string[], flag: string, add: boolean): string[] {
+/**
+ * 纯函数：在 flags 中添加或移除单个 flag，不改变其它 flag。
+ * 用于乐观写与按粒度回滚，保证两处逻辑对称。
+ */
+function toggleFlag(flags: string[], flag: string, present: boolean): string[] {
   const has = flags.includes(flag);
-  if (add && !has) return [...flags, flag];
-  if (!add && has) return flags.filter((f) => f !== flag);
+  if (present && !has) return [...flags, flag];
+  if (!present && has) return flags.filter((f) => f !== flag);
   return flags;
 }
 
@@ -24,28 +28,24 @@ async function setFlagOptimistic(
   value: boolean,
   call: (id: string, value: boolean) => Promise<void>,
 ): Promise<void> {
-  // 记录该条消息的原始 flag 值，用于精准回滚（不快照整列）。
-  const originalFlags = get().messages.find((m) => m.id === id)?.flags;
   // 开始新操作即清除上一次遗留的错误提示；失败时下方 catch 再写入新 error。
   set({
     messages: get().messages.map((m) =>
-      m.id === id ? { ...m, flags: patchFlag(m.flags, flag, value) } : m,
+      m.id === id ? { ...m, flags: toggleFlag(m.flags, flag, value) } : m,
     ),
     error: null,
   });
   try {
     await call(id, value);
   } catch (e) {
-    // 精准回滚：只恢复该条消息的 flags 原值，不覆盖整列快照，
-    // 避免并发进行的其它乐观更新被一并回滚。
-    if (originalFlags !== undefined) {
-      set({
-        messages: get().messages.map((m) => (m.id === id ? { ...m, flags: originalFlags } : m)),
-        error: errMsg(e),
-      });
-    } else {
-      set({ error: errMsg(e) });
-    }
+    // #12 按 flag 粒度回滚：读取当前最新 flags，仅反转本次操作的那一个 flag，
+    // 保留并发期间其它操作已成功写入的其它 flag，不覆盖整条旧快照。
+    set({
+      messages: get().messages.map((m) =>
+        m.id === id ? { ...m, flags: toggleFlag(m.flags, flag, !value) } : m,
+      ),
+      error: errMsg(e),
+    });
   }
 }
 

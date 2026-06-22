@@ -143,6 +143,47 @@ describe('mail store flag 乐观更新', () => {
     expect(useMailStore.getState().messages.find((m) => m.id === 'm2')?.flags).toContain('\\Seen');
     expect(useMailStore.getState().error).toContain('flagged-boom');
   });
+
+  it('#12 对抗：同一条消息并发 setFlagged（失败）+ setSeen（成功），回滚不抹掉已成功的 \\Seen', async () => {
+    // 这正是旧快照回滚的致命边界：旧实现捕获 originalFlags = []，
+    // setFlagged 失败时恢复 [] → 把 setSeen 已成功写入的 \\Seen 一并抹掉。
+    useMailStore.setState({
+      messages: [{ id: 'm1', accountId: 'a1', flags: [] }] as never,
+      error: null,
+    } as never);
+
+    // setSeen 立即成功
+    vi.mocked(tauri.messageSetSeen).mockResolvedValue(undefined);
+
+    // setFlagged 挂起，之后失败
+    let rejectFlagged!: (e: Error) => void;
+    vi.mocked(tauri.messageSetFlagged).mockImplementationOnce(
+      () =>
+        new Promise((_res, rej) => {
+          rejectFlagged = rej;
+        }),
+    );
+
+    // 先发起 setFlagged（捕获旧快照 flags=[]），再发起 setSeen
+    const pendingFlagged = useMailStore.getState().setFlagged('m1', true);
+    const pendingSeen = useMailStore.getState().setSeen('m1', true);
+
+    // setSeen 先成功
+    await pendingSeen;
+    expect(useMailStore.getState().messages.find((m) => m.id === 'm1')?.flags).toContain('\\Seen');
+
+    // setFlagged 后失败
+    rejectFlagged(new Error('flagged-boom'));
+    await pendingFlagged;
+
+    // \\Flagged 应被回滚（本次操作失败）
+    expect(useMailStore.getState().messages.find((m) => m.id === 'm1')?.flags).not.toContain(
+      '\\Flagged',
+    );
+    // \\Seen 应仍保留（按粒度回滚，不恢复旧快照）
+    expect(useMailStore.getState().messages.find((m) => m.id === 'm1')?.flags).toContain('\\Seen');
+    expect(useMailStore.getState().error).toContain('flagged-boom');
+  });
 });
 
 describe('mail store 打开自动标记已读', () => {

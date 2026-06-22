@@ -50,6 +50,12 @@ interface ComposeState {
   draftSource: 'fresh' | 'cached' | null;
   error: string | null;
   receiptInfo: string | null;
+  /**
+   * #13 单调递增的发送身份令牌。openReply / openBlank / reset 每次都递增，
+   * 使"同一封邮件重开 reply"的 nonce 不同于发送时记录的 nonce，
+   * linger 定时器凭此区分"同一草稿会话"与"重开后的新草稿会话"。
+   */
+  sendNonce: number;
 
   openReply: (
     m: Pick<MessageHeader, 'id' | 'accountId' | 'fromAddr' | 'subject' | 'snippet'>,
@@ -84,14 +90,18 @@ const BLANK = {
   draftSource: null,
   error: null,
   receiptInfo: null,
+  // sendNonce 不在 BLANK 中，由 store 初始化为 0，各草稿身份转换时单独递增
 } as const;
 
 export const useComposeStore = create<ComposeState>((set, get) => ({
   ...BLANK,
+  sendNonce: 0,
 
   openReply: (m) => {
+    // #13 递增 sendNonce：重开同封邮件时 nonce 变化，使旧的 linger 定时器失配。
     set({
       ...BLANK,
+      sendNonce: get().sendNonce + 1,
       replyContext: { messageId: m.id, accountId: m.accountId },
       fromAccountId: m.accountId,
       to: m.fromAddr ?? '',
@@ -102,7 +112,12 @@ export const useComposeStore = create<ComposeState>((set, get) => ({
 
   openBlank: () => {
     const { selectedAccountId, accounts } = useMailStore.getState();
-    set({ ...BLANK, fromAccountId: selectedAccountId ?? accounts[0]?.id ?? null });
+    // #13 递增 sendNonce：新建空白草稿切换草稿身份。
+    set({
+      ...BLANK,
+      sendNonce: get().sendNonce + 1,
+      fromAccountId: selectedAccountId ?? accounts[0]?.id ?? null,
+    });
   },
 
   setField: (patch) => {
@@ -127,14 +142,13 @@ export const useComposeStore = create<ComposeState>((set, get) => ({
 
       // #18 bilingual 基于实际草稿语言重判，而非仅依赖 openReply 时的 subject+snippet 判断
       const draftIsForeign = detectForeign(draft.body);
-      const newBilingual = draftIsForeign;
 
       if (get().subject.trim() === '') {
         set({
           bodyForeign: draft.body,
           aiAssisted: true,
           subject: draft.subject,
-          bilingual: newBilingual,
+          bilingual: draftIsForeign,
           // #52 保留 source 供 UI 显示缓存命中
           draftSource: draft.source,
         });
@@ -142,7 +156,7 @@ export const useComposeStore = create<ComposeState>((set, get) => ({
         set({
           bodyForeign: draft.body,
           aiAssisted: true,
-          bilingual: newBilingual,
+          bilingual: draftIsForeign,
           draftSource: draft.source,
         });
       }
@@ -179,9 +193,10 @@ export const useComposeStore = create<ComposeState>((set, get) => ({
     const from = get().fromAccountId;
     if (from === null) return;
     if (!window.confirm('确认发送？此操作不可撤销，并会写入 send_log 审计表。')) return;
-    // #13 发送前记录当前草稿会话身份（replyContext.messageId 或 null 表示空白草稿）；
-    // linger 定时器触发时比对身份，仅当用户尚未开启新草稿会话时才 reset+关抽屉。
-    const sentReplyContext = get().replyContext;
+    // #13 用 sendNonce 标记本次发送的草稿身份（而非 messageId+accountId）。
+    // openReply/openBlank/reset 均会递增 nonce，因此即便对同一封邮件重开 reply，
+    // nonce 也会变化，linger 定时器凭 nonce 失配自动跳过清理，保留新草稿。
+    const nonce = get().sendNonce;
     set({ sending: true, error: null });
     try {
       const receipt = await tauri.smtpSend({
@@ -197,13 +212,9 @@ export const useComposeStore = create<ComposeState>((set, get) => ({
         receiptInfo: `已发送，send_log ${receipt.sendLog.id.slice(0, 8)} · ${receipt.sendLog.smtpResponse ?? ''}`,
       });
       setTimeout(() => {
-        // 仅当当前仍是本次发送对应的草稿会话时才清理；
-        // 若用户已开新草稿（replyContext 已变），不动它、不强制关抽屉。
-        const cur = get().replyContext;
-        const isSameSession =
-          cur?.messageId === sentReplyContext?.messageId &&
-          cur?.accountId === sentReplyContext?.accountId;
-        if (isSameSession) {
+        // nonce 仍相同 → 用户尚未开启新草稿会话，安全清理。
+        // nonce 已变（openReply/openBlank/reset 被调用）→ 跳过，保留新草稿。
+        if (get().sendNonce === nonce) {
           get().reset();
           useUiStore.getState().closeDrawer();
         }
@@ -216,6 +227,7 @@ export const useComposeStore = create<ComposeState>((set, get) => ({
   },
 
   reset: () => {
-    set({ ...BLANK });
+    // #13 reset 也递增 sendNonce，使任何 in-flight linger 定时器失配。
+    set({ ...BLANK, sendNonce: get().sendNonce + 1 });
   },
 }));
