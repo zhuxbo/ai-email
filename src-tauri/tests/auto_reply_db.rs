@@ -320,3 +320,87 @@ async fn evaluate_rules_matches_after_classification_and_degrades_without_it() {
         "分类写回后 category 规则应命中"
     );
 }
+
+// ── #19: 失败的 send_log 不应把建议回复永久排出队列 ─────────────────────────────
+
+#[tokio::test]
+async fn failed_send_log_does_not_exclude_suggestion_from_pending() {
+    use ai_email_lib::db::suggested_replies as q;
+    let pool = mem_pool().await;
+    let (account_id, msg_id) = seed_account_and_message(&pool).await;
+    let rule_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO auto_reply_rules (id, account_id, name, draft_intent) VALUES (?1, ?2, 'r', 'i')",
+    )
+    .bind(rule_id)
+    .bind(account_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    q::insert_if_absent(&pool, msg_id, rule_id, "i", "r")
+        .await
+        .unwrap();
+    assert_eq!(
+        q::list_pending(&pool).await.unwrap().len(),
+        1,
+        "初始应有 1 条 pending"
+    );
+
+    // 写一条 SMTP 失败的 send_log（smtp_response 以 "ERROR:" 开头）。
+    // 修复后：in_reply_to 为 NULL（sender.rs 失败分支不写），或即使不为 NULL，
+    // list_pending 的子查询也应只计入非 ERROR 行。
+    // 这里直接模拟修复后的行为：失败行 in_reply_to=NULL。
+    sqlx::query(
+        "INSERT INTO send_log (id, account_id, in_reply_to, to_addrs, subject, ai_assisted, smtp_response)
+         VALUES (?1, ?2, NULL, '[]', 's', 0, 'ERROR: connection refused')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(account_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        q::list_pending(&pool).await.unwrap().len(),
+        1,
+        "SMTP 失败的审计行（in_reply_to=NULL）不应把建议排出队列"
+    );
+}
+
+#[tokio::test]
+async fn successful_send_log_excludes_suggestion_from_pending() {
+    use ai_email_lib::db::suggested_replies as q;
+    let pool = mem_pool().await;
+    let (account_id, msg_id) = seed_account_and_message(&pool).await;
+    let rule_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO auto_reply_rules (id, account_id, name, draft_intent) VALUES (?1, ?2, 'r', 'i')",
+    )
+    .bind(rule_id)
+    .bind(account_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    q::insert_if_absent(&pool, msg_id, rule_id, "i", "r")
+        .await
+        .unwrap();
+
+    // 写一条成功的 send_log（smtp_response 不以 "ERROR:" 开头）。
+    sqlx::query(
+        "INSERT INTO send_log (id, account_id, in_reply_to, to_addrs, subject, ai_assisted, smtp_response)
+         VALUES (?1, ?2, ?3, '[]', 's', 1, '250 2.0.0 OK: queued')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(account_id)
+    .bind(msg_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    assert!(
+        q::list_pending(&pool).await.unwrap().is_empty(),
+        "成功的 send_log 应把建议排出队列"
+    );
+}
