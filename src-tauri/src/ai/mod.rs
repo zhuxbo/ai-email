@@ -127,7 +127,23 @@ impl AiClient {
     /// Build a fresh client for an `AiModel` row. The reqwest client inside is also fresh
     /// — at MVP call rate (single-digit calls per minute) the pool reuse savings are
     /// negligible and a fresh client picks up any rotated keys/proxies immediately.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AppError::Config`] if `model.base_url` is set to a non-HTTPS URL — the
+    /// API key must never travel in plain text (second-line defence after `model_add`).
     pub fn build(model: &AiModel, api_key: SecretString) -> AppResult<Self> {
+        // #3 second-line defence: reject any stored base_url that is not HTTPS.
+        // model_add already validates this at write time; this guard catches rows that
+        // were inserted before the validation was introduced or via direct DB writes.
+        if let Some(url) = &model.base_url {
+            if !url.starts_with("https://") {
+                return Err(AppError::Config(format!(
+                    "base_url must use https:// to protect the API key in transit; got: {url}"
+                )));
+            }
+        }
+
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(120))
             .user_agent("ai-email/0.1.0 (+https://github.com/zhuxbo/ai-email)")
@@ -175,8 +191,59 @@ impl AiClient {
 
 #[cfg(test)]
 mod tests {
-    use super::extract_json;
+    use super::{extract_json, AiClient};
+    use crate::db::ai_models::AiModel;
+    use secrecy::SecretString;
     use serde_json::Value;
+    use uuid::Uuid;
+
+    fn make_model(provider: &str, base_url: Option<&str>) -> AiModel {
+        AiModel {
+            id: Uuid::new_v4(),
+            display_name: "test".into(),
+            provider: provider.into(),
+            model_id: "test-model".into(),
+            base_url: base_url.map(str::to_owned),
+            created_at: time::OffsetDateTime::now_utc(),
+        }
+    }
+
+    fn dummy_key() -> SecretString {
+        SecretString::from("sk-test-dummy-key".to_owned())
+    }
+
+    // ---- #3: AiClient::build rejects non-HTTPS base_url ----
+
+    #[test]
+    fn build_rejects_http_base_url() {
+        let model = make_model("anthropic", Some("http://api.example.com/v1"));
+        match AiClient::build(&model, dummy_key()) {
+            Err(e) => assert!(
+                e.to_string().contains("https://"),
+                "error message should mention https://: {e}"
+            ),
+            Ok(_) => panic!("expected Err for http:// base_url"),
+        }
+    }
+
+    #[test]
+    fn build_rejects_ftp_base_url() {
+        let model = make_model("openai", Some("ftp://api.example.com"));
+        assert!(AiClient::build(&model, dummy_key()).is_err());
+    }
+
+    #[test]
+    fn build_accepts_https_base_url() {
+        let model = make_model("anthropic", Some("https://api.example.com/v1"));
+        // Succeeds at the URL-validation stage (no network call).
+        assert!(AiClient::build(&model, dummy_key()).is_ok());
+    }
+
+    #[test]
+    fn build_accepts_none_base_url_uses_default() {
+        let model = make_model("openai", None);
+        assert!(AiClient::build(&model, dummy_key()).is_ok());
+    }
 
     /// The extracted span must be valid JSON of the expected shape. We assert structurally
     /// (parse + field check), never on raw model text.
