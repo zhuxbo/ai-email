@@ -110,23 +110,27 @@ impl ImapClient {
     /// LIST every mailbox the account can see. Returns name + hierarchy delimiter; we throw
     /// away the IMAP attributes (Marked / Noselect / …) at MVP — Sprint 1 only touches INBOX.
     pub async fn list_mailboxes(&mut self) -> AppResult<Vec<MailboxInfo>> {
-        let mut stream = timeout(OP_TIMEOUT, self.session.list(Some(""), Some("*")))
-            .await
-            .unwrap_or_else(|_| {
-                Err(async_imap::error::Error::Io(std::io::Error::other(
-                    "LIST timed out",
-                )))
-            })
-            .map_err(|e| AppError::Imap(e.to_string()))?;
-        let mut out = Vec::new();
-        while let Some(item) = stream.next().await {
-            let name = item.map_err(|e| AppError::Imap(e.to_string()))?;
-            out.push(MailboxInfo {
-                name: name.name().to_string(),
-                delimiter: name.delimiter().map(str::to_string),
-            });
-        }
-        Ok(out)
+        // Timeout covers both the command send AND the full response drain: a half-open
+        // connection that accepts LIST but then stalls on the response frames would otherwise
+        // hang indefinitely.
+        timeout(OP_TIMEOUT, async {
+            let mut stream = self
+                .session
+                .list(Some(""), Some("*"))
+                .await
+                .map_err(|e| AppError::Imap(e.to_string()))?;
+            let mut out = Vec::new();
+            while let Some(item) = stream.next().await {
+                let name = item.map_err(|e| AppError::Imap(e.to_string()))?;
+                out.push(MailboxInfo {
+                    name: name.name().to_string(),
+                    delimiter: name.delimiter().map(str::to_string),
+                });
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|_| AppError::Imap("IMAP LIST 操作超时（30s）".into()))?
     }
 
     /// SELECT and return the resulting state. We only read three fields; the rest of the
@@ -150,54 +154,59 @@ impl ImapClient {
     /// `FETCH <set> (UID FLAGS RFC822.SIZE BODY.PEEK[HEADER])` using sequence numbers. Best for
     /// the first sync where we just want the N most recent rows (e.g. `(exists-49):*`).
     pub async fn fetch_headers(&mut self, seq_set: &str) -> AppResult<Vec<FetchedHeader>> {
-        let stream = timeout(OP_TIMEOUT, self.session.fetch(seq_set, FETCH_QUERY))
-            .await
-            .unwrap_or_else(|_| {
-                Err(async_imap::error::Error::Io(std::io::Error::other(
-                    "FETCH timed out",
-                )))
-            })
-            .map_err(|e| AppError::Imap(e.to_string()))?;
-        drain_fetch_stream(stream).await
+        // Timeout wraps both command send and full stream drain so a half-open connection that
+        // accepts FETCH but stalls on response frames doesn't hang indefinitely.
+        timeout(OP_TIMEOUT, async {
+            let stream = self
+                .session
+                .fetch(seq_set, FETCH_QUERY)
+                .await
+                .map_err(|e| AppError::Imap(e.to_string()))?;
+            drain_fetch_stream(stream).await
+        })
+        .await
+        .map_err(|_| AppError::Imap("IMAP FETCH 操作超时（30s）".into()))?
     }
 
     /// `UID FETCH <set> (UID FLAGS RFC822.SIZE BODY.PEEK[HEADER])`. Best for incremental sync
     /// (e.g. `<prev_uid_next>:*`) — UIDs are stable across SELECT, sequence numbers aren't.
     pub async fn uid_fetch_headers(&mut self, uid_set: &str) -> AppResult<Vec<FetchedHeader>> {
-        let stream = timeout(OP_TIMEOUT, self.session.uid_fetch(uid_set, FETCH_QUERY))
-            .await
-            .unwrap_or_else(|_| {
-                Err(async_imap::error::Error::Io(std::io::Error::other(
-                    "UID FETCH timed out",
-                )))
-            })
-            .map_err(|e| AppError::Imap(e.to_string()))?;
-        drain_fetch_stream(stream).await
+        // Same pattern: timeout covers send + full drain.
+        timeout(OP_TIMEOUT, async {
+            let stream = self
+                .session
+                .uid_fetch(uid_set, FETCH_QUERY)
+                .await
+                .map_err(|e| AppError::Imap(e.to_string()))?;
+            drain_fetch_stream(stream).await
+        })
+        .await
+        .map_err(|_| AppError::Imap("IMAP UID FETCH 操作超时（30s）".into()))?
     }
 
     /// `UID FETCH <uid> (BODY.PEEK[])`. Returns the full RFC 822 bytes for one message —
     /// callers parse them with [`crate::imap::parse::parse_body`]. Errors if the UID is
     /// missing from the currently-selected mailbox.
     pub async fn uid_fetch_body(&mut self, uid: u32) -> AppResult<Vec<u8>> {
-        let mut stream = timeout(
-            OP_TIMEOUT,
-            self.session.uid_fetch(uid.to_string(), "(BODY.PEEK[])"),
-        )
-        .await
-        .unwrap_or_else(|_| {
-            Err(async_imap::error::Error::Io(std::io::Error::other(
-                "UID FETCH BODY timed out",
-            )))
+        // Timeout covers both command send and stream read so a half-open connection that
+        // accepts the UID FETCH but stalls on response data doesn't hang indefinitely.
+        timeout(OP_TIMEOUT, async {
+            let mut stream = self
+                .session
+                .uid_fetch(uid.to_string(), "(BODY.PEEK[])")
+                .await
+                .map_err(|e| AppError::Imap(e.to_string()))?;
+            let Some(item) = stream.next().await else {
+                return Err(AppError::Imap(format!("UID {uid} not found in mailbox")));
+            };
+            let f = item.map_err(|e| AppError::Imap(e.to_string()))?;
+            let body = f
+                .body()
+                .ok_or_else(|| AppError::Imap(format!("UID {uid} returned no BODY[]")))?;
+            Ok(body.to_vec())
         })
-        .map_err(|e| AppError::Imap(e.to_string()))?;
-        let Some(item) = stream.next().await else {
-            return Err(AppError::Imap(format!("UID {uid} not found in mailbox")));
-        };
-        let f = item.map_err(|e| AppError::Imap(e.to_string()))?;
-        let body = f
-            .body()
-            .ok_or_else(|| AppError::Imap(format!("UID {uid} returned no BODY[]")))?;
-        Ok(body.to_vec())
+        .await
+        .map_err(|_| AppError::Imap("IMAP UID FETCH BODY 操作超时（30s）".into()))?
     }
 
     /// `UID STORE <uid> ±FLAGS (<flag>)`。flag 传字面 IMAP 形式（如 `"\\Seen"` / `"\\Flagged"`）。
@@ -207,18 +216,20 @@ impl ImapClient {
     pub async fn uid_set_flag(&mut self, uid: u32, flag: &str, add: bool) -> AppResult<()> {
         let sign = if add { "+" } else { "-" };
         let query = format!("{sign}FLAGS ({flag})");
-        let mut stream = timeout(OP_TIMEOUT, self.session.uid_store(uid.to_string(), query))
-            .await
-            .unwrap_or_else(|_| {
-                Err(async_imap::error::Error::Io(std::io::Error::other(
-                    "UID STORE timed out",
-                )))
-            })
-            .map_err(|e| AppError::Imap(e.to_string()))?;
-        while let Some(item) = stream.next().await {
-            item.map_err(|e| AppError::Imap(e.to_string()))?;
-        }
-        Ok(())
+        // Timeout covers both command send and the full FLAGS response stream drain.
+        timeout(OP_TIMEOUT, async {
+            let mut stream = self
+                .session
+                .uid_store(uid.to_string(), query)
+                .await
+                .map_err(|e| AppError::Imap(e.to_string()))?;
+            while let Some(item) = stream.next().await {
+                item.map_err(|e| AppError::Imap(e.to_string()))?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| AppError::Imap("IMAP UID STORE 操作超时（30s）".into()))?
     }
 
     /// `UID MOVE <uid> <dest>`。需先 `select` 源文件夹。
@@ -444,5 +455,65 @@ mod tests {
     #[test]
     fn size_u32_max_saturates_not_none() {
         assert_eq!(size_u32_to_i32(u32::MAX), Some(i32::MAX));
+    }
+
+    // --- #6: drain 阶段也被超时覆盖 ---
+    //
+    // 真实的 half-open 场景无法在单元测试里还原（async-imap Session 绑定 TcpStream），
+    // 但可以通过构造"命令成功、响应流永不产出"的场景验证：把命令+drain 整体放进
+    // timeout 后，drain 卡住时能被截断并映射为 AppError::Imap。
+
+    #[tokio::test]
+    async fn drain_stall_is_caught_by_op_timeout() {
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        // 模拟"命令已发出（Ok）、但响应流永远挂起"的 async block。
+        // 这正是修复后每个方法内部的结构：命令 + drain 都在同一个 timeout block 里。
+        // timeout 返回 Result<AppResult<_>, Elapsed>；map_err 把 Elapsed 转为 AppError::Imap，
+        // 再用 flatten 把 Result<Result<_,E>,E> 展开为 Result<_,E>。
+        let result: AppResult<Vec<i32>> = timeout(Duration::from_millis(10), async {
+            // 命令阶段：瞬间成功
+            let _cmd_ok: AppResult<()> = Ok(());
+            // drain 阶段：永远挂起，模拟 half-open 连接
+            let pending: futures::future::Pending<Option<i32>> = futures::future::pending();
+            let _item = pending.await; // 永不返回
+            Ok::<Vec<i32>, AppError>(vec![])
+        })
+        .await
+        .map_err(|_| AppError::Imap("IMAP 操作超时（30s）".into()))
+        .and_then(|inner| inner);
+
+        match result {
+            Err(AppError::Imap(msg)) => assert!(
+                msg.contains("超时") || msg.contains("timed out"),
+                "错误信息应含超时说明，实际: {msg}"
+            ),
+            other => panic!("drain 卡住时应超时，实际得到: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn drain_completes_fast_returns_ok() -> AppResult<()> {
+        use futures::StreamExt;
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        // 模拟"命令成功、drain 快速完成"的正常路径，验证超时结构不影响正常返回。
+        let items: Vec<i32> = timeout(Duration::from_millis(100), async {
+            let stream = futures::stream::iter(vec![Ok::<i32, AppError>(1), Ok(2), Ok(3)]);
+            futures::pin_mut!(stream);
+            let mut out = Vec::new();
+            while let Some(item) = stream.next().await {
+                out.push(item?);
+            }
+            Ok::<Vec<i32>, AppError>(out)
+        })
+        .await
+        .map_err(|_| AppError::Imap("IMAP 操作超时（30s）".into()))
+        .and_then(|inner| inner)?;
+
+        assert_eq!(items, vec![1, 2, 3]);
+        Ok(())
     }
 }
