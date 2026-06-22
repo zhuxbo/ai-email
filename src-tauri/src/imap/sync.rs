@@ -130,39 +130,62 @@ pub async fn sync_inbox(
         }
     };
 
+    // Pre-parse all headers so the transaction holds the DB lock for as short as possible
+    // (parsing is CPU-only, no I/O).
+    let parsed: Vec<_> = fetched
+        .iter()
+        .map(|fh| (fh, parse::parse_headers(&fh.header_bytes)))
+        .collect();
+
+    // Collect which existing UIDs need flag refreshes — resolved outside the transaction
+    // so we don't hold the write lock during the incremental flag-update UPDATEs.
+    let mut flag_updates: Vec<(i64, &[String])> = Vec::new();
+
     let mut inserted = 0_i32;
     let mut new_ids: Vec<uuid::Uuid> = Vec::with_capacity(fetched.len());
-    for fh in &fetched {
-        let h = parse::parse_headers(&fh.header_bytes);
-        let new_id = messages::insert(
-            pool,
-            &MessageInsert {
-                account_id: account.id,
-                mailbox_id: inbox.id,
-                imap_uid: i64::from(fh.uid),
-                rfc_message_id: h.rfc_message_id,
-                thread_id: h.thread_id,
-                subject: h.subject,
-                from_addr: h.from_addr,
-                to_addrs: h.to_addrs,
-                cc_addrs: h.cc_addrs,
-                sent_at: h.sent_at,
-                internal_date: None,
-                flags: fh.flags.clone(),
-                size_bytes: fh.size_bytes,
-                has_attachment: false,
-                snippet: None,
-            },
-        )
-        .await?;
-        if let Some(id) = new_id {
-            inserted += 1;
-            new_ids.push(id);
-        } else if matches!(mode, SyncMode::Incremental { .. }) {
-            // Existing UID seen again in an incremental window: refresh its flags so
-            // read/starred state stays in sync with the server (audit #64).
-            messages::update_flags_by_uid(pool, inbox.id, i64::from(fh.uid), &fh.flags).await?;
+
+    // Wrap all inserts in a single transaction (audit #66): eliminates N+1 auto-commits and
+    // makes the batch atomic — a partial sync failure rolls back cleanly.
+    {
+        let mut tx = pool.begin().await?;
+        for (fh, h) in &parsed {
+            let new_id = messages::insert_tx(
+                &mut *tx,
+                &MessageInsert {
+                    account_id: account.id,
+                    mailbox_id: inbox.id,
+                    imap_uid: i64::from(fh.uid),
+                    rfc_message_id: h.rfc_message_id.clone(),
+                    thread_id: h.thread_id.clone(),
+                    subject: h.subject.clone(),
+                    from_addr: h.from_addr.clone(),
+                    to_addrs: h.to_addrs.clone(),
+                    cc_addrs: h.cc_addrs.clone(),
+                    sent_at: h.sent_at,
+                    internal_date: None,
+                    flags: fh.flags.clone(),
+                    size_bytes: fh.size_bytes,
+                    has_attachment: false,
+                    snippet: None,
+                },
+            )
+            .await?;
+            if let Some(id) = new_id {
+                inserted += 1;
+                new_ids.push(id);
+            } else if matches!(mode, SyncMode::Incremental { .. }) {
+                flag_updates.push((i64::from(fh.uid), &fh.flags));
+            }
         }
+        tx.commit().await?;
+    }
+
+    // Apply flag refreshes for already-present UIDs after the insert transaction commits.
+    // These are independent UPDATEs — they don't need to be atomic with the inserts.
+    for (uid, flags) in flag_updates {
+        // Existing UID seen again in an incremental window: refresh its flags so
+        // read/starred state stays in sync with the server (audit #64).
+        messages::update_flags_by_uid(pool, inbox.id, uid, flags).await?;
     }
 
     mailboxes::update_after_sync(

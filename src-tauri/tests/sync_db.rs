@@ -1,10 +1,11 @@
-//! DB-layer integration tests for IMAP-sync bookkeeping correctness (audit Phase 2):
+//! DB-layer integration tests for IMAP-sync bookkeeping correctness (audit Phase 2 & 3):
 //!   - #9  update_after_sync writes the new uid_validity (no silent COALESCE masking)
 //!   - #73 update_after_sync never lets uid_next regress under interleaved syncs (MAX guard)
 //!   - #2  reset_mailbox_for_uidvalidity_change drops stale UID rows + resets uid_next
 //!   - #27 get_by_name matches "INBOX" case-insensitively (write/read agree on the row)
 //!   - #64 `messages::update_flags_by_uid` 按 (mailbox_id, imap_uid) 刷新 flags，并隔离跨 mailbox 的同名 UID
 //!     （见 update_flags_by_uid_updates_correct_mailbox）
+//!   - #66 sync 插入循环在单个事务内提交（消除 N+1 写）
 //!
 //! All round-trips run against a real migrated on-disk SQLite — never QQ Mail.
 
@@ -246,6 +247,67 @@ async fn update_flags_by_uid_updates_correct_mailbox() {
     assert!(
         row_b.flags.is_empty(),
         "mb_b UID 42 must not be touched by an update scoped to mb_a"
+    );
+}
+
+// ---- #66: batch insert loop runs in a single transaction ----
+
+/// 验证 sync 插入循环使用事务：多行一起提交，而不是逐行自动提交（N+1 写）。
+/// 测试手段：向 `messages::insert_tx` 批量插入若干行，提交事务后验证全部可见；
+/// 中途 rollback 则全部消失（原子性）。
+#[tokio::test]
+async fn batch_insert_is_atomic_via_transaction() {
+    let pool = temp_db().await;
+    let acc = seed_account(&pool, "txbatch@example.com").await;
+    let mb = seed_mailbox(&pool, acc, "INBOX").await;
+
+    let make_insert = |uid: i64| MessageInsert {
+        account_id: acc,
+        mailbox_id: mb,
+        imap_uid: uid,
+        rfc_message_id: None,
+        thread_id: None,
+        subject: Some(format!("msg {uid}")),
+        from_addr: None,
+        to_addrs: vec![],
+        cc_addrs: vec![],
+        sent_at: None,
+        internal_date: None,
+        flags: vec![],
+        size_bytes: None,
+        has_attachment: false,
+        snippet: None,
+    };
+
+    // --- 场景 A：正常提交 → 所有行可见 ---
+    {
+        let mut tx = pool.begin().await.unwrap();
+        for uid in 1..=3_i64 {
+            messages::insert_tx(&mut *tx, &make_insert(uid))
+                .await
+                .unwrap();
+        }
+        tx.commit().await.unwrap();
+    }
+    let visible = messages::list_in_mailbox(&pool, mb, 10, 0).await.unwrap();
+    assert_eq!(visible.len(), 3, "commit 后全部 3 行应可见");
+
+    // --- 场景 B：rollback → 新增行全部消失 ---
+    {
+        let mut tx = pool.begin().await.unwrap();
+        for uid in 10..=12_i64 {
+            messages::insert_tx(&mut *tx, &make_insert(uid))
+                .await
+                .unwrap();
+        }
+        // 不 commit，直接 drop → rollback
+        drop(tx);
+    }
+    let after_rollback = messages::list_in_mailbox(&pool, mb, 20, 0).await.unwrap();
+    assert_eq!(
+        after_rollback.len(),
+        3,
+        "rollback 后不应出现新行（仍为提交的 3 行）"
     );
 }
 

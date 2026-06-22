@@ -87,6 +87,17 @@ const SELECT_COLUMNS: &str = r#"
 /// inserted, `None` if the (account_id, mailbox_id, imap_uid) row already existed. Sync
 /// uses the returned id to bulk-classify newly-landed messages.
 pub async fn insert(pool: &Pool, m: &MessageInsert) -> AppResult<Option<Uuid>> {
+    insert_tx(pool, m).await
+}
+
+/// Same as [`insert`] but executes within an existing transaction, enabling the sync loop
+/// to commit all inserts atomically in a single write (eliminates N+1 auto-commits).
+///
+/// Pass `&mut *tx` where `tx: sqlx::Transaction<'_, sqlx::Sqlite>`.
+pub async fn insert_tx<'e, E>(executor: E, m: &MessageInsert) -> AppResult<Option<Uuid>>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     let id = sqlx::query_scalar::<_, Uuid>(
         r#"
         INSERT INTO messages (
@@ -115,7 +126,7 @@ pub async fn insert(pool: &Pool, m: &MessageInsert) -> AppResult<Option<Uuid>> {
     .bind(m.size_bytes)
     .bind(m.has_attachment)
     .bind(&m.snippet)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
     Ok(id)
 }
