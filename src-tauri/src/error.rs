@@ -36,7 +36,7 @@ pub enum AppError {
     #[error("ai provider error: {0}")]
     Ai(String),
 
-    #[error("json error: {0}")]
+    #[error("数据解析错误")]
     Json(#[from] serde_json::Error),
 
     #[error("http error")]
@@ -45,7 +45,7 @@ pub enum AppError {
     #[error("io error")]
     Io(#[from] std::io::Error),
 
-    #[error(transparent)]
+    #[error("内部错误")]
     Other(#[from] anyhow::Error),
 }
 
@@ -60,6 +60,8 @@ impl Serialize for AppError {
             AppError::Migrate(inner) => tracing::error!(detail = %inner, "migration error"),
             AppError::Http(inner) => tracing::error!(detail = %inner, "http error"),
             AppError::Io(inner) => tracing::error!(detail = %inner, "io error"),
+            AppError::Json(inner) => tracing::error!(detail = %inner, "json parse error"),
+            AppError::Other(inner) => tracing::error!(detail = %inner, "internal error"),
             _ => {}
         }
         serializer.serialize_str(&self.to_string())
@@ -121,6 +123,45 @@ mod tests {
         assert!(
             serialized.contains("请先配置账户"),
             "Config 错误的用户友好消息应保留: {serialized}"
+        );
+    }
+
+    #[test]
+    fn json_error_serializes_category_only_no_internal_detail() {
+        // serde_json 错误的 Display 包含底层解析细节（如字段名、行列号），不应出现在前端
+        let raw_json = "{ invalid }";
+        let inner: serde_json::Error =
+            serde_json::from_str::<serde_json::Value>(raw_json).unwrap_err();
+        let inner_detail = inner.to_string();
+        let err = AppError::Json(inner);
+        let serialized = serde_json::to_string(&err).unwrap();
+        // 底层错误原文不应暴露
+        assert!(
+            !serialized.contains(&inner_detail),
+            "serde_json 底层细节不应暴露给前端: {serialized}"
+        );
+        // 应返回用户友好的归类标识
+        assert!(
+            serialized.contains("数据解析"),
+            "应为用户友好摘要（含'数据解析'）: {serialized}"
+        );
+    }
+
+    #[test]
+    fn other_error_serializes_category_only_no_internal_detail() {
+        // anyhow::Error 是兜底口袋，可能夹带路径、库消息等，不应原样暴露
+        let secret_path = "/var/secret/credentials.json";
+        let err = AppError::Other(anyhow::anyhow!("failed to read {secret_path}"));
+        let serialized = serde_json::to_string(&err).unwrap();
+        // 底层路径/消息不应暴露
+        assert!(
+            !serialized.contains(secret_path),
+            "anyhow 内部路径不应暴露给前端: {serialized}"
+        );
+        // 应返回用户友好的归类标识
+        assert!(
+            serialized.contains("内部错误"),
+            "应为用户友好摘要（含'内部错误'）: {serialized}"
         );
     }
 }

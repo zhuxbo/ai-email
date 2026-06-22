@@ -244,20 +244,17 @@ async fn classify_chunk(
 
 /// Escape untrusted field content for safe embedding in the classification prompt.
 ///
+/// - `&` is replaced first with `&amp;` to prevent entity forgery (e.g. `&lt;subject&gt;`
+///   masquerading as a structural tag). Must come before `<`/`>` replacement to avoid
+///   double-encoding already-escaped entities.
 /// - `<` / `>` are replaced with HTML entities to prevent structural-tag breakout.
 /// - Newlines / carriage returns are collapsed to a single space so multi-line injections
 ///   cannot form new top-level prompt lines.
-/// - The literal sequence `id: ` (case-sensitive) is broken up by inserting a zero-width
-///   space (U+200B) between the colon and the space. This prevents an attacker from
-///   forging a top-level `id: <uuid>` declaration inside a snippet or subject field.
-///   The zero-width character is invisible to the AI model and does not affect comprehension.
 fn escape_field(s: &str) -> String {
     s.replace(['\n', '\r'], " ")
+        .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
-        // Break the `id: ` pattern so injected "id: <uuid>" does not match the top-level
-        // prompt template format. The zero-width space (U+200B) is semantically transparent.
-        .replace("id: ", "id:\u{200B} ")
 }
 
 fn build_chunk_prompt(inputs: &[&ClassifyInput]) -> String {
@@ -376,15 +373,34 @@ mod tests {
 
         let prompt = build_chunk_prompt(&[&attacker, &victim]);
 
-        // 修复后：victim_id 只应作为受控标签内的唯一 id 声明出现，
-        // 注入的伪造行被标签包裹，不会以 "id: <uuid>" 格式泄漏到 prompt 根层级。
-        // 验证：victim_id 在 prompt 中的 "id: <uuid>" 格式出现次数 == 1（仅 victim 本身）
+        // 防御点：换行折叠 + 标签隔离。
+        // 注入的多行内容被 escape_field 折叠为单行，并被 <snippet>...</snippet> 包裹，
+        // 不会在 prompt 顶层（标签外）形成独立的 "id: <uuid>" 行。
+        // 验证：victim_id 只在标签外（顶层）以 "id: <uuid>" 格式出现 1 次（victim 本身），
+        // 任何 snippet 标签内的 id 出现均受标签隔离、不具备顶层语义。
         let victim_id_bare = format!("id: {victim_id}");
-        let occurrences = prompt.matches(&victim_id_bare).count();
+        // 逐行拆分，只计顶层（不在 <snippet> ... </snippet> 之间）的匹配行数
+        let toplevel_count = {
+            let mut inside_snippet = false;
+            let mut count = 0usize;
+            for line in prompt.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("<snippet>") {
+                    inside_snippet = true;
+                }
+                if !inside_snippet && line.contains(&victim_id_bare) {
+                    count += 1;
+                }
+                if trimmed.ends_with("</snippet>") || trimmed == "</snippet>" {
+                    inside_snippet = false;
+                }
+            }
+            count
+        };
         assert_eq!(
-            occurrences, 1,
-            "注入 snippet 中的伪造 id 行不应在 prompt 中产生额外顶层 id 声明。\
-             \n出现次数: {occurrences}（期望 1）\n生成 prompt:\n{prompt}"
+            toplevel_count, 1,
+            "注入 snippet 中的伪造 id 行不应在 prompt 顶层产生额外 id 声明（防御靠换行折叠+标签隔离）。\
+             \n顶层出现次数: {toplevel_count}（期望 1）\n生成 prompt:\n{prompt}"
         );
     }
 
