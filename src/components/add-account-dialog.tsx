@@ -46,6 +46,9 @@ export function AddAccountDialog({ open, onClose }: Props) {
   }
 
   function handleClose() {
+    // #52: ignore close requests while a submit is in flight — mirrors the cancel button's
+    // disabled={submitting} guard so the backdrop click is consistent with it.
+    if (submitting) return;
     resetForm();
     onClose();
   }

@@ -105,6 +105,12 @@ pub async fn account_remove(state: State<'_, AppState>, id: Uuid) -> AppResult<(
     // This avoids leaving an unreachable orphan auth-code if the DB delete succeeds but
     // the keychain delete fails. The delete-warn-not-fail invariant is intentional: a
     // failed keychain cleanup must not block the user from completing account removal.
+    //
+    // Reverse orphan trade-off: if the keychain delete succeeds but the subsequent DB
+    // `delete` call (below) fails and propagates via `?`, the DB row survives but the
+    // credential is already gone. This is the more acceptable direction — DB deletes
+    // rarely fail and are retryable, and `keychain::delete_auth_code` is idempotent
+    // (NoEntry → Ok) so a retry will self-heal the keychain side.
     let keychain_result = tokio::task::spawn_blocking(move || keychain::delete_auth_code(id))
         .await
         .map_err(|e| AppError::Other(anyhow::anyhow!(e)));

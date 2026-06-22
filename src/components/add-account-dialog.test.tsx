@@ -104,6 +104,47 @@ describe('AddAccountDialog', () => {
     expect(inputValue(screen.getByPlaceholderText(/授权码/i))).toBe('');
   });
 
+  // ---- #52: submitting 时点遮罩不打断提交 ----
+
+  it('提交进行中点遮罩不触发 onClose', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+
+    // Grab the already-mocked accountAdd and make it hang temporarily.
+    const tauriMock = await import('../lib/tauri');
+    const accountAddMock = tauriMock.accountAdd as ReturnType<typeof vi.fn>;
+
+    let resolveSubmit!: () => void;
+    // Use a separate hanging promise to simulate an in-flight submit. The cast is needed
+    // because mockImplementationOnce's generic resolver types don't align with the real
+    // return type — this is a test-only pattern; production code never does this.
+    const hangingSubmit = new Promise<void>((resolve) => {
+      resolveSubmit = resolve;
+    });
+    accountAddMock.mockImplementationOnce(() => hangingSubmit as never);
+
+    render(<AddAccountDialog open onClose={onClose} />);
+
+    await user.type(screen.getByPlaceholderText('you@qq.com'), 'test@qq.com');
+    await user.type(screen.getByPlaceholderText(/授权码/i), 'validcode16chars');
+
+    // Start submit (don't await — it will hang until resolveSubmit is called).
+    const submitBtn = screen.getByRole('button', { name: '添加并同步' });
+    void user.click(submitBtn);
+
+    // Give the submit handler a tick to set submitting=true.
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Click the backdrop while submitting.
+    await user.click(screen.getByRole('dialog'));
+
+    // onClose must NOT have been called.
+    expect(onClose).not.toHaveBeenCalled();
+
+    // Unblock the submit so component cleanup is deterministic.
+    resolveSubmit();
+  });
+
   it('提交成功后授权码清空', async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();

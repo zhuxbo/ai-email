@@ -36,12 +36,17 @@ pub struct AddModelForm {
     pub api_key: String,
 }
 
-/// Validate that a `base_url`, if provided, uses HTTPS.
+/// Validate that a `base_url`, if provided, uses HTTPS and has a non-empty host.
 ///
 /// An empty / whitespace-only value is treated as "use the provider default" and returns
-/// `Ok(None)`. A non-empty value must start with `https://`; anything else (including
-/// `http://`) is rejected to enforce the TLS invariant — API keys must never travel in
-/// plain text.
+/// `Ok(None)`. A non-empty value must:
+///   1. Use the `https` scheme — checked case-insensitively (RFC 3986 §3.1: scheme is
+///      case-insensitive, so `HTTPS://host` is legal and must not be rejected).
+///   2. Have a non-empty host after the `https://` prefix — bare `https://` (scheme only,
+///      no host) is rejected to avoid `https:///path` requests at runtime.
+///
+/// The original casing is preserved in storage/use; only the scheme check uses a lowercase
+/// copy.
 fn validate_base_url(raw: Option<String>) -> AppResult<Option<String>> {
     match raw {
         None => Ok(None),
@@ -50,9 +55,17 @@ fn validate_base_url(raw: Option<String>) -> AppResult<Option<String>> {
             if s.is_empty() {
                 return Ok(None);
             }
-            if !s.starts_with("https://") {
+            let lower = s.to_ascii_lowercase();
+            if !lower.starts_with("https://") {
                 return Err(AppError::Config(format!(
                     "base_url must start with https:// to protect the API key in transit; got: {s}"
+                )));
+            }
+            // Reject scheme-only URLs like "https://" that have no host.
+            let after_scheme = &s["https://".len()..];
+            if after_scheme.trim().is_empty() {
+                return Err(AppError::Config(format!(
+                    "base_url must include a host after https://; got: {s}"
                 )));
             }
             Ok(Some(s))
@@ -110,6 +123,11 @@ pub async fn model_remove(state: State<'_, AppState>, id: Uuid) -> AppResult<()>
     // #44: delete keychain key first (best-effort — warn on failure, never abort).
     // Mirrors the delete-warn-not-fail invariant from account_remove (#11).
     // ON DELETE RESTRICT — the DB enforces "must reassign role defaults first".
+    //
+    // Reverse orphan trade-off: if the keychain delete succeeds but the DB `delete` call
+    // below fails and propagates via `?`, the DB row survives while the key is already
+    // gone. This is the acceptable direction — DB deletes are rare failures and retryable,
+    // and `keychain::delete_ai_key` is idempotent (NoEntry → Ok) so a retry self-heals.
     let keychain_result = tokio::task::spawn_blocking(move || keychain::delete_ai_key(id))
         .await
         .map_err(|e| AppError::Other(anyhow::anyhow!(e)));
@@ -213,5 +231,43 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(url, "https://api.example.com/v1");
+    }
+
+    // ---- case-insensitive scheme (RFC 3986) ----
+
+    #[test]
+    fn uppercase_https_scheme_is_accepted() {
+        // RFC 3986 §3.1: scheme is case-insensitive; HTTPS:// must not be rejected.
+        // Original casing must be preserved in the returned value.
+        let url = validate_base_url(Some("HTTPS://api.example.com".into()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(url, "HTTPS://api.example.com");
+    }
+
+    #[test]
+    fn mixed_case_https_scheme_is_accepted() {
+        let url = validate_base_url(Some("Https://api.example.com".into()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(url, "Https://api.example.com");
+    }
+
+    // ---- host-less URL rejected ----
+
+    #[test]
+    fn scheme_only_https_is_rejected() {
+        // "https://" with no host must be rejected to prevent https:///path at runtime.
+        let err = validate_base_url(Some("https://".into())).unwrap_err();
+        assert!(matches!(err, AppError::Config(_)));
+    }
+
+    #[test]
+    fn single_char_host_is_accepted() {
+        // Minimal valid: scheme + at least one character of host.
+        let url = validate_base_url(Some("https://x".into()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(url, "https://x");
     }
 }

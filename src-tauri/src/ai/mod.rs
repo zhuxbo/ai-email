@@ -134,12 +134,21 @@ impl AiClient {
     /// API key must never travel in plain text (second-line defence after `model_add`).
     pub fn build(model: &AiModel, api_key: SecretString) -> AppResult<Self> {
         // #3 second-line defence: reject any stored base_url that is not HTTPS.
-        // model_add already validates this at write time; this guard catches rows that
-        // were inserted before the validation was introduced or via direct DB writes.
+        // model_add already validates at write time; this guard catches rows inserted
+        // before the validation existed or via direct DB writes.
+        // Scheme check is case-insensitive (RFC 3986 §3.1) and host-presence is also
+        // verified — a bare "https://" (no host) would produce "https:///path" at request
+        // time and must be rejected here rather than at the network layer.
         if let Some(url) = &model.base_url {
-            if !url.starts_with("https://") {
+            let lower = url.to_ascii_lowercase();
+            let missing_host = lower
+                .strip_prefix("https://")
+                .map(|after| after.trim().is_empty())
+                .unwrap_or(false);
+            if !lower.starts_with("https://") || missing_host {
                 return Err(AppError::Config(format!(
-                    "base_url must use https:// to protect the API key in transit; got: {url}"
+                    "base_url must use https:// with a non-empty host to protect the API key \
+                     in transit; got: {url}"
                 )));
             }
         }
@@ -243,6 +252,24 @@ mod tests {
     fn build_accepts_none_base_url_uses_default() {
         let model = make_model("openai", None);
         assert!(AiClient::build(&model, dummy_key()).is_ok());
+    }
+
+    // ---- case-insensitive scheme (RFC 3986) ----
+
+    #[test]
+    fn build_accepts_uppercase_https_scheme() {
+        // RFC 3986: scheme is case-insensitive; HTTPS:// stored in DB must still work.
+        let model = make_model("anthropic", Some("HTTPS://api.example.com"));
+        assert!(AiClient::build(&model, dummy_key()).is_ok());
+    }
+
+    // ---- host-less URL rejected ----
+
+    #[test]
+    fn build_rejects_scheme_only_url() {
+        // "https://" without a host would produce "https:///path" at request time.
+        let model = make_model("openai", Some("https://"));
+        assert!(AiClient::build(&model, dummy_key()).is_err());
     }
 
     /// The extracted span must be valid JSON of the expected shape. We assert structurally
