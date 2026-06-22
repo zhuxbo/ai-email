@@ -6,6 +6,7 @@ import { create } from 'zustand';
 
 import * as tauri from '../tauri';
 import type { Account, AddAccountForm, Category, MessageBody, MessageHeader } from '../types';
+import { errMsg } from '../utils';
 import { useAiStore } from './ai';
 
 interface MailState {
@@ -44,16 +45,6 @@ interface MailState {
   setSortByPriority: (on: boolean) => void;
 
   clearError: () => void;
-}
-
-function errMsg(e: unknown): string {
-  if (typeof e === 'string') {
-    return e;
-  }
-  if (e instanceof Error) {
-    return e.message;
-  }
-  return JSON.stringify(e);
 }
 
 export const useMailStore = create<MailState>((set, get) => ({

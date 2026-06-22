@@ -8,11 +8,7 @@ import type {
   SummaryResult,
   TranslateResult,
 } from '../types';
-function errMsg(e: unknown): string {
-  if (typeof e === 'string') return e;
-  if (e instanceof Error) return e.message;
-  return JSON.stringify(e);
-}
+import { errMsg } from '../utils';
 interface AiState {
   models: AiModel[];
   roleDefaults: RoleDefault[];

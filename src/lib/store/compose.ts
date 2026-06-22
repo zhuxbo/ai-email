@@ -2,6 +2,7 @@ import { create } from 'zustand';
 
 import * as tauri from '../tauri';
 import type { MessageHeader } from '../types';
+import { errMsg } from '../utils';
 import { useMailStore } from './mail';
 import { useUiStore } from './ui';
 
@@ -13,12 +14,6 @@ function parseAddrs(s: string): string[] {
     .split(',')
     .map((x) => x.trim())
     .filter((x) => x !== '');
-}
-
-function errMsg(e: unknown): string {
-  if (typeof e === 'string') return e;
-  if (e instanceof Error) return e.message;
-  return JSON.stringify(e);
 }
 
 /** CJK 占比启发式：非空且占比低 → 判为外文。 */
