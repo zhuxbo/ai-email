@@ -55,18 +55,41 @@ describe('ComposeTab', () => {
     expect(screen.getByRole('button', { name: '刷新对照' })).toBeInTheDocument();
   });
 
-  it('#71 有草稿正文时显示"重新生成"按钮', () => {
+  it('#71 aiAssisted=true 时显示"重新生成"按钮', () => {
+    useComposeStore.setState({ aiAssisted: true, bodyForeign: 'hello' } as never);
     render(<ComposeTab />);
     expect(screen.getByRole('button', { name: '重新生成' })).toBeInTheDocument();
   });
 
-  it('#71 正文为空时不显示"重新生成"按钮', () => {
-    useComposeStore.setState({ bodyForeign: '' } as never);
+  it('#71 draftSource 非 null 时显示"重新生成"按钮', () => {
+    useComposeStore.setState({
+      aiAssisted: false,
+      draftSource: 'cached',
+      bodyForeign: 'hello',
+    } as never);
+    render(<ComposeTab />);
+    expect(screen.getByRole('button', { name: '重新生成' })).toBeInTheDocument();
+  });
+
+  it('#71 纯手写正文（aiAssisted=false 且 draftSource=null）不显示"重新生成"按钮', () => {
+    useComposeStore.setState({
+      aiAssisted: false,
+      draftSource: null,
+      bodyForeign: 'typed by user',
+    } as never);
+    render(<ComposeTab />);
+    expect(screen.queryByRole('button', { name: '重新生成' })).toBeNull();
+  });
+
+  it('#71 正文为空且无 AI 草稿时不显示"重新生成"按钮', () => {
+    useComposeStore.setState({ aiAssisted: false, draftSource: null, bodyForeign: '' } as never);
     render(<ComposeTab />);
     expect(screen.queryByRole('button', { name: '重新生成' })).toBeNull();
   });
 
   it('#71 点击"重新生成"传 force=true 调 runDraft', async () => {
+    // aiAssisted=true 使"重新生成"按钮可见（M1 收紧后需显式声明有 AI 草稿）
+    useComposeStore.setState({ aiAssisted: true } as never);
     vi.mocked(tauri.aiDraftReply).mockResolvedValue({
       subject: 'Re: Hi',
       body: 'regenerated',

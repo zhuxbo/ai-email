@@ -357,4 +357,36 @@ describe('#16 selectMessage 切换邮件重置 compose 上下文', () => {
     // compose 仍保持重置状态
     expect(useComposeStore.getState().replyContext).toBeNull();
   });
+
+  it('#16 再次点击已选中邮件（同一 id）时草稿保留，不被清空', async () => {
+    // 先选中邮件 A，然后在 compose 写入草稿
+    useMailStore.setState({ selectedMessageId: 'm-a' } as never);
+    useComposeStore.setState({
+      replyContext: { messageId: 'm-a', accountId: 'acc-1' },
+      bodyForeign: '用户正在输入的草稿',
+    } as never);
+
+    // 再次点击同一封邮件（e.g. 点邮件列表中已选中的行）
+    await useMailStore.getState().selectMessage('m-a');
+
+    // 草稿应保留，不被 reset 清空
+    expect(useComposeStore.getState().bodyForeign).toBe('用户正在输入的草稿');
+    expect(useComposeStore.getState().replyContext?.messageId).toBe('m-a');
+  });
+
+  it('#16 切换到不同邮件时草稿被 reset', async () => {
+    // compose 有邮件 A 的草稿
+    useMailStore.setState({ selectedMessageId: 'm-a' } as never);
+    useComposeStore.setState({
+      replyContext: { messageId: 'm-a', accountId: 'acc-1' },
+      bodyForeign: '用户正在输入的草稿',
+    } as never);
+
+    // 切换到邮件 B
+    await useMailStore.getState().selectMessage('m-b');
+
+    // 草稿应被 reset
+    expect(useComposeStore.getState().bodyForeign).toBe('');
+    expect(useComposeStore.getState().replyContext).toBeNull();
+  });
 });

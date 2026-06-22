@@ -11,6 +11,8 @@ export function ComposeTab() {
   const bodyForeign = useComposeStore((s) => s.bodyForeign);
   const bodyZhBack = useComposeStore((s) => s.bodyZhBack);
   const bilingual = useComposeStore((s) => s.bilingual);
+  const aiAssisted = useComposeStore((s) => s.aiAssisted);
+  const draftSource = useComposeStore((s) => s.draftSource);
   const drafting = useComposeStore((s) => s.drafting);
   const backTranslating = useComposeStore((s) => s.backTranslating);
   const sending = useComposeStore((s) => s.sending);
@@ -132,8 +134,8 @@ export function ComposeTab() {
               >
                 {drafting ? '起草中…' : 'AI 起草'}
               </button>
-              {/* #71 已有草稿时显示"重新生成"按钮，强制绕过缓存重新起草 */}
-              {bodyForeign !== '' && (
+              {/* #71 仅在有 AI 草稿时显示"重新生成"按钮，避免覆盖纯手写正文 */}
+              {(aiAssisted || draftSource !== null) && (
                 <button
                   type="button"
                   disabled={drafting}

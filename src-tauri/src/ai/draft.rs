@@ -77,20 +77,21 @@ pub async fn draft_reply(
     let user_prompt = build_user_prompt(&msg, &body_text, intent_text);
     let prompt_hash = compute_prompt_hash(prompts::DRAFT_SYSTEM, intent_text, &user_prompt);
 
-    // #71 force=true 时绕过缓存直接重新生成；默认行为不变。
-    if !force {
-        if let Some(cached) = ai_results::get(pool, message_id, KIND, &prompt_hash).await? {
-            let draft: Draft = serde_json::from_value(cached.output)?;
-            tracing::info!(message_id = %message_id, "draft cache hit");
-            return Ok(DraftResult {
-                draft,
-                source: "cached",
-                model: cached.model,
-                input_tokens: cached.input_tokens,
-                output_tokens: cached.output_tokens,
-                cache_read_tokens: cached.cache_read_tokens,
-            });
-        }
+    // #71 缓存决策委托给纯函数 should_use_cache，便于单元测试。
+    let cached_row = ai_results::get(pool, message_id, KIND, &prompt_hash).await?;
+    if should_use_cache(force, cached_row.is_some()) {
+        // 已由 should_use_cache 确认有缓存（cached_present=true），unwrap 安全。
+        let cached = cached_row.expect("should_use_cache guarantees cached_row is Some");
+        let draft: Draft = serde_json::from_value(cached.output)?;
+        tracing::info!(message_id = %message_id, "draft cache hit");
+        return Ok(DraftResult {
+            draft,
+            source: "cached",
+            model: cached.model,
+            input_tokens: cached.input_tokens,
+            output_tokens: cached.output_tokens,
+            cache_read_tokens: cached.cache_read_tokens,
+        });
     }
 
     let client = AiClient::build(&model, api_key)?;
@@ -204,6 +205,13 @@ fn truncate_for_log(s: &str) -> String {
     }
 }
 
+/// 缓存使用决策纯函数：`force=true` 时无论是否有缓存都绕过；否则有缓存才复用。
+///
+/// 将 `if !force` 内联条件提纯为独立函数，便于对缓存判定逻辑做直接单元测试。
+fn should_use_cache(force: bool, cached_present: bool) -> bool {
+    !force && cached_present
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,5 +239,21 @@ mod tests {
         let draft: Draft = serde_json::from_str(extract_json(raw)).expect("should parse");
         assert_eq!(draft.subject, "Re: 合作");
         assert_eq!(draft.tone, "polite");
+    }
+
+    // I1：直接覆盖 should_use_cache 缓存判定纯函数的三个分支。
+    #[test]
+    fn cache_used_when_not_forced_and_present() {
+        assert!(should_use_cache(false, true));
+    }
+
+    #[test]
+    fn cache_skipped_when_forced_even_if_present() {
+        assert!(!should_use_cache(true, true));
+    }
+
+    #[test]
+    fn cache_skipped_when_not_forced_but_absent() {
+        assert!(!should_use_cache(false, false));
     }
 }

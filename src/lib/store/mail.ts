@@ -182,7 +182,8 @@ export const useMailStore = create<MailState>((set, get) => ({
   selectMessage: async (id) => {
     // Bump messageOpenSeq so the mobile shell enters detail even on re-select.
     // AI summary/translation live in the ai store and reset per message id below.
-    // #16 compose 回复上下文也随选中邮件切换而重置，防止旧邮件的 replyContext 残留。
+    // #16 compose 草稿仅在切换到**不同**邮件时才 reset，避免点击已选中行时清空正在编辑的草稿。
+    const prevId = get().selectedMessageId;
     set({
       selectedMessageId: id,
       body: null,
@@ -190,7 +191,9 @@ export const useMailStore = create<MailState>((set, get) => ({
       messageOpenSeq: get().messageOpenSeq + 1,
     });
     useAiStore.getState().resetForMessage(id);
-    useComposeStore.getState().reset();
+    if (prevId !== id) {
+      useComposeStore.getState().reset();
+    }
     try {
       const body = await tauri.messageBody(id);
       if (get().selectedMessageId === id) {
