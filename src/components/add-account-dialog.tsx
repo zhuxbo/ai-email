@@ -12,10 +12,12 @@ interface Props {
   onClose: () => void;
 }
 
+const DEFAULT_PROVIDER: ProviderId = 'qq';
+
 export function AddAccountDialog({ open, onClose }: Props) {
   const addAccount = useMailStore((s) => s.addAccount);
 
-  const [providerId, setProviderId] = useState<ProviderId>('qq');
+  const [providerId, setProviderId] = useState<ProviderId>(DEFAULT_PROVIDER);
   const preset = providerById(providerId);
 
   const [email, setEmail] = useState('');
@@ -27,6 +29,26 @@ export function AddAccountDialog({ open, onClose }: Props) {
   const [smtpPort, setSmtpPort] = useState(preset.smtpPort);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // #47: reset all fields (including sensitive auth code) when the dialog is closed or
+  // cancelled, so state does not linger across open cycles.
+  function resetForm() {
+    const defaultPreset = providerById(DEFAULT_PROVIDER);
+    setProviderId(DEFAULT_PROVIDER);
+    setEmail('');
+    setDisplayName('');
+    setAuthCode('');
+    setImapHost(defaultPreset.imapHost);
+    setImapPort(defaultPreset.imapPort);
+    setSmtpHost(defaultPreset.smtpHost);
+    setSmtpPort(defaultPreset.smtpPort);
+    setError(null);
+  }
+
+  function handleClose() {
+    resetForm();
+    onClose();
+  }
 
   function changeProvider(next: ProviderId) {
     setProviderId(next);
@@ -52,10 +74,8 @@ export function AddAccountDialog({ open, onClose }: Props) {
         smtpPort,
         authCode: authCode.trim(),
       });
+      resetForm();
       onClose();
-      setEmail('');
-      setDisplayName('');
-      setAuthCode('');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -70,7 +90,7 @@ export function AddAccountDialog({ open, onClose }: Props) {
       role="dialog"
       aria-modal="true"
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"
-      onClick={onClose}
+      onClick={handleClose}
     >
       <form
         onClick={(e) => {
@@ -216,7 +236,7 @@ export function AddAccountDialog({ open, onClose }: Props) {
         <div className="mt-5 flex justify-end gap-2">
           <button
             type="button"
-            onClick={onClose}
+            onClick={handleClose}
             disabled={submitting}
             className="rounded px-3 py-1 text-sm text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
           >
