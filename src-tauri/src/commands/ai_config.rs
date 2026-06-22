@@ -10,6 +10,9 @@
 //!
 //! Add-model flow mirrors account_add: INSERT row, then write the API key to the keychain
 //! on a blocking thread, then roll the row back if the keychain write fails.
+//!
+//! Remove-model flow: best-effort delete keychain key first (warn on failure, never abort),
+//! then delete the DB row — mirrors the delete-warn-not-fail invariant from account_remove.
 
 use secrecy::SecretString;
 use serde::Deserialize;
@@ -33,6 +36,30 @@ pub struct AddModelForm {
     pub api_key: String,
 }
 
+/// Validate that a `base_url`, if provided, uses HTTPS.
+///
+/// An empty / whitespace-only value is treated as "use the provider default" and returns
+/// `Ok(None)`. A non-empty value must start with `https://`; anything else (including
+/// `http://`) is rejected to enforce the TLS invariant — API keys must never travel in
+/// plain text.
+fn validate_base_url(raw: Option<String>) -> AppResult<Option<String>> {
+    match raw {
+        None => Ok(None),
+        Some(s) => {
+            let s = s.trim().to_owned();
+            if s.is_empty() {
+                return Ok(None);
+            }
+            if !s.starts_with("https://") {
+                return Err(AppError::Config(format!(
+                    "base_url must start with https:// to protect the API key in transit; got: {s}"
+                )));
+            }
+            Ok(Some(s))
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn models_list(state: State<'_, AppState>) -> AppResult<Vec<AiModel>> {
     ai_models::list(&state.db).await
@@ -46,12 +73,15 @@ pub async fn model_add(state: State<'_, AppState>, form: AddModelForm) -> AppRes
             form.provider
         )));
     }
+    // #3: reject non-HTTPS base_url to prevent API key leakage over plain HTTP.
+    let base_url = validate_base_url(form.base_url)?;
+
     let key = SecretString::from(form.api_key);
     let input = AiModelInput {
         display_name: form.display_name,
         provider: form.provider,
         model_id: form.model_id,
-        base_url: form.base_url.filter(|s| !s.trim().is_empty()),
+        base_url,
     };
     let model = ai_models::insert(&state.db, &input).await?;
     let id = model.id;
@@ -77,13 +107,23 @@ pub async fn model_add(state: State<'_, AppState>, form: AddModelForm) -> AppRes
 
 #[tauri::command]
 pub async fn model_remove(state: State<'_, AppState>, id: Uuid) -> AppResult<()> {
-    // ON DELETE RESTRICT — the DB enforces "must reassign role defaults first". The
-    // resulting sqlx error message contains the offending FK so the UI can prompt the
-    // user clearly; we don't pre-check here.
-    ai_models::delete(&state.db, id).await?;
-    tokio::task::spawn_blocking(move || keychain::delete_ai_key(id))
+    // #44: delete keychain key first (best-effort — warn on failure, never abort).
+    // Mirrors the delete-warn-not-fail invariant from account_remove (#11).
+    // ON DELETE RESTRICT — the DB enforces "must reassign role defaults first".
+    let keychain_result = tokio::task::spawn_blocking(move || keychain::delete_ai_key(id))
         .await
-        .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
+        .map_err(|e| AppError::Other(anyhow::anyhow!(e)));
+    match keychain_result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::warn!(model_id = %id, error = %e, "keychain delete_ai_key failed; proceeding with DB remove");
+        }
+        Err(e) => {
+            tracing::warn!(model_id = %id, error = %e, "spawn_blocking for keychain delete failed; proceeding with DB remove");
+        }
+    }
+
+    ai_models::delete(&state.db, id).await?;
     tracing::info!(model_id = %id, "ai model removed");
     Ok(())
 }
@@ -117,4 +157,61 @@ pub async fn role_default_set(
 #[tauri::command]
 pub async fn role_default_clear(state: State<'_, AppState>, role: String) -> AppResult<()> {
     ai_role_defaults::clear(&state.db, &role).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_base_url;
+    use crate::error::AppError;
+
+    // ---- #3: base_url HTTPS enforcement ----
+
+    #[test]
+    fn none_returns_none() {
+        assert!(validate_base_url(None).unwrap().is_none());
+    }
+
+    #[test]
+    fn empty_string_returns_none() {
+        assert!(validate_base_url(Some(String::new())).unwrap().is_none());
+    }
+
+    #[test]
+    fn whitespace_only_returns_none() {
+        assert!(validate_base_url(Some("   ".into())).unwrap().is_none());
+    }
+
+    #[test]
+    fn http_url_is_rejected() {
+        let err = validate_base_url(Some("http://api.example.com/v1".into())).unwrap_err();
+        assert!(matches!(err, AppError::Config(_)));
+    }
+
+    #[test]
+    fn ftp_url_is_rejected() {
+        let err = validate_base_url(Some("ftp://api.example.com".into())).unwrap_err();
+        assert!(matches!(err, AppError::Config(_)));
+    }
+
+    #[test]
+    fn bare_host_is_rejected() {
+        let err = validate_base_url(Some("api.example.com".into())).unwrap_err();
+        assert!(matches!(err, AppError::Config(_)));
+    }
+
+    #[test]
+    fn https_url_is_accepted() {
+        let url = validate_base_url(Some("https://api.example.com/v1".into()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(url, "https://api.example.com/v1");
+    }
+
+    #[test]
+    fn https_url_is_trimmed() {
+        let url = validate_base_url(Some("  https://api.example.com/v1  ".into()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(url, "https://api.example.com/v1");
+    }
 }

@@ -1,10 +1,15 @@
 //! `account_*` / `accounts_*` Tauri commands.
 //!
 //! Add-account flow:
-//!   1. INSERT into Postgres → get fresh UUID
-//!   2. Wrap the auth code in [`SecretString`] (so it stops appearing in logs)
-//!   3. Store it in the OS keychain on a blocking thread
-//!   4. On keychain failure, DELETE the row so the user can retry from a clean slate
+//!   1. Validate the form fields (port range, known provider).
+//!   2. INSERT into DB → get fresh UUID.
+//!   3. Wrap the auth code in [`SecretString`] (so it stops appearing in logs).
+//!   4. Store it in the OS keychain on a blocking thread.
+//!   5. On keychain failure, DELETE the row so the user can retry from a clean slate.
+//!
+//! Remove-account flow:
+//!   1. Best-effort delete the keychain credential first (warn on failure, never abort).
+//!   2. Delete the DB row (cascade removes related data).
 //!
 //! The keychain is the source of truth for secrets; DB never sees the auth code.
 
@@ -17,6 +22,9 @@ use crate::db::accounts::{self, Account, AccountInput};
 use crate::error::{AppError, AppResult};
 use crate::keychain;
 use crate::AppState;
+
+/// Known email provider identifiers.
+const KNOWN_PROVIDERS: &[&str] = &["qq", "imap"];
 
 /// What the add-account form sends across the FFI. `authCode` is split out and never
 /// round-tripped back to the frontend.
@@ -33,6 +41,16 @@ pub struct AddAccountForm {
     pub auth_code: String,
 }
 
+/// Validate port number is in the legal TCP range 1–65535.
+fn validate_port(port: i32, field: &str) -> AppResult<()> {
+    if !(1..=65535).contains(&port) {
+        return Err(AppError::Config(format!(
+            "{field} must be between 1 and 65535, got {port}"
+        )));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn accounts_list(state: State<'_, AppState>) -> AppResult<Vec<Account>> {
     accounts::list(&state.db).await
@@ -40,6 +58,17 @@ pub async fn accounts_list(state: State<'_, AppState>) -> AppResult<Vec<Account>
 
 #[tauri::command]
 pub async fn account_add(state: State<'_, AppState>, form: AddAccountForm) -> AppResult<Account> {
+    // #39: validate port range and provider up-front so errors surface immediately.
+    validate_port(form.imap_port, "imap_port")?;
+    validate_port(form.smtp_port, "smtp_port")?;
+    if !KNOWN_PROVIDERS.contains(&form.provider.as_str()) {
+        return Err(AppError::Config(format!(
+            "unknown provider: {} (must be one of: {})",
+            form.provider,
+            KNOWN_PROVIDERS.join(", ")
+        )));
+    }
+
     let auth = SecretString::from(form.auth_code);
     let input = AccountInput {
         email: form.email,
@@ -72,10 +101,81 @@ pub async fn account_add(state: State<'_, AppState>, form: AddAccountForm) -> Ap
 
 #[tauri::command]
 pub async fn account_remove(state: State<'_, AppState>, id: Uuid) -> AppResult<()> {
-    accounts::delete(&state.db, id).await?;
-    tokio::task::spawn_blocking(move || keychain::delete_auth_code(id))
+    // #11: delete keychain credential first (best-effort — warn on failure, never abort).
+    // This avoids leaving an unreachable orphan auth-code if the DB delete succeeds but
+    // the keychain delete fails. The delete-warn-not-fail invariant is intentional: a
+    // failed keychain cleanup must not block the user from completing account removal.
+    let keychain_result = tokio::task::spawn_blocking(move || keychain::delete_auth_code(id))
         .await
-        .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
+        .map_err(|e| AppError::Other(anyhow::anyhow!(e)));
+    match keychain_result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::warn!(account_id = %id, error = %e, "keychain delete_auth_code failed; proceeding with DB remove");
+        }
+        Err(e) => {
+            tracing::warn!(account_id = %id, error = %e, "spawn_blocking for keychain delete failed; proceeding with DB remove");
+        }
+    }
+
+    accounts::delete(&state.db, id).await?;
     tracing::info!(account_id = %id, "account removed");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_port;
+    use crate::error::AppError;
+
+    // ---- #39: port validation ----
+
+    #[test]
+    fn port_zero_is_rejected() {
+        assert!(matches!(
+            validate_port(0, "imap_port"),
+            Err(AppError::Config(_))
+        ));
+    }
+
+    #[test]
+    fn port_negative_is_rejected() {
+        assert!(matches!(
+            validate_port(-1, "smtp_port"),
+            Err(AppError::Config(_))
+        ));
+    }
+
+    #[test]
+    fn port_too_large_is_rejected() {
+        assert!(matches!(
+            validate_port(65536, "imap_port"),
+            Err(AppError::Config(_))
+        ));
+    }
+
+    #[test]
+    fn port_boundary_min_is_accepted() {
+        assert!(validate_port(1, "imap_port").is_ok());
+    }
+
+    #[test]
+    fn port_boundary_max_is_accepted() {
+        assert!(validate_port(65535, "smtp_port").is_ok());
+    }
+
+    #[test]
+    fn port_common_imap_is_accepted() {
+        assert!(validate_port(993, "imap_port").is_ok());
+    }
+
+    #[test]
+    fn port_common_smtp_is_accepted() {
+        assert!(validate_port(465, "smtp_port").is_ok());
+    }
+
+    // ---- #11: account_remove ordering is tested behaviourally via integration tests
+    // that check the DB row is gone after a remove call.  The keychain path cannot be
+    // tested without a real OS keychain, so we document the invariant here rather than
+    // mock the entire Tauri State machinery. ----
 }
