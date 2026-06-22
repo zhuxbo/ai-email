@@ -134,6 +134,13 @@ pub async fn sync_inbox(
                     tracing::warn!(account_id = %account_id, error = %e, "background classify failed");
                 }
             }
+            // classify 之后顺序评估自动回复规则（须在同一 spawn 内、await 之后——
+            // 否则读不到刚写回的 category/priority）。失败仅 warn，不影响同步主流程。
+            if let Err(e) =
+                crate::auto_reply::evaluate_rules(&pool_clone, account_id, &new_ids).await
+            {
+                tracing::warn!(account_id = %account_id, error = %e, "auto-reply rule eval failed");
+            }
         });
     }
 
