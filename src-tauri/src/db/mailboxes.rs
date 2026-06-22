@@ -55,6 +55,8 @@ pub async fn get_by_name(pool: &Pool, account_id: Uuid, name: &str) -> AppResult
         r#"
         SELECT id, account_id, name, delimiter, uid_validity, uid_next, last_synced_at
         FROM mailboxes
+        -- COLLATE NOCASE 让查找大小写不敏感；但 name 列及 UNIQUE(account_id,name) 约束仍是大小写敏感存储
+        -- ——服务端按其通告的大小写写入，不会折叠，唯一约束不受 NOCASE 影响。
         WHERE account_id = ?1 AND name = ?2 COLLATE NOCASE
         "#,
     )

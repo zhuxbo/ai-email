@@ -3,7 +3,8 @@
 //!   - #73 update_after_sync never lets uid_next regress under interleaved syncs (MAX guard)
 //!   - #2  reset_mailbox_for_uidvalidity_change drops stale UID rows + resets uid_next
 //!   - #27 get_by_name matches "INBOX" case-insensitively (write/read agree on the row)
-//!   - #64 flag refresh on existing UIDs is just `messages::update_flags` (verified live elsewhere)
+//!   - #64 `messages::update_flags_by_uid` 按 (mailbox_id, imap_uid) 刷新 flags，并隔离跨 mailbox 的同名 UID
+//!     （见 update_flags_by_uid_updates_correct_mailbox）
 //!
 //! All round-trips run against a real migrated on-disk SQLite — never QQ Mail.
 
@@ -213,6 +214,38 @@ async fn reset_for_uidvalidity_change_clears_rows_and_uid_next() {
         row.uid_next,
         Some(3),
         "post-reset the smaller new-generation uid_next must apply (uid_next was NULL)"
+    );
+}
+
+// ---- #64: update_flags_by_uid patches the right row and is scoped to its mailbox ----
+
+#[tokio::test]
+async fn update_flags_by_uid_updates_correct_mailbox() {
+    let pool = temp_db().await;
+    let acc = seed_account(&pool, "flags@example.com").await;
+    let mb_a = seed_mailbox(&pool, acc, "INBOX").await;
+    let mb_b = seed_mailbox(&pool, acc, "Archive").await;
+
+    // Same UID (42) exists in both mailboxes.
+    let id_a = seed_message(&pool, acc, mb_a, 42).await;
+    let id_b = seed_message(&pool, acc, mb_b, 42).await;
+
+    // Positive: update mb_a UID 42 → \Seen should appear in mb_a.
+    messages::update_flags_by_uid(&pool, mb_a, 42, &["\\Seen".to_string()])
+        .await
+        .unwrap();
+
+    let row_a = messages::get(&pool, id_a).await.unwrap().unwrap();
+    assert!(
+        row_a.flags.iter().any(|f| f == "\\Seen"),
+        "mb_a UID 42 must carry \\Seen after update"
+    );
+
+    // Negative (mailbox isolation): mb_b's UID 42 must be unchanged (still empty).
+    let row_b = messages::get(&pool, id_b).await.unwrap().unwrap();
+    assert!(
+        row_b.flags.is_empty(),
+        "mb_b UID 42 must not be touched by an update scoped to mb_a"
     );
 }
 
