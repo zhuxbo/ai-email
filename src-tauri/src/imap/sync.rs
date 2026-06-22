@@ -30,6 +30,46 @@ pub struct SyncReport {
     pub total_in_mailbox: i64,
 }
 
+/// How this sync should fetch, decided purely from stored vs. server UIDVALIDITY.
+///
+/// Pure so it can be unit-tested without touching the network — see `decide_sync_mode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncMode {
+    /// No prior `uid_next` stored — fetch the most recent window by sequence number.
+    FirstSync,
+    /// Stored UIDVALIDITY matches the server: incremental `UID FETCH <prev>:*`.
+    Incremental { prev_uid_next: i64 },
+    /// Stored UIDVALIDITY differs from the server (RFC 3501 §2.3.1.1): the mailbox was
+    /// rebuilt and every cached UID is now invalid. Drop local rows and re-fetch from scratch.
+    ResetRefetch,
+}
+
+/// Decide the fetch strategy for one mailbox sync.
+///
+/// Inputs are the locally-stored `uid_validity` / `uid_next` and the freshly-SELECTed server
+/// `uid_validity`. Rules (RFC 3501):
+///   - No stored `uid_next` → first sync (regardless of validity).
+///   - Stored validity present, server validity present, and they differ → mailbox reset.
+///   - Otherwise (validities equal, or either side absent) → incremental from `prev_uid_next`.
+///
+/// We only treat it as a reset when *both* sides carry a validity and they disagree; a missing
+/// server validity (minimal SELECT response) must never nuke the local cache.
+pub fn decide_sync_mode(
+    local_uid_validity: Option<i64>,
+    local_uid_next: Option<i64>,
+    server_uid_validity: Option<i64>,
+) -> SyncMode {
+    let Some(prev_uid_next) = local_uid_next else {
+        return SyncMode::FirstSync;
+    };
+    if let (Some(local), Some(server)) = (local_uid_validity, server_uid_validity) {
+        if local != server {
+            return SyncMode::ResetRefetch;
+        }
+    }
+    SyncMode::Incremental { prev_uid_next }
+}
+
 pub async fn sync_inbox(
     pool: &Pool,
     account: &Account,
@@ -51,13 +91,43 @@ pub async fn sync_inbox(
         .await?
         .ok_or_else(|| AppError::Imap("INBOX not found after upsert".into()))?;
 
+    // Decide fetch strategy based on stored vs. server UIDVALIDITY (audit #2).
+    let mode = decide_sync_mode(
+        inbox.uid_validity,
+        inbox.uid_next,
+        selected.uid_validity.map(i64::from),
+    );
+    tracing::debug!(account_id = %account.id, ?mode, "sync mode decided");
+
+    // UIDVALIDITY mismatch: drop stale local rows and reset bookkeeping before re-fetching.
+    if mode == SyncMode::ResetRefetch {
+        let new_validity = selected
+            .uid_validity
+            .map(i64::from)
+            .ok_or_else(|| AppError::Imap("server reported no UIDVALIDITY on reset path".into()))?;
+        tracing::warn!(
+            account_id = %account.id,
+            old_validity = ?inbox.uid_validity,
+            new_validity,
+            "UIDVALIDITY changed — resetting local cache"
+        );
+        mailboxes::reset_mailbox_for_uidvalidity_change(pool, inbox.id, new_validity).await?;
+    }
+
     let fetched = if selected.exists == 0 {
         Vec::new()
-    } else if let Some(prev) = inbox.uid_next {
-        client.uid_fetch_headers(&format!("{prev}:*")).await?
     } else {
-        let lower = selected.exists.saturating_sub(49).max(1);
-        client.fetch_headers(&format!("{lower}:*")).await?
+        match mode {
+            SyncMode::Incremental { prev_uid_next } => {
+                client
+                    .uid_fetch_headers(&format!("{prev_uid_next}:*"))
+                    .await?
+            }
+            SyncMode::FirstSync | SyncMode::ResetRefetch => {
+                let lower = selected.exists.saturating_sub(49).max(1);
+                client.fetch_headers(&format!("{lower}:*")).await?
+            }
+        }
     };
 
     let mut inserted = 0_i32;
@@ -88,6 +158,10 @@ pub async fn sync_inbox(
         if let Some(id) = new_id {
             inserted += 1;
             new_ids.push(id);
+        } else if matches!(mode, SyncMode::Incremental { .. }) {
+            // Existing UID seen again in an incremental window: refresh its flags so
+            // read/starred state stays in sync with the server (audit #64).
+            messages::update_flags_by_uid(pool, inbox.id, i64::from(fh.uid), &fh.flags).await?;
         }
     }
 
@@ -148,4 +222,54 @@ pub async fn sync_inbox(
         new_message_count: inserted,
         total_in_mailbox: i64::from(selected.exists),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decide_sync_mode, SyncMode};
+
+    #[test]
+    fn first_sync_when_no_local_uid_next() {
+        // 本地从未同步过：无 uid_next → 首次同步，validity 无论如何都不影响判定。
+        assert_eq!(decide_sync_mode(None, None, Some(1)), SyncMode::FirstSync);
+        assert_eq!(
+            decide_sync_mode(Some(1), None, Some(1)),
+            SyncMode::FirstSync
+        );
+    }
+
+    #[test]
+    fn incremental_when_validity_matches() {
+        assert_eq!(
+            decide_sync_mode(Some(42), Some(100), Some(42)),
+            SyncMode::Incremental { prev_uid_next: 100 }
+        );
+    }
+
+    #[test]
+    fn reset_when_validity_differs() {
+        // 服务端 mailbox 重建：validity 变了 → 必须丢弃旧 UID 重拉，绝不能用旧 uid_next 增量。
+        assert_eq!(
+            decide_sync_mode(Some(42), Some(100), Some(99)),
+            SyncMode::ResetRefetch
+        );
+    }
+
+    #[test]
+    fn incremental_when_server_validity_absent() {
+        // 极简 SELECT 响应缺 UIDVALIDITY：不得据此判定重置，退回增量（保留本地缓存）。
+        assert_eq!(
+            decide_sync_mode(Some(42), Some(100), None),
+            SyncMode::Incremental { prev_uid_next: 100 }
+        );
+    }
+
+    #[test]
+    fn incremental_when_local_validity_absent_but_uid_next_present() {
+        // 历史数据：有 uid_next 但 validity 曾为空。无从比较 → 增量，下次写回补上 validity。
+        assert_eq!(
+            decide_sync_mode(None, Some(100), Some(42)),
+            SyncMode::Incremental { prev_uid_next: 100 }
+        );
+    }
 }
