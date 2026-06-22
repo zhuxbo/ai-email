@@ -159,20 +159,28 @@ export async function suggestedReplyDismiss(id: string): Promise<void> {
  * 合并多账户邮件列表，并执行：
  *
  * 1. 按 rfcMessageId 去重（#55）——同一封邮件被多账户同时收到时只保留一条。
- *    去重策略：保留 internalDate 最早的那条（最先到达本地服务器）；若均无
- *    internalDate 则保留先出现的那条。rfcMessageId 为 null 的条目不参与去重，全部保留。
+ *    去重策略：保留到达键（internalDate ?? sentAt）最早的副本；两者皆 null 时保留先出现者。
+ *    rfcMessageId 为 null 或空串的条目不参与去重，全部保留（空串来自畸形 Message-ID: <> 头）。
  *
- * 2. 按 internalDate 降序排序（#56）——用 IMAP 服务器实际收信时间而非发件人 Date 头，
- *    确保跨账户的并列邮件按真实到达顺序排列。internalDate 为 null 的条目排在末尾。
+ *    ⚠️ 取舍（P2）：多账户同收一封时，被丢弃副本的 per-account flags（已读/星标）、
+ *    category、tags 不在统一视图合并——统一收件箱只展示一条，其余账户的状态不可见。
+ *
+ * 2. 按 internalDate ?? sentAt 降序排序（#56）——internalDate 投产前回落到 sentAt 保持旧
+ *    行为；internalDate 投产后自动升级为服务器到达时间。两者皆 null 排末尾。
+ *    主键并列时以 imapUid 降序为稳定次级键，保证排序结果确定。
  */
 export function mergeBySentAt(lists: MessageHeader[][]): MessageHeader[] {
   const flat = lists.flat();
 
-  // #55: 按 rfcMessageId 去重，保留 internalDate 最早的副本
+  /** 到达键：internalDate 可用时优先，否则回落 sentAt（Sprint 1.4 前 internalDate 恒 null） */
+  const arrivalKey = (m: MessageHeader): string | null => m.internalDate ?? m.sentAt;
+
+  // #55: 按 rfcMessageId 去重，保留到达键最早的副本
   const seen = new Map<string, MessageHeader>();
   const deduped: MessageHeader[] = [];
   for (const msg of flat) {
-    if (msg.rfcMessageId === null) {
+    if (msg.rfcMessageId === null || msg.rfcMessageId === '') {
+      // 空串来自畸形 Message-ID: <> 头，视同无 ID，不参与去重
       deduped.push(msg);
       continue;
     }
@@ -181,10 +189,10 @@ export function mergeBySentAt(lists: MessageHeader[][]): MessageHeader[] {
       seen.set(msg.rfcMessageId, msg);
       deduped.push(msg);
     } else {
-      // 保留 internalDate 更早的那条（更可靠的本地收信时间）
-      const existingDate = existing.internalDate;
-      const msgDate = msg.internalDate;
-      if (msgDate !== null && (existingDate === null || msgDate < existingDate)) {
+      // 保留到达键更早的那条
+      const existingKey = arrivalKey(existing);
+      const msgKey = arrivalKey(msg);
+      if (msgKey !== null && (existingKey === null || msgKey < existingKey)) {
         // msg 更早：替换 deduped 中的旧条目
         const idx = deduped.indexOf(existing);
         if (idx !== -1) deduped[idx] = msg;
@@ -194,12 +202,15 @@ export function mergeBySentAt(lists: MessageHeader[][]): MessageHeader[] {
     }
   }
 
-  // #56: 按 internalDate 降序排序，null 排末尾
+  // #56: 按到达键降序排序，null 排末尾；并列时以 imapUid 降序作稳定次级键
   return deduped.sort((x, y) => {
-    if (x.internalDate === null && y.internalDate === null) return 0;
-    if (x.internalDate === null) return 1;
-    if (y.internalDate === null) return -1;
-    return y.internalDate.localeCompare(x.internalDate);
+    const kx = arrivalKey(x);
+    const ky = arrivalKey(y);
+    if (kx === null && ky === null) return y.imapUid - x.imapUid;
+    if (kx === null) return 1;
+    if (ky === null) return -1;
+    const cmp = ky.localeCompare(kx);
+    return cmp !== 0 ? cmp : y.imapUid - x.imapUid;
   });
 }
 
