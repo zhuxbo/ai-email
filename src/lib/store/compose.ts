@@ -44,7 +44,10 @@ interface ComposeState {
   drafting: boolean;
   backTranslating: boolean;
   sending: boolean;
+  /** 当前正在起草的邮件 messageId；用于丢弃迟到响应（陈旧闭包竞态守卫）。*/
   draftingFor: string | null;
+  /** #52 最近一次 runDraft 的缓存来源（fresh / cached），供 UI 显示缓存命中。*/
+  draftSource: 'fresh' | 'cached' | null;
   error: string | null;
   receiptInfo: string | null;
 
@@ -78,6 +81,7 @@ const BLANK = {
   backTranslating: false,
   sending: false,
   draftingFor: null,
+  draftSource: null,
   error: null,
   receiptInfo: null,
 } as const;
@@ -112,25 +116,48 @@ export const useComposeStore = create<ComposeState>((set, get) => ({
   runDraft: async () => {
     const ctx = get().replyContext;
     if (ctx === null) return;
-    set({ drafting: true, draftingFor: ctx.messageId, error: null });
+    // #68 每次起草前用递增 token 标记本次请求身份，取代单纯比对 messageId。
+    // 同一邮件连续起草时，旧 token 与新 token 不同，旧响应返回后守卫不匹配即丢弃。
+    const token = (get().draftingFor ?? '') + ':' + Date.now().toString();
+    set({ drafting: true, draftingFor: token, error: null });
     try {
       const draft = await tauri.aiDraftReply(ctx.messageId, get().intentZh.trim() || null);
-      if (get().draftingFor !== ctx.messageId) return;
+      // 守卫：draftingFor 已被更新（新起草）时丢弃本次响应
+      if (get().draftingFor !== token) return;
+
+      // #18 bilingual 基于实际草稿语言重判，而非仅依赖 openReply 时的 subject+snippet 判断
+      const draftIsForeign = detectForeign(draft.body);
+      const newBilingual = draftIsForeign;
+
       if (get().subject.trim() === '') {
-        set({ bodyForeign: draft.body, aiAssisted: true, subject: draft.subject });
+        set({
+          bodyForeign: draft.body,
+          aiAssisted: true,
+          subject: draft.subject,
+          bilingual: newBilingual,
+          // #52 保留 source 供 UI 显示缓存命中
+          draftSource: draft.source,
+        });
       } else {
-        set({ bodyForeign: draft.body, aiAssisted: true });
+        set({
+          bodyForeign: draft.body,
+          aiAssisted: true,
+          bilingual: newBilingual,
+          draftSource: draft.source,
+        });
       }
-      if (get().bilingual && detectForeign(draft.body)) {
+
+      if (draftIsForeign) {
         const back = await tauri.aiTranslateText(draft.body, 'zh-CN');
-        if (get().draftingFor === ctx.messageId) set({ bodyZhBack: back.text });
+        if (get().draftingFor === token) set({ bodyZhBack: back.text });
       } else {
         set({ bodyZhBack: null });
       }
     } catch (e) {
-      if (get().draftingFor === ctx.messageId) set({ error: errMsg(e) });
+      if (get().draftingFor === token) set({ error: errMsg(e) });
     } finally {
-      if (get().draftingFor === ctx.messageId) set({ drafting: false });
+      // #68 起草完成/失败后重置 draftingFor 为 null，避免下次同邮件起草复用旧 token
+      if (get().draftingFor === token) set({ drafting: false, draftingFor: null });
     }
   },
 
@@ -152,6 +179,9 @@ export const useComposeStore = create<ComposeState>((set, get) => ({
     const from = get().fromAccountId;
     if (from === null) return;
     if (!window.confirm('确认发送？此操作不可撤销，并会写入 send_log 审计表。')) return;
+    // #13 发送前记录当前草稿会话身份（replyContext.messageId 或 null 表示空白草稿）；
+    // linger 定时器触发时比对身份，仅当用户尚未开启新草稿会话时才 reset+关抽屉。
+    const sentReplyContext = get().replyContext;
     set({ sending: true, error: null });
     try {
       const receipt = await tauri.smtpSend({
@@ -167,8 +197,16 @@ export const useComposeStore = create<ComposeState>((set, get) => ({
         receiptInfo: `已发送，send_log ${receipt.sendLog.id.slice(0, 8)} · ${receipt.sendLog.smtpResponse ?? ''}`,
       });
       setTimeout(() => {
-        get().reset();
-        useUiStore.getState().closeDrawer();
+        // 仅当当前仍是本次发送对应的草稿会话时才清理；
+        // 若用户已开新草稿（replyContext 已变），不动它、不强制关抽屉。
+        const cur = get().replyContext;
+        const isSameSession =
+          cur?.messageId === sentReplyContext?.messageId &&
+          cur?.accountId === sentReplyContext?.accountId;
+        if (isSameSession) {
+          get().reset();
+          useUiStore.getState().closeDrawer();
+        }
       }, SEND_SUCCESS_LINGER_MS);
     } catch (e) {
       set({ error: errMsg(e) });
