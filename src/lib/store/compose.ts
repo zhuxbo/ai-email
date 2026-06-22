@@ -48,7 +48,9 @@ interface ComposeState {
   error: string | null;
   receiptInfo: string | null;
 
-  openReply: (m: MessageHeader) => void;
+  openReply: (
+    m: Pick<MessageHeader, 'id' | 'accountId' | 'fromAddr' | 'subject' | 'snippet'>,
+  ) => void;
   openBlank: () => void;
   setField: (
     patch: Partial<
