@@ -16,11 +16,29 @@ pub struct MatchCandidate {
     pub priority: Option<i32>,
 }
 
+/// 从发件地址中提取 domain 部分（`@` 后的内容，小写）。
+///
+/// 支持 "Name <user@example.com>"、"user@example.com" 两种格式：
+/// 先找最后一个 `<`，若存在则在其之后查找 `@`；否则直接查找第一个 `@`。
+fn extract_domain(addr: &str) -> Option<&str> {
+    let start = addr.rfind('<').map(|i| i + 1).unwrap_or(0);
+    let slice = &addr[start..];
+    let at_pos = slice.find('@')?;
+    let domain_with_suffix = slice[at_pos + 1..].trim_end_matches('>');
+    Some(domain_with_suffix)
+}
+
+/// 大小写不敏感的域名匹配：精确相等 或 subdomain 后缀（`*.rule`）。
+fn domain_matches(addr_domain: &str, rule_domain: &str) -> bool {
+    let addr = addr_domain.to_lowercase();
+    let rule = rule_domain.to_lowercase();
+    addr == rule || addr.ends_with(&format!(".{rule}"))
+}
+
 pub fn rule_matches(c: &MatchCandidate, rule: &AutoReplyRule) -> bool {
     if let Some(dom) = &rule.match_domain {
-        let dom = dom.to_lowercase();
-        match &c.from_addr {
-            Some(f) if f.to_lowercase().contains(&dom) => {}
+        match c.from_addr.as_deref().and_then(extract_domain) {
+            Some(addr_domain) if domain_matches(addr_domain, dom) => {}
             _ => return false,
         }
     }
@@ -77,13 +95,62 @@ mod tests {
         ));
     }
 
+    // #10: domain 匹配改为基于 @ 后的 domain 精确/后缀匹配，不再在整串 contains。
     #[test]
-    fn domain_is_case_insensitive_substring() {
-        let r = rule(Some("Client.com"), None, None);
-        assert!(rule_matches(&cand(Some("a@CLIENT.com"), None, None), &r));
-        assert!(rule_matches(&cand(Some("a@client.com.cn"), None, None), &r));
-        assert!(!rule_matches(&cand(Some("a@other.com"), None, None), &r));
+    fn domain_exact_and_subdomain_match() {
+        let r = rule(Some("example.com"), None, None);
+        // 精确匹配
+        assert!(rule_matches(
+            &cand(Some("user@example.com"), None, None),
+            &r
+        ));
+        // 子域匹配
+        assert!(rule_matches(
+            &cand(Some("user@sub.example.com"), None, None),
+            &r
+        ));
+        // 不命中：域名不同
+        assert!(!rule_matches(&cand(Some("user@other.com"), None, None), &r));
+        // 不命中：example.com 出现在 local-part，不应误命中
+        assert!(!rule_matches(
+            &cand(Some("example.com@evil.com"), None, None),
+            &r
+        ));
+        // 不命中：example.com 是另一个域的前缀但不是后缀（.evil.com 不含 .example.com 后缀）
+        assert!(!rule_matches(
+            &cand(Some("user@example.com.evil.com"), None, None),
+            &r
+        ));
+        // 不命中：from_addr 为 None
         assert!(!rule_matches(&cand(None, None, None), &r));
+    }
+
+    #[test]
+    fn domain_case_insensitive() {
+        let r = rule(Some("Client.com"), None, None);
+        // 大小写不敏感
+        assert!(rule_matches(&cand(Some("a@CLIENT.com"), None, None), &r));
+        assert!(rule_matches(&cand(Some("a@client.com"), None, None), &r));
+        // 不命中：client.com 作为另一域的子串（不是后缀）
+        assert!(!rule_matches(
+            &cand(Some("a@notclient.com"), None, None),
+            &r
+        ));
+    }
+
+    #[test]
+    fn domain_display_name_format_parsed_correctly() {
+        let r = rule(Some("example.com"), None, None);
+        // "Name <user@example.com>" 格式
+        assert!(rule_matches(
+            &cand(Some("Alice Smith <alice@example.com>"), None, None),
+            &r
+        ));
+        // 显示名含 "example.com" 但 domain 不匹配不误命中
+        assert!(!rule_matches(
+            &cand(Some("example.com Fake <real@evil.org>"), None, None),
+            &r
+        ));
     }
 
     #[test]

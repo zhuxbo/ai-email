@@ -522,3 +522,135 @@ async fn insert_if_absent_fk_failure_is_warned_not_panicked() {
             .unwrap();
     assert_eq!(count, 0, "FK 违约后不应留下孤儿行");
 }
+
+// ── #20/#70: evaluate_rules_for_messages 统一入口 + 手动重分类后规则被评估 ──────────
+
+/// 独立插入一个账户+邮件（email 参数可定制，避免 UNIQUE 冲突）。
+async fn seed_with_email(pool: &sqlx::SqlitePool, email: &str) -> (Uuid, Uuid) {
+    let account_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO accounts (id, email, provider, imap_host, imap_port, smtp_host, smtp_port)
+         VALUES (?1, ?2, 'qq', 'imap.qq.com', 993, 'smtp.qq.com', 465)",
+    )
+    .bind(account_id)
+    .bind(email)
+    .execute(pool)
+    .await
+    .unwrap();
+    let mailbox_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO mailboxes (id, account_id, name) VALUES (?1, ?2, 'INBOX')")
+        .bind(mailbox_id)
+        .bind(account_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    let msg_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO messages (id, account_id, mailbox_id, imap_uid, to_addrs, cc_addrs, flags)
+         VALUES (?1, ?2, ?3, 1, '[]', '[]', '[]')",
+    )
+    .bind(msg_id)
+    .bind(account_id)
+    .bind(mailbox_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    (account_id, msg_id)
+}
+
+/// #20: evaluate_rules_for_messages 能跨账户自动分组，无需调用方传 account_id。
+#[tokio::test]
+async fn evaluate_rules_for_messages_groups_by_account_automatically() {
+    use ai_email_lib::auto_reply::evaluate_rules_for_messages;
+    use ai_email_lib::db::suggested_replies as q;
+    let pool = mem_pool().await;
+
+    // 两个账户各一封邮件（不同 email 避免 UNIQUE 冲突）
+    let (account_a, msg_a) = seed_with_email(&pool, "acct-a@test.com").await;
+    let (account_b, msg_b) = seed_with_email(&pool, "acct-b@test.com").await;
+
+    // 两个账户分别建一条 category=work 规则
+    for account_id in [account_a, account_b] {
+        sqlx::query(
+            "INSERT INTO auto_reply_rules (id, account_id, name, match_category, draft_intent)
+             VALUES (?1, ?2, 'work-rule', 'work', 'intent')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(account_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    // 将两封邮件分类为 work
+    for msg_id in [msg_a, msg_b] {
+        sqlx::query("UPDATE messages SET category = 'work', priority = 1 WHERE id = ?1")
+            .bind(msg_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    // 统一入口：两个账户的 id 混合传入，无需调用方区分
+    evaluate_rules_for_messages(&pool, &[msg_a, msg_b])
+        .await
+        .unwrap();
+
+    let pending = q::list_pending(&pool).await.unwrap();
+    assert_eq!(
+        pending.len(),
+        2,
+        "两个账户的邮件都应被命中并入队，统一入口应自动按 account_id 分组"
+    );
+}
+
+/// #70: 手动重分类（模拟 ai_classify）改写 category/priority 后，调用统一入口使建议队列更新。
+/// 不变量：只入队建议草稿，不自动发送（验证无 send_log 写入）。
+#[tokio::test]
+async fn reclassify_then_evaluate_updates_queue_without_sending() {
+    use ai_email_lib::auto_reply::evaluate_rules_for_messages;
+    use ai_email_lib::db::suggested_replies as q;
+    let pool = mem_pool().await;
+    let (account_id, msg_id) = seed_account_and_message(&pool).await;
+
+    // 建一条 category=work 规则
+    sqlx::query(
+        "INSERT INTO auto_reply_rules (id, account_id, name, match_category, draft_intent)
+         VALUES (?1, ?2, 'work-rule', 'work', '请尽快确认')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(account_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // 初始：邮件 category=NULL → 评估不命中
+    evaluate_rules_for_messages(&pool, &[msg_id]).await.unwrap();
+    assert!(
+        q::list_pending(&pool).await.unwrap().is_empty(),
+        "category 为 NULL 时规则不应命中"
+    );
+
+    // 模拟手动重分类写回 category/priority（等价于 ai_classify 的 update_classification 写回）
+    sqlx::query("UPDATE messages SET category = 'work', priority = 1 WHERE id = ?1")
+        .bind(msg_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // 重分类后调用统一入口 → 规则命中 → 入队
+    evaluate_rules_for_messages(&pool, &[msg_id]).await.unwrap();
+    let pending = q::list_pending(&pool).await.unwrap();
+    assert_eq!(pending.len(), 1, "重分类后 category 规则应命中并入队");
+    assert_eq!(pending[0].rule_name_snapshot, "work-rule");
+
+    // 不变量：send_log 无任何写入（绝不自动发送）
+    let send_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM send_log")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        send_count, 0,
+        "evaluate_rules 不应写入 send_log（绝不自动发送）"
+    );
+}

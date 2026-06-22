@@ -2,6 +2,8 @@
 
 pub mod rules;
 
+use std::collections::HashMap;
+
 use uuid::Uuid;
 
 use crate::db::{auto_reply_rules, suggested_replies, Pool};
@@ -52,6 +54,36 @@ pub async fn evaluate_rules(pool: &Pool, account_id: Uuid, new_ids: &[Uuid]) -> 
             )
             .await?;
         }
+    }
+    Ok(())
+}
+
+/// 统一入口：给任意一批 message id（可跨账户）评估自动回复规则。
+///
+/// 自动按 `account_id` 分组后分别调用 [`evaluate_rules`]，调用方无需感知账户边界。
+/// 适用于 **手动重分类**（`ai_classify` 命令）等写回 category/priority 后需要触发评估的场景。
+///
+/// **不变量：只入队建议草稿，绝不自动发送。**
+pub async fn evaluate_rules_for_messages(pool: &Pool, message_ids: &[Uuid]) -> AppResult<()> {
+    if message_ids.is_empty() {
+        return Ok(());
+    }
+    // 批量查 account_id，按 IN_CHUNK_SIZE 分块避免超过 SQLite 绑定变量上限。
+    use crate::db::messages::IN_CHUNK_SIZE;
+    let mut account_groups: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+    for chunk in message_ids.chunks(IN_CHUNK_SIZE) {
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        let sql = format!("SELECT id, account_id FROM messages WHERE id IN ({placeholders})");
+        let mut q = sqlx::query_as::<_, (Uuid, Uuid)>(&sql);
+        for id in chunk {
+            q = q.bind(id);
+        }
+        for (msg_id, account_id) in q.fetch_all(pool).await? {
+            account_groups.entry(account_id).or_default().push(msg_id);
+        }
+    }
+    for (account_id, ids) in account_groups {
+        evaluate_rules(pool, account_id, &ids).await?;
     }
     Ok(())
 }

@@ -9,6 +9,7 @@ use crate::ai::classify::{self, ClassifyResult};
 use crate::ai::draft::{self, DraftResult};
 use crate::ai::summarize::{self, SummaryResult};
 use crate::ai::translate::{self, TextTranslation, TranslateResult};
+use crate::auto_reply;
 use crate::error::AppResult;
 use crate::AppState;
 
@@ -19,12 +20,21 @@ pub async fn ai_summarize(state: State<'_, AppState>, id: Uuid) -> AppResult<Sum
 
 /// Manual (re-)classify of one or more messages. Sync auto-fires the background path; this
 /// command is the explicit "重新分类" hook the UI can wire to a button later.
+///
+/// 分类写回 category/priority 后立即评估自动回复规则（#70），使建议队列按新分类更新。
+/// 规则评估失败仅 warn，不影响分类结果返回——符合 best-effort 惯例。
 #[tauri::command]
 pub async fn ai_classify(
     state: State<'_, AppState>,
     ids: Vec<Uuid>,
 ) -> AppResult<Vec<ClassifyResult>> {
-    classify::classify_message_ids(&state.db, &ids).await
+    let results = classify::classify_message_ids(&state.db, &ids).await?;
+    // 评估自动回复规则：仅对本次分类成功写回的 id 评估，失败 warn 不传播。
+    let classified_ids: Vec<Uuid> = results.iter().map(|r| r.message_id).collect();
+    if let Err(e) = auto_reply::evaluate_rules_for_messages(&state.db, &classified_ids).await {
+        tracing::warn!(error = %e, "ai_classify: auto-reply rule eval failed (non-fatal)");
+    }
+    Ok(results)
 }
 
 #[tauri::command]
