@@ -153,3 +153,55 @@ async fn suggested_replies_message_id_unique_blocks_second_insert() {
         "同一 message_id 只应存在一条（UNIQUE + INSERT OR IGNORE）"
     );
 }
+
+#[tokio::test]
+async fn auto_reply_rules_crud_roundtrip() {
+    use ai_email_lib::db::auto_reply_rules as repo;
+    let pool = mem_pool().await;
+    let (account_id, _msg) = seed_account_and_message(&pool).await;
+
+    let r = repo::insert(
+        &pool,
+        &repo::AutoReplyRuleInput {
+            account_id,
+            name: "工作紧急".into(),
+            enabled: true,
+            match_domain: None,
+            match_category: Some("work".into()),
+            match_priority_ceiling: Some(1),
+            draft_intent: "礼貌确认今天内回复".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(r.enabled);
+    assert_eq!(r.match_category.as_deref(), Some("work"));
+
+    repo::set_enabled(&pool, r.id, false).await.unwrap();
+    assert!(repo::list_enabled_by_account(&pool, account_id)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        repo::list_by_account(&pool, account_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let mut edited = r.clone();
+    edited.enabled = true;
+    edited.match_priority_ceiling = Some(2);
+    repo::update(&pool, &edited).await.unwrap();
+    let again = &repo::list_enabled_by_account(&pool, account_id)
+        .await
+        .unwrap()[0];
+    assert_eq!(again.match_priority_ceiling, Some(2));
+
+    repo::delete(&pool, r.id).await.unwrap();
+    assert!(repo::list_by_account(&pool, account_id)
+        .await
+        .unwrap()
+        .is_empty());
+}
