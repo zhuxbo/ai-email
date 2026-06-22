@@ -180,6 +180,11 @@ export const useMailStore = create<MailState>((set, get) => ({
       const body = await tauri.messageBody(id);
       if (get().selectedMessageId === id) {
         set({ body });
+        // 打开即标记已读（仅未读时发请求，避免每次打开都打 IMAP）。
+        const m = get().messages.find((x) => x.id === id);
+        if (m !== undefined && !m.flags.includes('\\Seen')) {
+          void get().setSeen(id, true);
+        }
       }
     } catch (e) {
       set({ error: errMsg(e) });

@@ -102,6 +102,62 @@ describe('mail store flag 乐观更新', () => {
   });
 });
 
+describe('mail store 打开自动标记已读', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('打开未读邮件触发 setSeen(id,true)', async () => {
+    useMailStore.setState({
+      messages: [{ id: 'm1', accountId: 'a1', flags: [] }] as never,
+      selectedMessageId: null,
+      accountErrors: {},
+      error: null,
+    } as never);
+    await useMailStore.getState().selectMessage('m1');
+    expect(tauri.messageSetSeen).toHaveBeenCalledWith('m1', true);
+  });
+
+  it('打开已读邮件不发请求', async () => {
+    useMailStore.setState({
+      messages: [{ id: 'm1', accountId: 'a1', flags: ['\\Seen'] }] as never,
+      selectedMessageId: null,
+      accountErrors: {},
+      error: null,
+    } as never);
+    await useMailStore.getState().selectMessage('m1');
+    expect(tauri.messageSetSeen).not.toHaveBeenCalled();
+  });
+
+  it('body 迟到（已切走）不标已读', async () => {
+    useMailStore.setState({
+      messages: [{ id: 'm1', accountId: 'a1', flags: [] }] as never,
+      selectedMessageId: null,
+      accountErrors: {},
+      error: null,
+    } as never);
+    let resolveBody!: (b: {
+      messageId: string;
+      textPlain: string;
+      html: null;
+      fetchedAt: string;
+    }) => void;
+    vi.mocked(tauri.messageBody).mockImplementationOnce(
+      () =>
+        new Promise((res) => {
+          resolveBody = res;
+        }),
+    );
+    const pending = useMailStore.getState().selectMessage('m1');
+    // body 加载期间用户切走到 m2 —— 守卫 get().selectedMessageId === 'm1' 将不成立
+    useMailStore.setState({ selectedMessageId: 'm2' } as never);
+    resolveBody({ messageId: 'm1', textPlain: 'x', html: null, fetchedAt: '' });
+    await pending;
+    // 迟到守卫不成立 → 不自动标记已读
+    expect(tauri.messageSetSeen).not.toHaveBeenCalled();
+  });
+});
+
 describe('mail store deleteMessage', () => {
   beforeEach(() => {
     useMailStore.setState({
