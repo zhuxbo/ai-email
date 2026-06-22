@@ -270,11 +270,28 @@ describe('mail store deleteMessage', () => {
     expect(tauri.messageDelete).toHaveBeenCalledWith('m1');
   });
 
-  it('失败时 reload 恢复 + 记 error', async () => {
+  it('失败时 reload 恢复 + 记 error + 被移除的行重新出现在列表', async () => {
+    // unifiedInbox reload 后返回包含 m1 的列表（模拟后端恢复）
+    vi.mocked(tauri.unifiedInbox).mockResolvedValueOnce({
+      messages: [
+        { id: 'm1', accountId: 'a1', flags: [] },
+        { id: 'm2', accountId: 'a1', flags: [] },
+      ],
+      errors: {},
+    } as never);
     vi.mocked(tauri.messageDelete).mockRejectedValueOnce(new Error('boom'));
+
+    // 乐观移除前 m1 存在
+    expect(useMailStore.getState().messages.find((m) => m.id === 'm1')).toBeDefined();
+
     await useMailStore.getState().deleteMessage('m1');
+
+    // 记 error
     expect(useMailStore.getState().error).toContain('boom');
-    expect(tauri.unifiedInbox).toHaveBeenCalled(); // reloadMessages 触发
+    // reload 触发
+    expect(tauri.unifiedInbox).toHaveBeenCalled();
+    // 关键断言：被乐观移除的 m1 已通过 reload 恢复到列表
+    expect(useMailStore.getState().messages.find((m) => m.id === 'm1')).toBeDefined();
   });
 
   it('删非选中项不动 selectedMessageId/body', async () => {

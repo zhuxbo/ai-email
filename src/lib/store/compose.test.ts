@@ -87,8 +87,39 @@ describe('compose store', () => {
     useComposeStore.getState().openReply(enMsg);
     useComposeStore.getState().setField({ bodyForeign: 'hi' });
     await useComposeStore.getState().runSend();
+    // 必须用 replyContext 中锁定的账户（acc-9），而非当前选中账户（acc-OTHER）
     expect(tauri.smtpSend).toHaveBeenCalledWith(
       expect.objectContaining({ accountId: 'acc-9', inReplyTo: 'm-en' }),
+    );
+    // 反证：不应使用 selectedAccountId 的值
+    expect(tauri.smtpSend).not.toHaveBeenCalledWith(
+      expect.objectContaining({ accountId: 'acc-OTHER' }),
+    );
+  });
+
+  it('#48 切换发件账户（setField fromAccountId）后 runSend 用新账户', async () => {
+    vi.mocked(tauri.smtpSend).mockResolvedValue({
+      sendLog: { id: 'log-48xx', smtpResponse: 'OK' },
+    } as never);
+    vi.stubGlobal('confirm', () => true);
+    // openBlank 场景：用户手动选择发件账户
+    useMailStore.setState({
+      selectedAccountId: 'acc-default',
+      accounts: [{ id: 'acc-default' }, { id: 'acc-switched' }] as never,
+    } as never);
+    useComposeStore.getState().openBlank();
+    expect(useComposeStore.getState().fromAccountId).toBe('acc-default');
+    // 用户切换发件账户
+    useComposeStore.getState().setField({ fromAccountId: 'acc-switched' });
+    expect(useComposeStore.getState().fromAccountId).toBe('acc-switched');
+    useComposeStore.getState().setField({ bodyForeign: 'hello switched' });
+    await useComposeStore.getState().runSend();
+    // 应当使用用户切换后的 acc-switched，而非初始的 acc-default
+    expect(tauri.smtpSend).toHaveBeenCalledWith(
+      expect.objectContaining({ accountId: 'acc-switched' }),
+    );
+    expect(tauri.smtpSend).not.toHaveBeenCalledWith(
+      expect.objectContaining({ accountId: 'acc-default' }),
     );
   });
 

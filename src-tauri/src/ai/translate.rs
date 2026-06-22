@@ -278,7 +278,43 @@ mod tests {
 
     #[test]
     fn normalize_target_rejects_long_input() {
+        // 17 个 ASCII 字节 → 超上限
         assert!(normalize_target(&"x".repeat(17)).is_err());
+        // 恰好 16 个 ASCII 字节 → 应接受（边界值）
+        assert!(normalize_target(&"x".repeat(16)).is_ok());
+    }
+
+    // #51 多字节 UTF-8 场景：len() 计字节而非字符数。
+    // BCP-47 标签实际为纯 ASCII（"zh-CN"、"en-US" 等），故生产路径不受影响；
+    // 但以下用例显式记录实现的边界行为，防止将来改为字符计数时产生回归。
+    #[test]
+    fn normalize_target_multibyte_within_byte_limit_is_accepted() {
+        // "zh语" = 2 ASCII + 3字节汉字 = 5 字节，远低于 16 字节上限 → 应接受
+        assert!(normalize_target("zh语").is_ok());
+    }
+
+    #[test]
+    fn normalize_target_multibyte_exceeding_byte_limit_is_rejected() {
+        // 6 个汉字 = 18 字节 > 16，用字节计数 → 应拒绝
+        // （BCP-47 不会出现此情形，但验证上限判断不会 panic 或截断字符边界）
+        let long_cjk = "中文语言目标设"; // 7 CJK = 21 字节
+        assert!(normalize_target(long_cjk).is_err());
+    }
+
+    #[test]
+    fn normalize_target_multibyte_emoji_within_byte_limit_is_accepted() {
+        // 单个 emoji（4 字节）远低于 16 字节上限，不应 panic 也不应误拒
+        assert!(normalize_target("🌍").is_ok());
+    }
+
+    #[test]
+    fn normalize_target_multibyte_no_panic_at_boundary() {
+        // 4 个 emoji = 16 字节，恰好在上限边界，确认不 panic 也不误截字符边界
+        let four_emoji = "🌍🌎🌏🗺"; // 4×4 = 16 字节
+        assert!(normalize_target(four_emoji).is_ok());
+        // 5 个 emoji = 20 字节，应被拒绝
+        let five_emoji = "🌍🌎🌏🗺🌐";
+        assert!(normalize_target(five_emoji).is_err());
     }
 
     #[test]
