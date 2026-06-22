@@ -118,3 +118,169 @@ async fn message_arrays_and_tags_roundtrip() {
     tags.sort();
     assert_eq!(tags, vec!["urgent".to_string(), "work".to_string()]);
 }
+
+#[tokio::test]
+async fn update_flags_overwrites_and_remove_deletes() {
+    let pool = temp_db().await;
+    let acc = db::accounts::insert(
+        &pool,
+        &AccountInput {
+            email: "f@example.com".into(),
+            display_name: None,
+            provider: "imap".into(),
+            imap_host: "h".into(),
+            imap_port: 993,
+            smtp_host: "h".into(),
+            smtp_port: 465,
+        },
+    )
+    .await
+    .expect("insert account");
+
+    let mailbox_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO mailboxes (id, account_id, name) VALUES (?1, ?2, 'INBOX')")
+        .bind(mailbox_id)
+        .bind(acc.id)
+        .execute(&pool)
+        .await
+        .expect("insert mailbox");
+
+    let id = db::messages::insert(
+        &pool,
+        &MessageInsert {
+            account_id: acc.id,
+            mailbox_id,
+            imap_uid: 1,
+            rfc_message_id: None,
+            thread_id: None,
+            subject: Some("hi".into()),
+            from_addr: Some("a@x.com".into()),
+            to_addrs: vec![],
+            cc_addrs: vec![],
+            sent_at: None,
+            internal_date: None,
+            flags: vec![],
+            size_bytes: None,
+            has_attachment: false,
+            snippet: None,
+        },
+    )
+    .await
+    .expect("insert message")
+    .expect("new row id");
+
+    // update_flags 覆盖式写入
+    db::messages::update_flags(&pool, id, &["\\Seen".to_string(), "\\Flagged".to_string()])
+        .await
+        .unwrap();
+    let got = db::messages::get(&pool, id).await.unwrap().unwrap();
+    assert!(got.flags.contains(&"\\Seen".to_string()));
+    assert!(got.flags.contains(&"\\Flagged".to_string()));
+
+    // remove 删除该行（bodies 等子表 CASCADE，单删即净）
+    db::messages::remove(&pool, id).await.unwrap();
+    assert!(db::messages::get(&pool, id).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn remove_cascades_children_and_nulls_send_log() {
+    let pool = temp_db().await;
+    let acc = db::accounts::insert(
+        &pool,
+        &AccountInput {
+            email: "g@example.com".into(),
+            display_name: None,
+            provider: "imap".into(),
+            imap_host: "h".into(),
+            imap_port: 993,
+            smtp_host: "h".into(),
+            smtp_port: 465,
+        },
+    )
+    .await
+    .expect("insert account");
+
+    let mailbox_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO mailboxes (id, account_id, name) VALUES (?1, ?2, 'INBOX')")
+        .bind(mailbox_id)
+        .bind(acc.id)
+        .execute(&pool)
+        .await
+        .expect("insert mailbox");
+
+    let id = db::messages::insert(
+        &pool,
+        &MessageInsert {
+            account_id: acc.id,
+            mailbox_id,
+            imap_uid: 1,
+            rfc_message_id: None,
+            thread_id: None,
+            subject: Some("hi".into()),
+            from_addr: Some("a@x.com".into()),
+            to_addrs: vec![],
+            cc_addrs: vec![],
+            sent_at: None,
+            internal_date: None,
+            flags: vec![],
+            size_bytes: None,
+            has_attachment: false,
+            snippet: None,
+        },
+    )
+    .await
+    .expect("insert message")
+    .expect("new row id");
+
+    // 子表：message_tags（应随 messages CASCADE 删除）
+    sqlx::query("INSERT INTO message_tags (message_id, tag, source) VALUES (?1, 'work', 'ai')")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .expect("insert tag");
+
+    // send_log 引用该邮件（修复后应 SET NULL，而非阻止删除）
+    let send_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO send_log (id, account_id, in_reply_to, subject, ai_assisted) \
+         VALUES (?1, ?2, ?3, 'Re: hi', 0)",
+    )
+    .bind(send_id)
+    .bind(acc.id)
+    .bind(id)
+    .execute(&pool)
+    .await
+    .expect("insert send_log");
+
+    // 删除父邮件：不应因 send_log FK 失败
+    db::messages::remove(&pool, id)
+        .await
+        .expect("remove must not fail on replied mail");
+
+    // messages 行没了
+    assert!(db::messages::get(&pool, id).await.unwrap().is_none());
+
+    // message_tags 级联删除
+    let tag_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM message_tags WHERE message_id = ?1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(tag_count, 0, "message_tags 应随父邮件 CASCADE 删除");
+
+    // send_log 审计行保留，in_reply_to 被置空
+    let sl_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM send_log WHERE id = ?1")
+        .bind(send_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(sl_count, 1, "send_log 审计行不应被删");
+    let null_ref: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM send_log WHERE id = ?1 AND in_reply_to IS NULL")
+            .bind(send_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(null_ref, 1, "in_reply_to 应被 SET NULL");
+}

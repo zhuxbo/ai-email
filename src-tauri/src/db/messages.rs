@@ -188,6 +188,26 @@ pub async fn update_classification(
     Ok(())
 }
 
+/// 覆盖式更新本地 flags（JSON TEXT 列）。IMAP 写成功后调用，保持本地与服务端一致。
+pub async fn update_flags(pool: &Pool, id: Uuid, flags: &[String]) -> AppResult<()> {
+    sqlx::query("UPDATE messages SET flags = ?1 WHERE id = ?2")
+        .bind(serde_json::to_string(flags)?)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// 删除本地消息行。bodies 等子表对 messages 均 ON DELETE CASCADE + 连接启用 foreign_keys，
+/// 故单删 messages 即级联清理，无需显式删 body。
+pub async fn remove(pool: &Pool, id: Uuid) -> AppResult<()> {
+    sqlx::query("DELETE FROM messages WHERE id = ?1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// Header subset used by the classifier prompt builder. Pulls just what the prompt sees
 /// (id + subject + from + snippet) so we don't waste tokens on internal_date / flags.
 #[derive(Debug, Clone, FromRow)]
