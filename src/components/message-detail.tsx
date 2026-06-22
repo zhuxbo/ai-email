@@ -1,7 +1,9 @@
 // Right pane: header + body (text or html with sandbox) + actions bar.
 //
-// HTML rendering uses an iframe with `srcDoc` + a `sandbox` attribute that disables scripts
-// and same-origin escape — so a malicious email can't pull cookies, exec JS, or beacon out.
+// HTML rendering uses an iframe with `srcDoc` + a `sandbox` attribute (no allow-same-origin,
+// no allow-scripts) plus an injected Content-Security-Policy meta tag that blocks all remote
+// resources by default. This prevents tracking pixels and external image beacons from loading
+// automatically when a message is opened.
 // Plain-text fallback if the message has no HTML. Reply moved into the actions bar.
 // AI 摘要/翻译/写信通过操作条触发右侧抽屉展示。
 
@@ -88,6 +90,19 @@ export function MessageDetail() {
   );
 }
 
+// CSP injected into every HTML email srcdoc:
+// - default-src 'none' blocks all remote fetches by default (tracking pixels, fonts, scripts)
+// - style-src 'unsafe-inline' allows inline CSS (needed for most HTML email layouts)
+// - img-src data: allows data-URI embedded images only (no remote http/https)
+// Links to external sites are handled by allow-popups on the sandbox (Tauri intercepts them).
+const EMAIL_CSP =
+  `<meta http-equiv="Content-Security-Policy" ` +
+  `content="default-src 'none'; style-src 'unsafe-inline'; img-src data:;">`;
+
+function buildSrcdoc(html: string): string {
+  return `${EMAIL_CSP}${html}`;
+}
+
 function BodyView({
   body,
 }: {
@@ -96,10 +111,11 @@ function BodyView({
   if (body.html) {
     return (
       <iframe
-        // `allow-popups` lets clicks on links open the system browser (Tauri intercepts those);
-        // we still disable scripts + same-origin so the page is rendered as inert HTML.
+        // sandbox without allow-same-origin: scripts are blocked and the iframe cannot
+        // access parent-frame cookies or storage. allow-popups lets link clicks open in
+        // the system browser (Tauri intercepts navigation requests).
         sandbox="allow-popups"
-        srcDoc={body.html}
+        srcDoc={buildSrcdoc(body.html)}
         title="message body"
         className="h-full min-h-[300px] w-full rounded border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900"
       />
