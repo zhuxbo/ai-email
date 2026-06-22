@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::ai::{prompts, AiClient, CompletionRequest, SystemBlock, UserMessage};
+use crate::ai::{extract_json, prompts, AiClient, CompletionRequest, SystemBlock, UserMessage};
 use crate::db::ai_results::{self, AiResultInsert};
 use crate::db::messages::MessageHeader;
 use crate::db::{ai_role_defaults, bodies, messages, Pool};
@@ -105,7 +105,7 @@ pub async fn summarize_message(pool: &Pool, message_id: Uuid) -> AppResult<Summa
         })
         .await?;
 
-    let summary: Summary = serde_json::from_str(&response.text).map_err(|e| {
+    let summary: Summary = serde_json::from_str(extract_json(&response.text)).map_err(|e| {
         AppError::Ai(format!(
             "模型未返回合法 JSON：{e}\n原文：{}",
             truncate_for_log(&response.text)
@@ -224,5 +224,15 @@ mod tests {
             compute_prompt_hash("foo", "bar"),
             compute_prompt_hash("foob", "ar"),
         );
+    }
+
+    /// A fenced ```json response must still deserialize into `Summary` via `extract_json`.
+    /// Structural assertion on the parsed value, not on raw text.
+    #[test]
+    fn fenced_response_parses_into_summary() {
+        let raw = "```json\n{\"tldr\":\"摘要\",\"bullets\":[\"a\",\"b\"],\"language\":\"zh\"}\n```";
+        let summary: Summary = serde_json::from_str(extract_json(raw)).expect("should parse");
+        assert_eq!(summary.tldr, "摘要");
+        assert_eq!(summary.bullets.len(), 2);
     }
 }

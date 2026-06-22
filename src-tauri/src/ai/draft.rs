@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::ai::{prompts, AiClient, CompletionRequest, SystemBlock, UserMessage};
+use crate::ai::{extract_json, prompts, AiClient, CompletionRequest, SystemBlock, UserMessage};
 use crate::db::ai_results::{self, AiResultInsert};
 use crate::db::messages::MessageHeader;
 use crate::db::{ai_role_defaults, bodies, messages, Pool};
@@ -102,7 +102,7 @@ pub async fn draft_reply(
         })
         .await?;
 
-    let draft: Draft = serde_json::from_str(&response.text).map_err(|e| {
+    let draft: Draft = serde_json::from_str(extract_json(&response.text)).map_err(|e| {
         AppError::Ai(format!(
             "起草模型未返回合法 JSON：{e}\n原文：{}",
             truncate_for_log(&response.text)
@@ -215,5 +215,16 @@ mod tests {
         let a = compute_prompt_hash("sys", "intent", "user1");
         let b = compute_prompt_hash("sys", "intent", "user2");
         assert_ne!(a, b);
+    }
+
+    /// A fenced ```json response (common from OpenAI-compatible vendors) must still
+    /// deserialize into `Draft` once routed through `extract_json` — assert on the parsed
+    /// struct, never on raw model text.
+    #[test]
+    fn fenced_response_parses_into_draft() {
+        let raw = "```json\n{\"subject\":\"Re: 合作\",\"body\":\"好的\",\"tone\":\"polite\"}\n```";
+        let draft: Draft = serde_json::from_str(extract_json(raw)).expect("should parse");
+        assert_eq!(draft.subject, "Re: 合作");
+        assert_eq!(draft.tone, "polite");
     }
 }

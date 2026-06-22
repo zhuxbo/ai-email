@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::ai::{prompts, AiClient, CompletionRequest, SystemBlock, UserMessage};
+use crate::ai::{extract_json, prompts, AiClient, CompletionRequest, SystemBlock, UserMessage};
 use crate::db::ai_results::{self, AiResultInsert};
 use crate::db::messages::{self, ClassifyInput};
 use crate::db::{ai_role_defaults, message_tags, Pool};
@@ -150,14 +150,31 @@ async fn classify_chunk(
         })
         .await?;
 
-    let items: Vec<ModelClassifyItem> = serde_json::from_str(&response.text).map_err(|e| {
-        AppError::Ai(format!(
-            "分类模型未返回合法 JSON 数组：{e}\n原文：{}",
-            truncate_for_log(&response.text)
-        ))
-    })?;
+    let items: Vec<ModelClassifyItem> = serde_json::from_str(extract_json(&response.text))
+        .map_err(|e| {
+            AppError::Ai(format!(
+                "分类模型未返回合法 JSON 数组：{e}\n原文：{}",
+                truncate_for_log(&response.text)
+            ))
+        })?;
 
-    let by_id: HashMap<Uuid, ModelClassifyItem> = items.into_iter().map(|i| (i.id, i)).collect();
+    // Keep the first item per id. A duplicate id means the model echoed one input twice
+    // (or hallucinated a collision); silently letting the later one win would discard the
+    // earlier classification non-deterministically. Warn and drop the duplicate instead.
+    let mut by_id: HashMap<Uuid, ModelClassifyItem> = HashMap::with_capacity(items.len());
+    for item in items {
+        match by_id.entry(item.id) {
+            std::collections::hash_map::Entry::Occupied(e) => {
+                tracing::warn!(
+                    message_id = %e.key(),
+                    "classify response had duplicate id, keeping first and dropping duplicate"
+                );
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(item);
+            }
+        }
+    }
 
     // Roughly amortize the response's input / output / cache tokens across pending items.
     // Not exact (the model returned one combined response) but good enough for the audit log.

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::ai::{prompts, AiClient, CompletionRequest, SystemBlock, UserMessage};
+use crate::ai::{extract_json, prompts, AiClient, CompletionRequest, SystemBlock, UserMessage};
 use crate::db::ai_results::{self, AiResultInsert};
 use crate::db::messages::MessageHeader;
 use crate::db::{ai_role_defaults, bodies, messages, Pool};
@@ -105,12 +105,13 @@ pub async fn translate_message(
         })
         .await?;
 
-    let mut translation: Translation = serde_json::from_str(&response.text).map_err(|e| {
-        AppError::Ai(format!(
-            "翻译模型未返回合法 JSON：{e}\n原文：{}",
-            truncate_for_log(&response.text)
-        ))
-    })?;
+    let mut translation: Translation =
+        serde_json::from_str(extract_json(&response.text)).map_err(|e| {
+            AppError::Ai(format!(
+                "翻译模型未返回合法 JSON：{e}\n原文：{}",
+                truncate_for_log(&response.text)
+            ))
+        })?;
     // Defensive: the model occasionally returns a slightly different target tag (e.g. "zh"
     // instead of "zh-CN"). Force the field to match what we asked for so the UI's cache
     // assumptions hold.
@@ -292,5 +293,15 @@ mod tests {
         let p = build_text_user_prompt("en-US", "你好世界");
         assert!(p.contains("目标语言：en-US"));
         assert!(p.contains("文本：\n你好世界"));
+    }
+
+    /// A fenced ```json response must still deserialize into `Translation` via `extract_json`.
+    /// Structural assertion on the parsed value, not on raw text.
+    #[test]
+    fn fenced_response_parses_into_translation() {
+        let raw = "```json\n{\"target\":\"zh-CN\",\"subject\":\"主题\",\"body\":\"正文\"}\n```";
+        let t: Translation = serde_json::from_str(extract_json(raw)).expect("should parse");
+        assert_eq!(t.target, "zh-CN");
+        assert_eq!(t.subject, "主题");
     }
 }
