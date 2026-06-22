@@ -8,6 +8,7 @@ import * as tauri from '../tauri';
 import type { Account, AddAccountForm, Category, MessageBody, MessageHeader } from '../types';
 import { errMsg } from '../utils';
 import { useAiStore } from './ai';
+import { useComposeStore } from './compose';
 
 /**
  * 纯函数：在 flags 中添加或移除单个 flag，不改变其它 flag。
@@ -181,6 +182,7 @@ export const useMailStore = create<MailState>((set, get) => ({
   selectMessage: async (id) => {
     // Bump messageOpenSeq so the mobile shell enters detail even on re-select.
     // AI summary/translation live in the ai store and reset per message id below.
+    // #16 compose 回复上下文也随选中邮件切换而重置，防止旧邮件的 replyContext 残留。
     set({
       selectedMessageId: id,
       body: null,
@@ -188,6 +190,7 @@ export const useMailStore = create<MailState>((set, get) => ({
       messageOpenSeq: get().messageOpenSeq + 1,
     });
     useAiStore.getState().resetForMessage(id);
+    useComposeStore.getState().reset();
     try {
       const body = await tauri.messageBody(id);
       if (get().selectedMessageId === id) {

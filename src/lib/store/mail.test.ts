@@ -1,6 +1,7 @@
 // src/lib/store/mail.test.ts
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { useMailStore } from './mail';
+import { useComposeStore } from './compose';
 vi.mock('../tauri', () => ({
   accountsList: vi.fn().mockResolvedValue([{ id: 'a1' }, { id: 'a2' }]),
   unifiedInbox: vi
@@ -283,5 +284,77 @@ describe('mail store deleteMessage', () => {
     expect(s.selectedMessageId).toBe('m1');
     expect(s.body).not.toBeNull();
     expect(s.messageOpenSeq).toBe(7);
+  });
+});
+
+describe('#16 selectMessage 切换邮件重置 compose 上下文', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useMailStore.setState({
+      messages: [
+        { id: 'm-a', accountId: 'acc-1', flags: [] },
+        { id: 'm-b', accountId: 'acc-1', flags: [] },
+      ] as never,
+      selectedMessageId: null,
+      messageOpenSeq: 0,
+      body: null,
+      accountErrors: {},
+      error: null,
+    } as never);
+    // compose 已预填邮件 A 的 replyContext（模拟用户开始回复 A）
+    useComposeStore.setState({
+      replyContext: { messageId: 'm-a', accountId: 'acc-1' },
+      to: 'sender-a@x.com',
+      subject: 'Re: A',
+      bodyForeign: '已编辑的回复内容',
+    } as never);
+  });
+
+  it('切换到邮件 B 后 compose replyContext 被清除（不再停留在 A）', async () => {
+    // 此时 compose 仍指向邮件 A
+    expect(useComposeStore.getState().replyContext?.messageId).toBe('m-a');
+
+    // 用户切换到邮件 B
+    await useMailStore.getState().selectMessage('m-b');
+
+    // compose 应被重置，replyContext 清空
+    expect(useComposeStore.getState().replyContext).toBeNull();
+  });
+
+  it('切换到邮件 B 后 compose 正文也被清除（不把 A 的草稿误发给 B 的发件人）', async () => {
+    expect(useComposeStore.getState().bodyForeign).toBe('已编辑的回复内容');
+
+    await useMailStore.getState().selectMessage('m-b');
+
+    // 草稿正文清空，不残留旧邮件的内容
+    expect(useComposeStore.getState().bodyForeign).toBe('');
+  });
+
+  it('【竞态】body 加载期间切换邮件：compose 随 selectMessage 同步重置，不等 body 返回', async () => {
+    let resolveBody!: (b: {
+      messageId: string;
+      textPlain: string;
+      html: null;
+      fetchedAt: string;
+    }) => void;
+    vi.mocked(tauri.messageBody).mockImplementationOnce(
+      () =>
+        new Promise((res) => {
+          resolveBody = res;
+        }),
+    );
+
+    // 开始加载邮件 B（body 挂起）
+    const pendingB = useMailStore.getState().selectMessage('m-b');
+
+    // body 还未返回时，compose 已应被同步重置
+    expect(useComposeStore.getState().replyContext).toBeNull();
+
+    // 最终 body 返回，不影响 compose 状态
+    resolveBody({ messageId: 'm-b', textPlain: 'body-b', html: null, fetchedAt: '' });
+    await pendingB;
+
+    // compose 仍保持重置状态
+    expect(useComposeStore.getState().replyContext).toBeNull();
   });
 });
