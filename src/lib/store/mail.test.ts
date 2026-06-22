@@ -100,6 +100,49 @@ describe('mail store flag 乐观更新', () => {
     await useMailStore.getState().setSeen('m1', true);
     expect(useMailStore.getState().error).toBeNull();
   });
+
+  it('#12 并发：setSeen 失败精准回滚单条，不覆盖另一个操作的乐观更新', async () => {
+    // 初始两条消息，m1/m2 均未读未标星
+    useMailStore.setState({
+      messages: [
+        { id: 'm1', accountId: 'a1', flags: [] },
+        { id: 'm2', accountId: 'a1', flags: [] },
+      ] as never,
+      error: null,
+    } as never);
+
+    // m2 的 setSeen 正常成功
+    vi.mocked(tauri.messageSetSeen).mockResolvedValue(undefined);
+
+    // m1 的 setFlagged 会失败（挂起，便于控制竞态顺序）
+    let rejectFlagged!: (e: Error) => void;
+    vi.mocked(tauri.messageSetFlagged).mockImplementationOnce(
+      () =>
+        new Promise((_res, rej) => {
+          rejectFlagged = rej;
+        }),
+    );
+
+    // 并发：m1 打星（会失败）+ m2 标已读（会成功）
+    const pendingFlagged = useMailStore.getState().setFlagged('m1', true);
+    const pendingSeen = useMailStore.getState().setSeen('m2', true);
+
+    // m2 先成功
+    await pendingSeen;
+    expect(useMailStore.getState().messages.find((m) => m.id === 'm2')?.flags).toContain('\\Seen');
+
+    // m1 失败回滚
+    rejectFlagged(new Error('flagged-boom'));
+    await pendingFlagged;
+
+    // m1 的 \\Flagged 回滚了（精准回滚）
+    expect(useMailStore.getState().messages.find((m) => m.id === 'm1')?.flags).not.toContain(
+      '\\Flagged',
+    );
+    // m2 的 \\Seen 不受影响（精准回滚不覆盖整列）
+    expect(useMailStore.getState().messages.find((m) => m.id === 'm2')?.flags).toContain('\\Seen');
+    expect(useMailStore.getState().error).toContain('flagged-boom');
+  });
 });
 
 describe('mail store 打开自动标记已读', () => {

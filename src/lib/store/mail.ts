@@ -24,16 +24,28 @@ async function setFlagOptimistic(
   value: boolean,
   call: (id: string, value: boolean) => Promise<void>,
 ): Promise<void> {
-  const prev = get().messages;
+  // 记录该条消息的原始 flag 值，用于精准回滚（不快照整列）。
+  const originalFlags = get().messages.find((m) => m.id === id)?.flags;
   // 开始新操作即清除上一次遗留的错误提示；失败时下方 catch 再写入新 error。
   set({
-    messages: prev.map((m) => (m.id === id ? { ...m, flags: patchFlag(m.flags, flag, value) } : m)),
+    messages: get().messages.map((m) =>
+      m.id === id ? { ...m, flags: patchFlag(m.flags, flag, value) } : m,
+    ),
     error: null,
   });
   try {
     await call(id, value);
   } catch (e) {
-    set({ messages: prev, error: errMsg(e) });
+    // 精准回滚：只恢复该条消息的 flags 原值，不覆盖整列快照，
+    // 避免并发进行的其它乐观更新被一并回滚。
+    if (originalFlags !== undefined) {
+      set({
+        messages: get().messages.map((m) => (m.id === id ? { ...m, flags: originalFlags } : m)),
+        error: errMsg(e),
+      });
+    } else {
+      set({ error: errMsg(e) });
+    }
   }
 }
 
