@@ -167,6 +167,7 @@ pub async fn sync_inbox(
                     size_bytes: fh.size_bytes,
                     has_attachment: false,
                     snippet: None,
+                    references_header: h.references_header.clone(),
                 },
             )
             .await?;

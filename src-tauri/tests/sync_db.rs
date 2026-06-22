@@ -68,6 +68,7 @@ async fn seed_message(pool: &Pool, account_id: Uuid, mailbox_id: Uuid, uid: i64)
             size_bytes: None,
             has_attachment: false,
             snippet: None,
+            references_header: None,
         },
     )
     .await
@@ -277,6 +278,7 @@ async fn batch_insert_is_atomic_via_transaction() {
         size_bytes: None,
         has_attachment: false,
         snippet: None,
+        references_header: None,
     };
 
     // --- 场景 A：正常提交 → 所有行可见 ---

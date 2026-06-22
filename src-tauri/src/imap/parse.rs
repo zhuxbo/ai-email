@@ -15,6 +15,9 @@ pub struct ParsedHeaders {
     pub to_addrs: Vec<String>,
     pub cc_addrs: Vec<String>,
     pub sent_at: Option<OffsetDateTime>,
+    /// Raw space-separated RFC 5322 References header value (e.g. `"<a@x> <b@x>"`).
+    /// Stored verbatim so the sender can extend it without re-parsing.
+    pub references_header: Option<String>,
 }
 
 /// Parse the header section of an RFC 822 message. Lossy: if a field is unparseable we drop it
@@ -31,6 +34,9 @@ pub fn parse_headers(raw: &[u8]) -> ParsedHeaders {
     // Use References' head if present, else In-Reply-To, else this message itself (single-msg
     // threads still want a thread_id so list views can group consistently).
     let thread_id = extract_thread_id(&message).or_else(|| rfc_message_id.clone());
+
+    // Collect all References IDs so the sender can extend the chain on reply.
+    let references_header = all_ids(message.references());
 
     let subject = message.subject().map(str::to_string);
 
@@ -56,6 +62,7 @@ pub fn parse_headers(raw: &[u8]) -> ParsedHeaders {
         to_addrs,
         cc_addrs,
         sent_at,
+        references_header,
     }
 }
 
@@ -69,6 +76,23 @@ fn first_id(value: &HeaderValue<'_>) -> Option<String> {
     match value {
         HeaderValue::Text(s) => Some(s.to_string()),
         HeaderValue::TextList(list) => list.first().map(|s| s.to_string()),
+        _ => None,
+    }
+}
+
+/// Collect all IDs from a References / In-Reply-To header value into a space-separated string
+/// suitable for storing and later extending. Returns `None` when the header is absent.
+fn all_ids(value: &HeaderValue<'_>) -> Option<String> {
+    match value {
+        HeaderValue::Text(s) if !s.is_empty() => Some(s.to_string()),
+        HeaderValue::TextList(list) if !list.is_empty() => {
+            let joined = list
+                .iter()
+                .map(|s| s.as_ref())
+                .collect::<Vec<_>>()
+                .join(" ");
+            Some(joined)
+        }
         _ => None,
     }
 }
@@ -297,5 +321,43 @@ This is the real body\r\n\
         assert!(!plain.contains("ATTACHMENT"), "附件内容不应出现在正文字段");
         // 附件计数应为 1
         assert!(p.has_attachment, "应检测到附件");
+    }
+
+    /// 邮件含多个 References ID：parse_headers 应将它们空格连接存入 references_header。
+    #[test]
+    fn parses_references_header_multiple_ids() {
+        const MAIL: &[u8] = b"\
+From: Alice <alice@example.com>\r\n\
+To: Bob <bob@example.com>\r\n\
+Subject: Re: Re: hello\r\n\
+Date: Mon, 19 May 2025 15:00:00 +0800\r\n\
+Message-ID: <c@example.com>\r\n\
+References: <a@example.com> <b@example.com>\r\n\
+In-Reply-To: <b@example.com>\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: text/plain\r\n\
+\r\n\
+reply body\r\n";
+
+        let p = parse_headers(MAIL);
+        assert_eq!(p.rfc_message_id.as_deref(), Some("c@example.com"));
+        // references_header 应保留两个 ID，空格分隔
+        let refs = p
+            .references_header
+            .expect("references_header must be present");
+        assert!(
+            refs.contains("a@example.com") && refs.contains("b@example.com"),
+            "both reference IDs must be in references_header: {refs}"
+        );
+    }
+
+    /// 邮件无 References 头：references_header 应为 None。
+    #[test]
+    fn no_references_header_yields_none() {
+        let p = parse_headers(SAMPLE); // SAMPLE 没有 References 头
+        assert!(
+            p.references_header.is_none(),
+            "no References header → references_header must be None"
+        );
     }
 }

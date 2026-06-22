@@ -85,6 +85,7 @@ async fn message_arrays_and_tags_roundtrip() {
             size_bytes: Some(42),
             has_attachment: false,
             snippet: Some("hello".into()),
+            references_header: None,
         },
     )
     .await
@@ -163,6 +164,7 @@ async fn update_flags_overwrites_and_remove_deletes() {
             size_bytes: None,
             has_attachment: false,
             snippet: None,
+            references_header: None,
         },
     )
     .await
@@ -226,6 +228,7 @@ async fn remove_cascades_children_and_nulls_send_log() {
             size_bytes: None,
             has_attachment: false,
             snippet: None,
+            references_header: None,
         },
     )
     .await

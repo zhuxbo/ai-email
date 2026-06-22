@@ -48,6 +48,9 @@ pub struct MessageHeader {
     pub tags: Vec<String>,
     #[serde(with = "time::serde::rfc3339::option")]
     pub body_fetched_at: Option<OffsetDateTime>,
+    /// Space-separated RFC 5322 References header of this message, stored verbatim.
+    /// Used by the sender to extend the thread chain on reply.
+    pub references_header: Option<String>,
 }
 
 /// Owned struct passed to `insert`. Separate from `MessageHeader` so callers don't need to
@@ -69,6 +72,8 @@ pub struct MessageInsert {
     pub size_bytes: Option<i32>,
     pub has_attachment: bool,
     pub snippet: Option<String>,
+    /// Space-separated RFC 5322 References header, stored verbatim for reply chain extension.
+    pub references_header: Option<String>,
 }
 
 /// `SELECT ... LEFT JOIN message_tags ...` projection used by both `get` and
@@ -80,7 +85,7 @@ const SELECT_COLUMNS: &str = r#"
     m.subject, m.from_addr, m.to_addrs, m.cc_addrs, m.sent_at, m.internal_date,
     m.flags, m.size_bytes, m.has_attachment, m.snippet, m.priority, m.category,
     COALESCE(json_group_array(t.tag) FILTER (WHERE t.tag IS NOT NULL), '[]') AS tags,
-    m.body_fetched_at
+    m.body_fetched_at, m.references_header
 "#;
 
 /// `INSERT … ON CONFLICT DO NOTHING RETURNING id`. Returns `Some(id)` iff a row was
@@ -103,9 +108,9 @@ where
         INSERT INTO messages (
             id, account_id, mailbox_id, imap_uid, rfc_message_id, thread_id,
             subject, from_addr, to_addrs, cc_addrs, sent_at,
-            internal_date, flags, size_bytes, has_attachment, snippet
+            internal_date, flags, size_bytes, has_attachment, snippet, references_header
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
         ON CONFLICT (account_id, mailbox_id, imap_uid) DO NOTHING
         RETURNING id
         "#,
@@ -126,6 +131,7 @@ where
     .bind(m.size_bytes)
     .bind(m.has_attachment)
     .bind(&m.snippet)
+    .bind(&m.references_header)
     .fetch_optional(executor)
     .await?;
     Ok(id)
