@@ -50,11 +50,7 @@ pub struct SendReceipt {
 ///      remains retryable), then return the error.
 pub async fn send_draft(pool: &Pool, draft: &SendDraft) -> AppResult<SendReceipt> {
     // #35: validate to ∪ cc non-empty; allow cc-only sends.
-    if draft.to.is_empty() && draft.cc.is_empty() {
-        return Err(AppError::Smtp(
-            "At least one recipient (To or Cc) is required".into(),
-        ));
-    }
+    validate_recipients(&draft.to, &draft.cc)?;
 
     // #35: deduplicate recipients.
     let to_deduped = dedup_addrs(&draft.to);
@@ -70,13 +66,14 @@ pub async fn send_draft(pool: &Pool, draft: &SendDraft) -> AppResult<SendReceipt
             .await
             .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
 
-    // #7: look up the RFC Message-ID of the original message for threading headers.
-    let rfc_message_id = if let Some(reply_id) = draft.in_reply_to {
-        messages::get(pool, reply_id)
-            .await?
-            .and_then(|m| m.rfc_message_id)
+    // #7: look up the RFC Message-ID and References chain of the original message for threading.
+    let (rfc_message_id, original_references) = if let Some(reply_id) = draft.in_reply_to {
+        match messages::get(pool, reply_id).await? {
+            Some(m) => (m.rfc_message_id, m.references_header),
+            None => (None, None),
+        }
     } else {
-        None
+        (None, None)
     };
 
     let message = build_message(
@@ -85,6 +82,7 @@ pub async fn send_draft(pool: &Pool, draft: &SendDraft) -> AppResult<SendReceipt
         &to_deduped,
         &cc_deduped,
         rfc_message_id.as_deref(),
+        original_references.as_deref(),
     )?;
 
     let port = u16::try_from(account.smtp_port)
@@ -183,6 +181,17 @@ fn format_smtp_response(resp: &lettre::transport::smtp::response::Response) -> S
     }
 }
 
+/// Validate that at least one recipient is present (to ∪ cc must be non-empty).
+/// Extracted so it can be unit-tested without a real pool or keychain.
+fn validate_recipients(to: &[String], cc: &[String]) -> AppResult<()> {
+    if to.is_empty() && cc.is_empty() {
+        return Err(AppError::Smtp(
+            "At least one recipient (To or Cc) is required".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Deduplicate a list of raw address strings, preserving order.
 fn dedup_addrs(addrs: &[String]) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
@@ -196,13 +205,20 @@ fn dedup_addrs(addrs: &[String]) -> Vec<String> {
 /// Build an RFC 5322 Message.
 ///
 /// `rfc_id` is the RFC Message-ID (`<id@host>`) of the original message being replied to.
-/// When present, `In-Reply-To` and `References` headers are set for thread continuity.
+/// `original_refs` is the space-separated References header of that original message.
+///
+/// When replying, `In-Reply-To` is set to `rfc_id`, and `References` is built per RFC 5322 §3.6.4:
+///   - Start with the original message's own References chain (if any).
+///   - Append the original message's Message-ID at the end.
+///
+/// This produces a complete chain: `<a> <b> … <c>` where `<c>` is the message being replied to.
 fn build_message(
     account: &Account,
     draft: &SendDraft,
     to: &[String],
     cc: &[String],
     rfc_id: Option<&str>,
+    original_refs: Option<&str>,
 ) -> AppResult<Message> {
     let from_addr: lettre::Address = account
         .email
@@ -222,9 +238,15 @@ fn build_message(
     }
 
     // #7: set threading headers when replying.
+    // References = original_refs (existing chain) + space + rfc_id (the message being replied to).
+    // In-Reply-To = rfc_id only (RFC 5322 §3.6.4).
     if let Some(mid) = rfc_id {
         builder = builder.in_reply_to(mid.to_string());
-        builder = builder.header(header::References::from(mid.to_string()));
+        let references = match original_refs {
+            Some(refs) if !refs.trim().is_empty() => format!("{} {}", refs.trim(), mid),
+            _ => mid.to_string(),
+        };
+        builder = builder.header(header::References::from(references));
     }
 
     builder
@@ -296,34 +318,21 @@ mod tests {
 
     #[test]
     fn rejects_empty_to_and_cc() {
-        let mut d = draft_base();
-        d.to = vec![];
-        d.cc = vec![];
-        // Sync validation — we can call the pre-flight check via the runtime
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        // We can't call send_draft without a real pool/keychain, but we can verify the
-        // validation logic directly via dedup_addrs and by inspecting the early-return guard.
-        // The guard is: to.is_empty() && cc.is_empty() → error.
+        // Directly exercise the validation function extracted from send_draft's guard:
+        // both to AND cc empty → the function returns Err.
+        let result = validate_recipients(&[], &[]);
+        assert!(result.is_err(), "empty to+cc must return Err");
+        let err_msg = result.unwrap_err().to_string();
         assert!(
-            d.to.is_empty() && d.cc.is_empty(),
-            "both empty → error path"
+            err_msg.contains("recipient"),
+            "error message should mention recipients: {err_msg}"
         );
-        let _ = rt; // suppress unused warning
     }
 
     #[test]
     fn allows_cc_only_send() {
-        let mut d = draft_base();
-        d.to = vec![];
-        d.cc = vec!["carol@example.com".to_string()];
-        // With fix: to.is_empty() && cc.is_empty() → only errors when BOTH empty.
-        assert!(
-            !(d.to.is_empty() && d.cc.is_empty()),
-            "cc-only should pass validation"
-        );
+        let result = validate_recipients(&[], &["carol@example.com".to_string()]);
+        assert!(result.is_ok(), "cc-only should pass validation");
     }
 
     #[test]
@@ -354,25 +363,54 @@ mod tests {
 
     // ── #7: In-Reply-To / References headers ──────────────────────────────────
 
+    /// 无原链时 References = 单个被回复的 message-id（In-Reply-To 同）。
     #[test]
-    fn build_message_sets_in_reply_to_and_references() {
+    fn build_message_sets_in_reply_to_and_references_no_prior_chain() {
         let account = dummy_account("alice@example.com");
         let draft = draft_base();
         let rfc_id = "<original-msg-id@mail.example.com>";
 
-        let msg = build_message(&account, &draft, &draft.to, &draft.cc, Some(rfc_id))
+        let msg = build_message(&account, &draft, &draft.to, &draft.cc, Some(rfc_id), None)
             .expect("build_message must succeed");
 
-        let raw = msg.formatted();
-        let raw_str = String::from_utf8_lossy(&raw);
-
+        let raw = String::from_utf8_lossy(&msg.formatted()).into_owned();
         assert!(
-            raw_str.contains(&format!("In-Reply-To: {rfc_id}")),
-            "In-Reply-To header missing or wrong in:\n{raw_str}"
+            raw.contains(&format!("In-Reply-To: {rfc_id}")),
+            "In-Reply-To header missing or wrong in:\n{raw}"
         );
         assert!(
-            raw_str.contains(&format!("References: {rfc_id}")),
-            "References header missing or wrong in:\n{raw_str}"
+            raw.contains(&format!("References: {rfc_id}")),
+            "References header missing or wrong in:\n{raw}"
+        );
+    }
+
+    /// 多层链：被回复邮件有 references_header = "<a@x> <b@x>"，message-id = "<c@x>"。
+    /// 回复的 References 应为 "<a@x> <b@x> <c@x>"（延续链 + 追加），In-Reply-To = "<c@x>"。
+    #[test]
+    fn build_message_extends_references_chain() {
+        let account = dummy_account("alice@example.com");
+        let draft = draft_base();
+        let original_refs = "<a@x> <b@x>";
+        let rfc_id = "<c@x>";
+
+        let msg = build_message(
+            &account,
+            &draft,
+            &draft.to,
+            &draft.cc,
+            Some(rfc_id),
+            Some(original_refs),
+        )
+        .expect("build_message must succeed");
+
+        let raw = String::from_utf8_lossy(&msg.formatted()).into_owned();
+        assert!(
+            raw.contains("In-Reply-To: <c@x>"),
+            "In-Reply-To must be the direct parent:\n{raw}"
+        );
+        assert!(
+            raw.contains("References: <a@x> <b@x> <c@x>"),
+            "References must extend the prior chain:\n{raw}"
         );
     }
 
@@ -381,7 +419,7 @@ mod tests {
         let account = dummy_account("alice@example.com");
         let draft = draft_base();
 
-        let msg = build_message(&account, &draft, &draft.to, &draft.cc, None)
+        let msg = build_message(&account, &draft, &draft.to, &draft.cc, None, None)
             .expect("build_message must succeed");
 
         let raw = String::from_utf8_lossy(&msg.formatted()).into_owned();
@@ -403,7 +441,7 @@ mod tests {
         draft.cc = vec!["carol@example.com".to_string()];
 
         // build_message itself doesn't enforce the to+cc non-empty check — send_draft does.
-        let msg = build_message(&account, &draft, &draft.to, &draft.cc, None)
+        let msg = build_message(&account, &draft, &draft.to, &draft.cc, None, None)
             .expect("cc-only message should build");
         let raw = String::from_utf8_lossy(&msg.formatted()).into_owned();
         assert!(raw.contains("Cc: carol@example.com"), "Cc header expected");
