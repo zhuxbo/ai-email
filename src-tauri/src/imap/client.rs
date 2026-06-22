@@ -26,6 +26,11 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Keeps individual commands from stalling indefinitely on half-open connections.
 const OP_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Extended budget for full-body fetch (`BODY.PEEK[]`).
+/// A single message can carry ~50 MB of attachments; at 200 KB/s that takes ~250 s.
+/// 120 s covers most real-world cases while still bounding runaway fetches.
+const BODY_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// One open IMAP session. Not thread-safe; never share across tasks.
 pub struct ImapClient {
     session: Session<TlsStream<TcpStream>>,
@@ -69,7 +74,7 @@ impl ImapClient {
         .await
         .unwrap_or_else(|_| {
             Err(AppError::Imap(format!(
-                "connect to {host}:{port} timed out after {}s",
+                "IMAP 连接超时（{}s）：{host}:{port}",
                 CONNECT_TIMEOUT.as_secs()
             )))
         })
@@ -138,11 +143,9 @@ impl ImapClient {
     pub async fn select(&mut self, name: &str) -> AppResult<SelectedMailbox> {
         let m = timeout(OP_TIMEOUT, self.session.select(name))
             .await
-            .unwrap_or_else(|_| {
-                Err(async_imap::error::Error::Io(std::io::Error::other(
-                    "SELECT timed out",
-                )))
-            })
+            .map_err(|_| {
+                AppError::Imap(format!("IMAP SELECT 操作超时（{}s）", OP_TIMEOUT.as_secs()))
+            })?
             .map_err(|e| AppError::Imap(e.to_string()))?;
         Ok(SelectedMailbox {
             exists: m.exists,
@@ -190,7 +193,7 @@ impl ImapClient {
     pub async fn uid_fetch_body(&mut self, uid: u32) -> AppResult<Vec<u8>> {
         // Timeout covers both command send and stream read so a half-open connection that
         // accepts the UID FETCH but stalls on response data doesn't hang indefinitely.
-        timeout(OP_TIMEOUT, async {
+        timeout(BODY_TIMEOUT, async {
             let mut stream = self
                 .session
                 .uid_fetch(uid.to_string(), "(BODY.PEEK[])")
@@ -206,7 +209,12 @@ impl ImapClient {
             Ok(body.to_vec())
         })
         .await
-        .map_err(|_| AppError::Imap("IMAP UID FETCH BODY 操作超时（30s）".into()))?
+        .map_err(|_| {
+            AppError::Imap(format!(
+                "IMAP UID FETCH BODY 操作超时（{}s）",
+                BODY_TIMEOUT.as_secs()
+            ))
+        })?
     }
 
     /// `UID STORE <uid> ±FLAGS (<flag>)`。flag 传字面 IMAP 形式（如 `"\\Seen"` / `"\\Flagged"`）。
@@ -236,11 +244,12 @@ impl ImapClient {
     pub async fn uid_move(&mut self, uid: u32, dest: &str) -> AppResult<()> {
         timeout(OP_TIMEOUT, self.session.uid_mv(uid.to_string(), dest))
             .await
-            .unwrap_or_else(|_| {
-                Err(async_imap::error::Error::Io(std::io::Error::other(
-                    "UID MOVE timed out",
-                )))
-            })
+            .map_err(|_| {
+                AppError::Imap(format!(
+                    "IMAP UID MOVE 操作超时（{}s）",
+                    OP_TIMEOUT.as_secs()
+                ))
+            })?
             .map_err(|e| AppError::Imap(e.to_string()))
     }
 
@@ -406,6 +415,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn body_timeout_is_sane() {
+        // body 全文超时应大于 OP_TIMEOUT，且不超过 5 分钟（防止无限等待）。
+        let secs = BODY_TIMEOUT.as_secs();
+        assert!(
+            secs > OP_TIMEOUT.as_secs(),
+            "BODY_TIMEOUT={secs}s 应大于 OP_TIMEOUT={}s",
+            OP_TIMEOUT.as_secs()
+        );
+        assert!(secs <= 300, "BODY_TIMEOUT={secs}s 不应超过 300s");
+    }
+
     #[tokio::test]
     async fn timeout_maps_to_imap_error() {
         // 验证超时时映射为 AppError::Imap（含可读信息），而非 panic 或其他错误类型。
@@ -417,14 +438,16 @@ mod tests {
             Ok(())
         })
         .await
-        .unwrap_or_else(|_| Err(AppError::Imap("connect timed out after 30s".into())));
+        .unwrap_or_else(|_| {
+            Err(AppError::Imap(format!(
+                "IMAP 连接超时（{}s）：imap.example.com:993",
+                CONNECT_TIMEOUT.as_secs()
+            )))
+        });
 
         match result {
             Err(AppError::Imap(msg)) => {
-                assert!(
-                    msg.contains("timed out"),
-                    "错误信息应含 'timed out'，实际: {msg}"
-                )
+                assert!(msg.contains("超时"), "错误信息应含 '超时'，实际: {msg}")
             }
             other => panic!("应得到 AppError::Imap，实际: {other:?}"),
         }
