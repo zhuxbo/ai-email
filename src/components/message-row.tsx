@@ -118,7 +118,14 @@ export function MessageRow({
               {m.fromAddr ?? '(无发件人)'}
             </span>
           </span>
-          <span className="shrink-0 text-xs text-slate-400">{relativeDate(m.sentAt)}</span>
+          <span className="flex shrink-0 items-center gap-1">
+            {m.flags.includes('\\Flagged') && (
+              <span aria-label="已加星" title="已加星" className="text-amber-500">
+                ★
+              </span>
+            )}
+            <span className="text-xs text-slate-400">{relativeDate(m.sentAt)}</span>
+          </span>
         </div>
         <div className="flex items-center gap-2">
           {badge && (

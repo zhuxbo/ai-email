@@ -36,3 +36,36 @@ describe('MessageRow', () => {
     expect(container.querySelector('[data-testid="source-dot"]')).toBeTruthy();
   });
 });
+
+describe('MessageRow 星标指示', () => {
+  const base: MessageHeader = {
+    id: 'm1',
+    accountId: 'a1',
+    mailboxId: 'mb',
+    imapUid: 1,
+    rfcMessageId: null,
+    threadId: null,
+    subject: 'Hi',
+    fromAddr: 'bob@x.com',
+    toAddrs: [],
+    ccAddrs: [],
+    sentAt: null,
+    internalDate: null,
+    flags: [],
+    sizeBytes: null,
+    hasAttachment: false,
+    snippet: null,
+    priority: null,
+    category: null,
+    tags: [],
+    bodyFetchedAt: null,
+  };
+  it('\\Flagged 时渲染星标', () => {
+    render(<MessageRow m={{ ...base, flags: ['\\Flagged'] }} active={false} onClick={vi.fn()} />);
+    expect(screen.getByLabelText('已加星')).toBeInTheDocument();
+  });
+  it('无 \\Flagged 不渲染星标', () => {
+    render(<MessageRow m={{ ...base, flags: [] }} active={false} onClick={vi.fn()} />);
+    expect(screen.queryByLabelText('已加星')).toBeNull();
+  });
+});
