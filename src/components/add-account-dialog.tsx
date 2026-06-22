@@ -4,6 +4,27 @@
 
 import { useState } from 'react';
 
+/**
+ * #69: 解析端口字符串为整数，返回有效端口数值，无效时返回 null。
+ *
+ * 规则（与后端 validate_port(i32) 一致）：
+ * - 必须是整数（小数部分非零则拒绝，1.0 → 1 可接受）
+ * - 范围 1–65535（TCP 端口合法范围）
+ *
+ * 导出供测试，不属于公开 API。
+ */
+export function parsePort(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (trimmed === '') return null;
+  const asNum = Number(trimmed);
+  if (!Number.isFinite(asNum)) return null;
+  const asInt = Math.trunc(asNum);
+  // 拒绝小数部分非零的值（如 993.5），但接受 1.0 → 1
+  if (asNum !== asInt) return null;
+  if (asInt < 1 || asInt > 65535) return null;
+  return asInt;
+}
+
 import { useMailStore } from '../lib/store/mail';
 import { providerById, PROVIDERS, type ProviderId } from '../lib/providers';
 
@@ -24,9 +45,10 @@ export function AddAccountDialog({ open, onClose }: Props) {
   const [displayName, setDisplayName] = useState('');
   const [authCode, setAuthCode] = useState('');
   const [imapHost, setImapHost] = useState(preset.imapHost);
-  const [imapPort, setImapPort] = useState(preset.imapPort);
+  // #69: 端口存为字符串以保留用户输入的原始值，提交时经 parsePort 校验为合法整数
+  const [imapPort, setImapPort] = useState(String(preset.imapPort));
   const [smtpHost, setSmtpHost] = useState(preset.smtpHost);
-  const [smtpPort, setSmtpPort] = useState(preset.smtpPort);
+  const [smtpPort, setSmtpPort] = useState(String(preset.smtpPort));
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -39,9 +61,9 @@ export function AddAccountDialog({ open, onClose }: Props) {
     setDisplayName('');
     setAuthCode('');
     setImapHost(defaultPreset.imapHost);
-    setImapPort(defaultPreset.imapPort);
+    setImapPort(String(defaultPreset.imapPort));
     setSmtpHost(defaultPreset.smtpHost);
-    setSmtpPort(defaultPreset.smtpPort);
+    setSmtpPort(String(defaultPreset.smtpPort));
     setError(null);
   }
 
@@ -57,13 +79,24 @@ export function AddAccountDialog({ open, onClose }: Props) {
     setProviderId(next);
     const p = providerById(next);
     setImapHost(p.imapHost);
-    setImapPort(p.imapPort);
+    setImapPort(String(p.imapPort));
     setSmtpHost(p.smtpHost);
-    setSmtpPort(p.smtpPort);
+    setSmtpPort(String(p.smtpPort));
   }
 
   async function onSubmit(e: React.SyntheticEvent<HTMLFormElement>) {
     e.preventDefault();
+    // #69: 在提交前解析并校验端口，确保传给后端的是合法整数（对应后端 i32 端口字段）
+    const parsedImapPort = parsePort(imapPort);
+    const parsedSmtpPort = parsePort(smtpPort);
+    if (parsedImapPort === null) {
+      setError('IMAP 端口必须是 1–65535 之间的整数');
+      return;
+    }
+    if (parsedSmtpPort === null) {
+      setError('SMTP 端口必须是 1–65535 之间的整数');
+      return;
+    }
     setSubmitting(true);
     setError(null);
     try {
@@ -72,9 +105,9 @@ export function AddAccountDialog({ open, onClose }: Props) {
         displayName: displayName.trim() || null,
         provider: providerId,
         imapHost: imapHost.trim(),
-        imapPort,
+        imapPort: parsedImapPort,
         smtpHost: smtpHost.trim(),
-        smtpPort,
+        smtpPort: parsedSmtpPort,
         authCode: authCode.trim(),
       });
       resetForm();
@@ -197,7 +230,7 @@ export function AddAccountDialog({ open, onClose }: Props) {
                   required
                   value={imapPort}
                   onChange={(e) => {
-                    setImapPort(Number(e.currentTarget.value));
+                    setImapPort(e.currentTarget.value);
                   }}
                   className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1 text-sm dark:border-slate-600 dark:bg-slate-800"
                 />
@@ -221,7 +254,7 @@ export function AddAccountDialog({ open, onClose }: Props) {
                   required
                   value={smtpPort}
                   onChange={(e) => {
-                    setSmtpPort(Number(e.currentTarget.value));
+                    setSmtpPort(e.currentTarget.value);
                   }}
                   className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1 text-sm dark:border-slate-600 dark:bg-slate-800"
                 />

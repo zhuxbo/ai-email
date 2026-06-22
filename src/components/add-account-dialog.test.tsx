@@ -1,11 +1,13 @@
-// Tests for #47: AddAccountDialog resets all fields (including sensitive auth code)
-// on close/cancel so state does not persist across open cycles.
+// Tests for:
+//   #47: AddAccountDialog resets all fields (including sensitive auth code)
+//        on close/cancel so state does not persist across open cycles.
+//   #69: Port inputs must parse as integers in 1–65535; decimals/0/out-of-range are rejected.
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
-import { AddAccountDialog } from './add-account-dialog';
+import { AddAccountDialog, parsePort } from './add-account-dialog';
 import { useMailStore } from '../lib/store/mail';
 
 function inputValue(el: HTMLElement): string {
@@ -143,6 +145,45 @@ describe('AddAccountDialog', () => {
 
     // Unblock the submit so component cleanup is deterministic.
     resolveSubmit();
+  });
+
+  // ---- #69: 端口字段整数校验 ----
+  // parsePort 是从组件导出的纯函数，对照后端 validate_port(i32) 的契约测试。
+
+  it('#69 parsePort: 有效整数端口返回数字', () => {
+    expect(parsePort('993')).toBe(993);
+    expect(parsePort('465')).toBe(465);
+    expect(parsePort('1')).toBe(1);
+    expect(parsePort('65535')).toBe(65535);
+  });
+
+  it('#69 parsePort: 0 返回 null', () => {
+    expect(parsePort('0')).toBeNull();
+  });
+
+  it('#69 parsePort: 负数返回 null', () => {
+    expect(parsePort('-1')).toBeNull();
+    expect(parsePort('-993')).toBeNull();
+  });
+
+  it('#69 parsePort: 超过 65535 返回 null', () => {
+    expect(parsePort('65536')).toBeNull();
+    expect(parsePort('99999')).toBeNull();
+  });
+
+  it('#69 parsePort: 小数返回 null（拒绝非整数）', () => {
+    expect(parsePort('993.5')).toBeNull();
+    expect(parsePort('0.5')).toBeNull();
+    expect(parsePort('1.0')).toBe(1); // 1.0 截断为 1，整数有效
+  });
+
+  it('#69 parsePort: 空字符串返回 null', () => {
+    expect(parsePort('')).toBeNull();
+  });
+
+  it('#69 parsePort: 非数字字符串返回 null', () => {
+    expect(parsePort('abc')).toBeNull();
+    expect(parsePort('993abc')).toBeNull();
   });
 
   it('提交成功后授权码清空', async () => {

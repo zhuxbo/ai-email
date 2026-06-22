@@ -155,12 +155,51 @@ export async function suggestedReplyDismiss(id: string): Promise<void> {
   await invoke('suggested_reply_dismiss', { id });
 }
 
+/**
+ * 合并多账户邮件列表，并执行：
+ *
+ * 1. 按 rfcMessageId 去重（#55）——同一封邮件被多账户同时收到时只保留一条。
+ *    去重策略：保留 internalDate 最早的那条（最先到达本地服务器）；若均无
+ *    internalDate 则保留先出现的那条。rfcMessageId 为 null 的条目不参与去重，全部保留。
+ *
+ * 2. 按 internalDate 降序排序（#56）——用 IMAP 服务器实际收信时间而非发件人 Date 头，
+ *    确保跨账户的并列邮件按真实到达顺序排列。internalDate 为 null 的条目排在末尾。
+ */
 export function mergeBySentAt(lists: MessageHeader[][]): MessageHeader[] {
-  return lists.flat().sort((x, y) => {
-    if (x.sentAt === null && y.sentAt === null) return 0;
-    if (x.sentAt === null) return 1;
-    if (y.sentAt === null) return -1;
-    return y.sentAt.localeCompare(x.sentAt);
+  const flat = lists.flat();
+
+  // #55: 按 rfcMessageId 去重，保留 internalDate 最早的副本
+  const seen = new Map<string, MessageHeader>();
+  const deduped: MessageHeader[] = [];
+  for (const msg of flat) {
+    if (msg.rfcMessageId === null) {
+      deduped.push(msg);
+      continue;
+    }
+    const existing = seen.get(msg.rfcMessageId);
+    if (existing === undefined) {
+      seen.set(msg.rfcMessageId, msg);
+      deduped.push(msg);
+    } else {
+      // 保留 internalDate 更早的那条（更可靠的本地收信时间）
+      const existingDate = existing.internalDate;
+      const msgDate = msg.internalDate;
+      if (msgDate !== null && (existingDate === null || msgDate < existingDate)) {
+        // msg 更早：替换 deduped 中的旧条目
+        const idx = deduped.indexOf(existing);
+        if (idx !== -1) deduped[idx] = msg;
+        seen.set(msg.rfcMessageId, msg);
+      }
+      // 否则保留已有的，跳过 msg
+    }
+  }
+
+  // #56: 按 internalDate 降序排序，null 排末尾
+  return deduped.sort((x, y) => {
+    if (x.internalDate === null && y.internalDate === null) return 0;
+    if (x.internalDate === null) return 1;
+    if (y.internalDate === null) return -1;
+    return y.internalDate.localeCompare(x.internalDate);
   });
 }
 
