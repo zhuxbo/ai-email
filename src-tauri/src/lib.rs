@@ -4,6 +4,7 @@
 //! lands on a `#[tauri::command]` exported from `crate::commands` (added per sprint).
 
 pub mod ai;
+pub mod auto_reply;
 pub mod commands;
 pub mod db;
 pub mod error;
