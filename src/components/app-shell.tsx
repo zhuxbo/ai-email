@@ -38,6 +38,7 @@ export function AppShell({ nav, onQueryChange, messageOpenSeq, list, detail, dra
   const openDrawer = useUiStore((s) => s.openDrawer);
   const mobileView = useUiStore((s) => s.mobileView);
   const setMobileView = useUiStore((s) => s.setMobileView);
+  const selectedMessageId = useMailStore((s) => s.selectedMessageId);
 
   // 读最新 isMobile 但不放进 effect deps —— 只有"打开邮件"（seq 变）才切详情，缩窗不切。
   const isMobileRef = useRef(isMobile);
@@ -49,6 +50,13 @@ export function AppShell({ nav, onQueryChange, messageOpenSeq, list, detail, dra
       setMobileView('detail');
     }
   }, [messageOpenSeq, setMobileView]);
+
+  // #15 移动端：选中邮件失效（删除/切筛选）时自动回列表，避免困在空详情视图。
+  useEffect(() => {
+    if (isMobile && selectedMessageId === null) {
+      setMobileView('list');
+    }
+  }, [isMobile, selectedMessageId, setMobileView]);
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-app">
