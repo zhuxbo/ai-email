@@ -101,3 +101,47 @@ describe('mail store flag 乐观更新', () => {
     expect(useMailStore.getState().error).toBeNull();
   });
 });
+
+describe('mail store deleteMessage', () => {
+  beforeEach(() => {
+    useMailStore.setState({
+      messages: [
+        { id: 'm1', accountId: 'a1', flags: [] },
+        { id: 'm2', accountId: 'a1', flags: [] },
+      ] as never,
+      selectedMessageId: 'm1',
+      messageOpenSeq: 7,
+      body: { messageId: 'm1', textPlain: 'x', html: null, fetchedAt: '' } as never,
+      accountErrors: {},
+      error: 'stale',
+    } as never);
+    vi.clearAllMocks();
+  });
+
+  it('乐观移除该行 + 清选中/body + 清 error 不 bump seq', async () => {
+    await useMailStore.getState().deleteMessage('m1');
+    const s = useMailStore.getState();
+    expect(s.messages.find((m) => m.id === 'm1')).toBeUndefined();
+    expect(s.selectedMessageId).toBeNull();
+    expect(s.body).toBeNull();
+    expect(s.messageOpenSeq).toBe(7);
+    expect(s.error).toBeNull();
+    expect(tauri.messageDelete).toHaveBeenCalledWith('m1');
+  });
+
+  it('失败时 reload 恢复 + 记 error', async () => {
+    vi.mocked(tauri.messageDelete).mockRejectedValueOnce(new Error('boom'));
+    await useMailStore.getState().deleteMessage('m1');
+    expect(useMailStore.getState().error).toContain('boom');
+    expect(tauri.unifiedInbox).toHaveBeenCalled(); // reloadMessages 触发
+  });
+
+  it('删非选中项不动 selectedMessageId/body', async () => {
+    await useMailStore.getState().deleteMessage('m2');
+    const s = useMailStore.getState();
+    expect(s.messages.find((m) => m.id === 'm2')).toBeUndefined();
+    expect(s.selectedMessageId).toBe('m1');
+    expect(s.body).not.toBeNull();
+    expect(s.messageOpenSeq).toBe(7);
+  });
+});

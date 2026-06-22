@@ -74,6 +74,7 @@ interface MailState {
 
   setSeen: (id: string, seen: boolean) => Promise<void>;
   setFlagged: (id: string, flagged: boolean) => Promise<void>;
+  deleteMessage: (id: string) => Promise<void>;
 
   clearError: () => void;
 }
@@ -241,6 +242,30 @@ export const useMailStore = create<MailState>((set, get) => ({
 
   setFlagged: async (id, flagged) => {
     await setFlagOptimistic(set, get, id, '\\Flagged', flagged, tauri.messageSetFlagged);
+  },
+
+  deleteMessage: async (id) => {
+    const { messages: prev, selectedMessageId } = get();
+    const wasSelected = selectedMessageId === id;
+    // 开始新操作即清旧错误（与 setFlagOptimistic 对齐）；乐观移除目标行；
+    // 不 bump messageOpenSeq（同切筛选约定）。
+    const next: Partial<MailState> = {
+      messages: prev.filter((m) => m.id !== id),
+      error: null,
+    };
+    if (wasSelected) {
+      next.selectedMessageId = null;
+      // 清 body 避免详情区残留已删邮件（同 removeAccount 的既有惯例）
+      next.body = null;
+    }
+    set(next);
+    try {
+      await tauri.messageDelete(id);
+    } catch (e) {
+      // 删除失败：记错误，reload 从后端重拉恢复（多状态比手动回滚更可靠）
+      set({ error: errMsg(e) });
+      await get().reloadMessages();
+    }
   },
 
   clearError: () => {
