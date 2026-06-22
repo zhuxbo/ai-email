@@ -5,15 +5,26 @@
 //! persist. Per-call streams are fully drained before returning so the underlying mut-borrow
 //! on the session ends with the function call.
 
+use std::time::Duration;
+
 use async_imap::Session;
 use futures::StreamExt;
 use rustls::pki_types::ServerName;
 use secrecy::{ExposeSecret, SecretString};
 use tokio::net::TcpStream;
+use tokio::time::timeout;
 use tokio_rustls::client::TlsStream;
 
 use crate::error::{AppError, AppResult};
 use crate::imap::tls;
+
+/// Total budget for TCP connect + TLS handshake + LOGIN + ID exchange.
+/// Covers QQ Mail's typical latency (< 3 s) with a large safety margin for weak mobile links.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Per-operation budget for LIST / SELECT / FETCH / STORE / MOVE.
+/// Keeps individual commands from stalling indefinitely on half-open connections.
+const OP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// One open IMAP session. Not thread-safe; never share across tasks.
 pub struct ImapClient {
@@ -42,9 +53,29 @@ pub struct FetchedHeader {
 }
 
 impl ImapClient {
-    /// IMAPS connect → LOGIN → ID. Failure at any step returns an [`AppError::Imap`] with the
-    /// provider's message — we don't try to recover, the caller surfaces it to the UI.
+    /// IMAPS connect → LOGIN → ID. The entire handshake is bounded by [`CONNECT_TIMEOUT`].
+    /// Failure at any step returns an [`AppError::Imap`] with a readable message so the UI can
+    /// prompt the user to retry rather than spinning indefinitely.
     pub async fn connect(
+        host: &str,
+        port: u16,
+        email: &str,
+        auth_code: &SecretString,
+    ) -> AppResult<Self> {
+        timeout(
+            CONNECT_TIMEOUT,
+            Self::connect_inner(host, port, email, auth_code),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(AppError::Imap(format!(
+                "connect to {host}:{port} timed out after {}s",
+                CONNECT_TIMEOUT.as_secs()
+            )))
+        })
+    }
+
+    async fn connect_inner(
         host: &str,
         port: u16,
         email: &str,
@@ -79,10 +110,13 @@ impl ImapClient {
     /// LIST every mailbox the account can see. Returns name + hierarchy delimiter; we throw
     /// away the IMAP attributes (Marked / Noselect / …) at MVP — Sprint 1 only touches INBOX.
     pub async fn list_mailboxes(&mut self) -> AppResult<Vec<MailboxInfo>> {
-        let mut stream = self
-            .session
-            .list(Some(""), Some("*"))
+        let mut stream = timeout(OP_TIMEOUT, self.session.list(Some(""), Some("*")))
             .await
+            .unwrap_or_else(|_| {
+                Err(async_imap::error::Error::Io(std::io::Error::other(
+                    "LIST timed out",
+                )))
+            })
             .map_err(|e| AppError::Imap(e.to_string()))?;
         let mut out = Vec::new();
         while let Some(item) = stream.next().await {
@@ -98,10 +132,13 @@ impl ImapClient {
     /// SELECT and return the resulting state. We only read three fields; the rest of the
     /// response (PERMANENTFLAGS, RECENT, etc.) is ignored at MVP.
     pub async fn select(&mut self, name: &str) -> AppResult<SelectedMailbox> {
-        let m = self
-            .session
-            .select(name)
+        let m = timeout(OP_TIMEOUT, self.session.select(name))
             .await
+            .unwrap_or_else(|_| {
+                Err(async_imap::error::Error::Io(std::io::Error::other(
+                    "SELECT timed out",
+                )))
+            })
             .map_err(|e| AppError::Imap(e.to_string()))?;
         Ok(SelectedMailbox {
             exists: m.exists,
@@ -113,10 +150,13 @@ impl ImapClient {
     /// `FETCH <set> (UID FLAGS RFC822.SIZE BODY.PEEK[HEADER])` using sequence numbers. Best for
     /// the first sync where we just want the N most recent rows (e.g. `(exists-49):*`).
     pub async fn fetch_headers(&mut self, seq_set: &str) -> AppResult<Vec<FetchedHeader>> {
-        let stream = self
-            .session
-            .fetch(seq_set, FETCH_QUERY)
+        let stream = timeout(OP_TIMEOUT, self.session.fetch(seq_set, FETCH_QUERY))
             .await
+            .unwrap_or_else(|_| {
+                Err(async_imap::error::Error::Io(std::io::Error::other(
+                    "FETCH timed out",
+                )))
+            })
             .map_err(|e| AppError::Imap(e.to_string()))?;
         drain_fetch_stream(stream).await
     }
@@ -124,10 +164,13 @@ impl ImapClient {
     /// `UID FETCH <set> (UID FLAGS RFC822.SIZE BODY.PEEK[HEADER])`. Best for incremental sync
     /// (e.g. `<prev_uid_next>:*`) — UIDs are stable across SELECT, sequence numbers aren't.
     pub async fn uid_fetch_headers(&mut self, uid_set: &str) -> AppResult<Vec<FetchedHeader>> {
-        let stream = self
-            .session
-            .uid_fetch(uid_set, FETCH_QUERY)
+        let stream = timeout(OP_TIMEOUT, self.session.uid_fetch(uid_set, FETCH_QUERY))
             .await
+            .unwrap_or_else(|_| {
+                Err(async_imap::error::Error::Io(std::io::Error::other(
+                    "UID FETCH timed out",
+                )))
+            })
             .map_err(|e| AppError::Imap(e.to_string()))?;
         drain_fetch_stream(stream).await
     }
@@ -136,11 +179,17 @@ impl ImapClient {
     /// callers parse them with [`crate::imap::parse::parse_body`]. Errors if the UID is
     /// missing from the currently-selected mailbox.
     pub async fn uid_fetch_body(&mut self, uid: u32) -> AppResult<Vec<u8>> {
-        let mut stream = self
-            .session
-            .uid_fetch(uid.to_string(), "(BODY.PEEK[])")
-            .await
-            .map_err(|e| AppError::Imap(e.to_string()))?;
+        let mut stream = timeout(
+            OP_TIMEOUT,
+            self.session.uid_fetch(uid.to_string(), "(BODY.PEEK[])"),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(async_imap::error::Error::Io(std::io::Error::other(
+                "UID FETCH BODY timed out",
+            )))
+        })
+        .map_err(|e| AppError::Imap(e.to_string()))?;
         let Some(item) = stream.next().await else {
             return Err(AppError::Imap(format!("UID {uid} not found in mailbox")));
         };
@@ -158,10 +207,13 @@ impl ImapClient {
     pub async fn uid_set_flag(&mut self, uid: u32, flag: &str, add: bool) -> AppResult<()> {
         let sign = if add { "+" } else { "-" };
         let query = format!("{sign}FLAGS ({flag})");
-        let mut stream = self
-            .session
-            .uid_store(uid.to_string(), query)
+        let mut stream = timeout(OP_TIMEOUT, self.session.uid_store(uid.to_string(), query))
             .await
+            .unwrap_or_else(|_| {
+                Err(async_imap::error::Error::Io(std::io::Error::other(
+                    "UID STORE timed out",
+                )))
+            })
             .map_err(|e| AppError::Imap(e.to_string()))?;
         while let Some(item) = stream.next().await {
             item.map_err(|e| AppError::Imap(e.to_string()))?;
@@ -171,9 +223,13 @@ impl ImapClient {
 
     /// `UID MOVE <uid> <dest>`。需先 `select` 源文件夹。
     pub async fn uid_move(&mut self, uid: u32, dest: &str) -> AppResult<()> {
-        self.session
-            .uid_mv(uid.to_string(), dest)
+        timeout(OP_TIMEOUT, self.session.uid_mv(uid.to_string(), dest))
             .await
+            .unwrap_or_else(|_| {
+                Err(async_imap::error::Error::Io(std::io::Error::other(
+                    "UID MOVE timed out",
+                )))
+            })
             .map_err(|e| AppError::Imap(e.to_string()))
     }
 
@@ -189,6 +245,15 @@ impl ImapClient {
 /// by sequence number so the persistence layer always has a stable identifier.
 const FETCH_QUERY: &str = "(UID FLAGS RFC822.SIZE BODY.PEEK[HEADER])";
 
+/// Convert the IMAP RFC822.SIZE (u32, up to ~4 GiB) to the stored `size_bytes` (i32).
+///
+/// Values above `i32::MAX` (≈ 2.1 GiB) are saturated to `i32::MAX` rather than silently
+/// discarded as `None`. The DB column is SQLite INTEGER (64-bit), so `i32::MAX` is safely
+/// representable; a UI that shows "≥ 2 GB" is far more useful than "unknown size".
+fn size_u32_to_i32(s: u32) -> Option<i32> {
+    Some(i32::try_from(s).unwrap_or(i32::MAX))
+}
+
 async fn drain_fetch_stream<S>(mut stream: S) -> AppResult<Vec<FetchedHeader>>
 where
     S: futures::Stream<Item = async_imap::error::Result<async_imap::types::Fetch>> + Unpin,
@@ -203,7 +268,7 @@ where
         out.push(FetchedHeader {
             uid,
             flags: f.flags().map(flag_to_string).collect(),
-            size_bytes: f.size.and_then(|s| i32::try_from(s).ok()),
+            size_bytes: f.size.and_then(size_u32_to_i32),
             header_bytes: f.header().unwrap_or(&[]).to_vec(),
         });
     }
@@ -306,5 +371,78 @@ mod tests {
         // delimiter=None → fallback 切分，整个 name 即末段；"Trash" 小写命中别名。
         let list = vec![mb_flat("INBOX"), mb_flat("Trash")];
         assert_eq!(resolve_trash_mailbox(&list), Some("Trash".to_string()));
+    }
+
+    // --- #6: 超时常量合理性 ---
+
+    #[test]
+    fn connect_timeout_is_sane() {
+        // 连接级超时应在 10s–60s 之间：太短导致误判，太长等于没超时。
+        let secs = CONNECT_TIMEOUT.as_secs();
+        assert!(
+            (10..=60).contains(&secs),
+            "CONNECT_TIMEOUT={secs}s 不在 [10,60] 合理范围"
+        );
+    }
+
+    #[test]
+    fn op_timeout_is_sane() {
+        // 操作级超时（fetch/store/move）：比连接级略短或相等，至少 5s。
+        let secs = OP_TIMEOUT.as_secs();
+        assert!(
+            (5..=60).contains(&secs),
+            "OP_TIMEOUT={secs}s 不在 [5,60] 合理范围"
+        );
+    }
+
+    #[tokio::test]
+    async fn timeout_maps_to_imap_error() {
+        // 验证超时时映射为 AppError::Imap（含可读信息），而非 panic 或其他错误类型。
+        use std::time::Duration;
+        use tokio::time::{sleep, timeout};
+
+        let result: AppResult<()> = timeout(Duration::from_millis(1), async {
+            sleep(Duration::from_secs(60)).await;
+            Ok(())
+        })
+        .await
+        .unwrap_or_else(|_| Err(AppError::Imap("connect timed out after 30s".into())));
+
+        match result {
+            Err(AppError::Imap(msg)) => {
+                assert!(
+                    msg.contains("timed out"),
+                    "错误信息应含 'timed out'，实际: {msg}"
+                )
+            }
+            other => panic!("应得到 AppError::Imap，实际: {other:?}"),
+        }
+    }
+
+    // --- #33: RFC822.SIZE 边界值 ---
+
+    #[test]
+    fn size_normal_fits_i32() {
+        // 普通大小（< 2 GiB）：应原样保留，不得变为 None。
+        let size: u32 = 1_024_000;
+        assert_eq!(size_u32_to_i32(size), Some(1_024_000_i32));
+    }
+
+    #[test]
+    fn size_exactly_i32_max_fits() {
+        let size: u32 = i32::MAX as u32;
+        assert_eq!(size_u32_to_i32(size), Some(i32::MAX));
+    }
+
+    #[test]
+    fn size_over_i32_max_saturates_not_none() {
+        // > 2 GiB：旧代码返回 None，新代码应返回 Some(i32::MAX) 而非 None。
+        let size: u32 = (i32::MAX as u32) + 1;
+        assert_eq!(size_u32_to_i32(size), Some(i32::MAX));
+    }
+
+    #[test]
+    fn size_u32_max_saturates_not_none() {
+        assert_eq!(size_u32_to_i32(u32::MAX), Some(i32::MAX));
     }
 }

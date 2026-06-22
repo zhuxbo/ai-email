@@ -3,7 +3,7 @@
 //! Body parsing (text/plain extraction, snippet, attachments) is Sprint 1.4 — this module
 //! only touches the metadata we persist on first sync.
 
-use mail_parser::{Address, HeaderValue, MessageParser, MimeHeaders};
+use mail_parser::{Address, HeaderValue, MessageParser, PartType};
 use time::OffsetDateTime;
 
 #[derive(Debug, Default)]
@@ -120,24 +120,37 @@ pub struct ParsedBody {
 
 /// Parse the full RFC 822 payload into `text/plain`, `text/html`, and an attachment flag.
 ///
-/// We walk `msg.parts` ourselves rather than calling `body_text(0)` / `body_html(0)` because
-/// those helpers fall back across types — asking for HTML on a plain-text-only message
-/// returns the plain text. That confuses the UI into rendering the body twice.
+/// Uses mail-parser's `text_body` / `html_body` indexes (disposition-aware, only inline parts)
+/// rather than scanning raw `msg.parts`. The latter includes attachment nodes whose content-type
+/// is still text/plain or text/html, which a naïve scan would misidentify as the body.
+///
+/// We additionally filter by `PartType::Text` / `PartType::Html` to prevent cross-type fallback:
+/// for a plain-only email mail-parser puts the same part into both indexes, and without the
+/// filter `html_body[0]` would return a text/plain part as if it were HTML.
 pub fn parse_body(raw: &[u8]) -> ParsedBody {
     let Some(msg) = MessageParser::default().parse(raw) else {
         return ParsedBody::default();
     };
 
-    let mut text_plain: Option<String> = None;
-    let mut html: Option<String> = None;
-
-    for part in &msg.parts {
-        if text_plain.is_none() && part.is_content_type("text", "plain") {
-            text_plain = part.text_contents().map(str::to_string);
-        } else if html.is_none() && part.is_content_type("text", "html") {
-            html = part.text_contents().map(str::to_string);
+    // Find first inline text/plain part (PartType::Text only — no cross-type fallback).
+    let text_plain = msg.text_body.iter().find_map(|&idx| {
+        let part = &msg.parts[idx];
+        if matches!(part.body, PartType::Text(_)) {
+            part.text_contents().map(str::to_string)
+        } else {
+            None
         }
-    }
+    });
+
+    // Find first inline text/html part (PartType::Html only — no cross-type fallback).
+    let html = msg.html_body.iter().find_map(|&idx| {
+        let part = &msg.parts[idx];
+        if matches!(part.body, PartType::Html(_)) {
+            part.text_contents().map(str::to_string)
+        } else {
+            None
+        }
+    });
 
     ParsedBody {
         text_plain,
@@ -253,5 +266,36 @@ Content-Type: text/html\r\n\
     fn snippet_empty_input_is_none() {
         assert!(snippet("", 20).is_none());
         assert!(snippet("   \t\n  ", 20).is_none());
+    }
+
+    /// 含 Content-Disposition: attachment 的 .txt 附件出现在正文之前：
+    /// parse_body 必须选出真正文，而非把附件内容当正文。
+    #[test]
+    fn txt_attachment_not_mistaken_for_body() {
+        // multipart/mixed：先附件（Content-Disposition: attachment）后真正文
+        const MAIL: &[u8] = b"\
+From: a@x\r\n\
+Subject: test\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: multipart/mixed; boundary=\"B\"\r\n\
+\r\n\
+--B\r\n\
+Content-Type: text/plain; name=\"note.txt\"\r\n\
+Content-Disposition: attachment; filename=\"note.txt\"\r\n\
+\r\n\
+THIS IS ATTACHMENT CONTENT\r\n\
+--B\r\n\
+Content-Type: text/plain\r\n\
+\r\n\
+This is the real body\r\n\
+--B--\r\n";
+
+        let p = parse_body(MAIL);
+        let plain = p.text_plain.as_deref().unwrap_or("").trim().to_string();
+        // 应选出真正文，而非附件内容
+        assert_eq!(plain, "This is the real body", "附件内容不应被当作正文");
+        assert!(!plain.contains("ATTACHMENT"), "附件内容不应出现在正文字段");
+        // 附件计数应为 1
+        assert!(p.has_attachment, "应检测到附件");
     }
 }
