@@ -8,14 +8,18 @@ use ai_email_lib::db::{self, message_tags, Pool};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-async fn temp_db() -> Pool {
-    let path = std::env::temp_dir().join(format!("ai-email-test-{}.db", Uuid::new_v4()));
-    db::connect(&path).await.expect("connect + migrate")
+/// 创建临时 DB 并在 Drop 时自动清理（避免泄漏文件）。
+/// 返回 (Pool, TempDir guard)；guard 必须存活至测试结束，否则目录提前删除导致连接失效。
+async fn temp_db() -> (Pool, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let path = dir.path().join("test.db");
+    let pool = db::connect(&path).await.expect("connect + migrate");
+    (pool, dir)
 }
 
 #[tokio::test]
 async fn account_roundtrip_decodes_timestamp() {
-    let pool = temp_db().await;
+    let (pool, _dir) = temp_db().await;
     let acc = db::accounts::insert(
         &pool,
         &AccountInput {
@@ -42,7 +46,7 @@ async fn account_roundtrip_decodes_timestamp() {
 
 #[tokio::test]
 async fn message_arrays_and_tags_roundtrip() {
-    let pool = temp_db().await;
+    let (pool, _dir) = temp_db().await;
     let acc = db::accounts::insert(
         &pool,
         &AccountInput {
@@ -122,7 +126,7 @@ async fn message_arrays_and_tags_roundtrip() {
 
 #[tokio::test]
 async fn update_flags_overwrites_and_remove_deletes() {
-    let pool = temp_db().await;
+    let (pool, _dir) = temp_db().await;
     let acc = db::accounts::insert(
         &pool,
         &AccountInput {
@@ -186,7 +190,7 @@ async fn update_flags_overwrites_and_remove_deletes() {
 
 #[tokio::test]
 async fn remove_cascades_children_and_nulls_send_log() {
-    let pool = temp_db().await;
+    let (pool, _dir) = temp_db().await;
     let acc = db::accounts::insert(
         &pool,
         &AccountInput {
@@ -293,7 +297,7 @@ async fn remove_cascades_children_and_nulls_send_log() {
 #[tokio::test]
 async fn fetch_for_classify_chunked_returns_complete_results() {
     use ai_email_lib::db::messages::{fetch_for_classify, IN_CHUNK_SIZE};
-    let pool = temp_db().await;
+    let (pool, _dir) = temp_db().await;
     let acc = db::accounts::insert(
         &pool,
         &AccountInput {
@@ -369,7 +373,7 @@ async fn fetch_for_classify_chunked_returns_complete_results() {
 #[tokio::test]
 async fn ai_results_conflict_update_refreshes_model_and_tokens() {
     use ai_email_lib::db::ai_results::{self, AiResultInsert};
-    let pool = temp_db().await;
+    let (pool, _dir) = temp_db().await;
     let acc = db::accounts::insert(
         &pool,
         &AccountInput {
@@ -482,7 +486,7 @@ async fn ai_results_cache_get_returns_some_when_present_simulating_non_force() {
     use ai_email_lib::db::ai_results::{self, AiResultInsert};
     use ai_email_lib::db::messages::MessageInsert;
 
-    let pool = temp_db().await;
+    let (pool, _dir) = temp_db().await;
     let acc = db::accounts::insert(
         &pool,
         &AccountInput {
@@ -601,7 +605,7 @@ async fn ai_results_cache_get_returns_some_when_present_simulating_non_force() {
 
 #[tokio::test]
 async fn connect_sets_synchronous_normal() {
-    let pool = temp_db().await;
+    let (pool, _dir) = temp_db().await;
     // PRAGMA synchronous 返回: 0=OFF 1=NORMAL 2=FULL 3=EXTRA
     let val: i32 = sqlx::query_scalar("PRAGMA synchronous")
         .fetch_one(&pool)

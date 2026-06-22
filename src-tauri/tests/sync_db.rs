@@ -13,9 +13,13 @@ use ai_email_lib::db::messages::MessageInsert;
 use ai_email_lib::db::{self, accounts::AccountInput, mailboxes, messages, Pool};
 use uuid::Uuid;
 
-async fn temp_db() -> Pool {
-    let path = std::env::temp_dir().join(format!("ai-email-syncdb-{}.db", Uuid::new_v4()));
-    db::connect(&path).await.expect("connect + migrate")
+/// 创建临时 DB 并在 Drop 时自动清理（避免泄漏文件）。
+/// 返回 (Pool, TempDir guard)；guard 必须存活至测试结束，否则目录提前删除导致连接失效。
+async fn temp_db() -> (Pool, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let path = dir.path().join("test.db");
+    let pool = db::connect(&path).await.expect("connect + migrate");
+    (pool, dir)
 }
 
 async fn seed_account(pool: &Pool, email: &str) -> Uuid {
@@ -80,7 +84,7 @@ async fn seed_message(pool: &Pool, account_id: Uuid, mailbox_id: Uuid, uid: i64)
 
 #[tokio::test]
 async fn update_after_sync_persists_new_uid_validity() {
-    let pool = temp_db().await;
+    let (pool, _dir) = temp_db().await;
     let acc = seed_account(&pool, "v@example.com").await;
     let mb = seed_mailbox(&pool, acc, "INBOX").await;
 
@@ -107,7 +111,7 @@ async fn update_after_sync_persists_new_uid_validity() {
 #[tokio::test]
 async fn update_after_sync_keeps_validity_when_server_omits_it() {
     // Minimal SELECT response (validity = None) must not wipe a known validity.
-    let pool = temp_db().await;
+    let (pool, _dir) = temp_db().await;
     let acc = seed_account(&pool, "vn@example.com").await;
     let mb = seed_mailbox(&pool, acc, "INBOX").await;
 
@@ -130,7 +134,7 @@ async fn update_after_sync_keeps_validity_when_server_omits_it() {
 
 #[tokio::test]
 async fn update_after_sync_never_regresses_uid_next() {
-    let pool = temp_db().await;
+    let (pool, _dir) = temp_db().await;
     let acc = seed_account(&pool, "toctou@example.com").await;
     let mb = seed_mailbox(&pool, acc, "INBOX").await;
 
@@ -154,7 +158,7 @@ async fn update_after_sync_never_regresses_uid_next() {
 
 #[tokio::test]
 async fn update_after_sync_advances_uid_next_forward() {
-    let pool = temp_db().await;
+    let (pool, _dir) = temp_db().await;
     let acc = seed_account(&pool, "fwd@example.com").await;
     let mb = seed_mailbox(&pool, acc, "INBOX").await;
 
@@ -172,7 +176,7 @@ async fn update_after_sync_advances_uid_next_forward() {
 
 #[tokio::test]
 async fn reset_for_uidvalidity_change_clears_rows_and_uid_next() {
-    let pool = temp_db().await;
+    let (pool, _dir) = temp_db().await;
     let acc = seed_account(&pool, "reset@example.com").await;
     let mb = seed_mailbox(&pool, acc, "INBOX").await;
     let other_mb = seed_mailbox(&pool, acc, "Sent").await;
@@ -223,7 +227,7 @@ async fn reset_for_uidvalidity_change_clears_rows_and_uid_next() {
 
 #[tokio::test]
 async fn update_flags_by_uid_updates_correct_mailbox() {
-    let pool = temp_db().await;
+    let (pool, _dir) = temp_db().await;
     let acc = seed_account(&pool, "flags@example.com").await;
     let mb_a = seed_mailbox(&pool, acc, "INBOX").await;
     let mb_b = seed_mailbox(&pool, acc, "Archive").await;
@@ -258,7 +262,7 @@ async fn update_flags_by_uid_updates_correct_mailbox() {
 /// 中途 rollback 则全部消失（原子性）。
 #[tokio::test]
 async fn batch_insert_is_atomic_via_transaction() {
-    let pool = temp_db().await;
+    let (pool, _dir) = temp_db().await;
     let acc = seed_account(&pool, "txbatch@example.com").await;
     let mb = seed_mailbox(&pool, acc, "INBOX").await;
 
@@ -317,7 +321,7 @@ async fn batch_insert_is_atomic_via_transaction() {
 
 #[tokio::test]
 async fn get_by_name_matches_inbox_case_insensitively() {
-    let pool = temp_db().await;
+    let (pool, _dir) = temp_db().await;
     let acc = seed_account(&pool, "case@example.com").await;
     // Server advertised the mailbox as lowercase "Inbox".
     seed_mailbox(&pool, acc, "Inbox").await;
