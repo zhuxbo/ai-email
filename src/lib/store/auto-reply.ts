@@ -102,12 +102,15 @@ export const useAutoReplyStore = create<AutoReplyState>((set, get) => ({
   },
 
   dismiss: async (id) => {
-    const prev = get().queue;
-    set({ queue: prev.filter((s) => s.id !== id), error: null });
+    // 乐观移除并清旧错误。失败时不还原陈旧整列快照（会复活并发 dismiss 的其它已移除项），
+    // 改为从后端重拉权威队列、再写 error（loadQueue 成功路径会清 error，故 error 后置），
+    // 仿 mail.deleteMessage 的失败重载惯例。
+    set({ queue: get().queue.filter((s) => s.id !== id), error: null });
     try {
       await tauri.suggestedReplyDismiss(id);
     } catch (e) {
-      set({ queue: prev, error: errMsg(e) });
+      await get().loadQueue();
+      set({ error: errMsg(e) });
     }
   },
 

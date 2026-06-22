@@ -80,4 +80,23 @@ describe('NavRail', () => {
     await userEvent.click(all);
     expect(p.onSelectAccount).toHaveBeenCalledWith(null);
   });
+
+  it('shows auto-reply badge with the count when > 0', () => {
+    const p = { ...baseProps(), autoReplyCount: 5 };
+    render(<NavRail {...p} />);
+    expect(screen.getByText('5')).toBeInTheDocument();
+  });
+
+  it('caps the auto-reply badge at 99+', () => {
+    const p = { ...baseProps(), autoReplyCount: 150 };
+    render(<NavRail {...p} />);
+    expect(screen.getByText('99+')).toBeInTheDocument();
+  });
+
+  it('hides the auto-reply badge when count is 0', () => {
+    const p = { ...baseProps(), autoReplyCount: 0 };
+    render(<NavRail {...p} />);
+    // 角标不渲染：count=0 时无任何 '0' 文本（若误渲染则会出现 '0'）
+    expect(screen.queryByText('0')).toBeNull();
+  });
 });
