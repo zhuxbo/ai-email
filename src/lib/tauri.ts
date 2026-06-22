@@ -10,6 +10,8 @@ import type {
   AddModelForm,
   AiModel,
   AiRole,
+  AutoReplyRule,
+  AutoReplyRuleInput,
   ClassifyResult,
   DraftResult,
   Mailbox,
@@ -18,6 +20,7 @@ import type {
   RoleDefault,
   SendDraft,
   SendReceipt,
+  SuggestedReply,
   SummaryResult,
   SyncReport,
   TextTranslation,
@@ -118,6 +121,34 @@ export async function roleDefaultSet(role: AiRole, modelId: string): Promise<voi
 
 export async function roleDefaultClear(role: AiRole): Promise<void> {
   await invoke('role_default_clear', { role });
+}
+
+export async function autoReplyRulesList(accountId: string): Promise<AutoReplyRule[]> {
+  return invoke('auto_reply_rules_list', { accountId });
+}
+
+export async function autoReplyRuleAdd(input: AutoReplyRuleInput): Promise<AutoReplyRule> {
+  return invoke('auto_reply_rule_add', { input });
+}
+
+export async function autoReplyRuleUpdate(rule: AutoReplyRule): Promise<void> {
+  await invoke('auto_reply_rule_update', { rule });
+}
+
+export async function autoReplyRuleRemove(id: string): Promise<void> {
+  await invoke('auto_reply_rule_remove', { id });
+}
+
+export async function autoReplyRuleSetEnabled(id: string, enabled: boolean): Promise<void> {
+  await invoke('auto_reply_rule_set_enabled', { id, enabled });
+}
+
+export async function suggestedRepliesList(): Promise<SuggestedReply[]> {
+  return invoke('suggested_replies_list');
+}
+
+export async function suggestedReplyDismiss(id: string): Promise<void> {
+  await invoke('suggested_reply_dismiss', { id });
 }
 
 export function mergeBySentAt(lists: MessageHeader[][]): MessageHeader[] {

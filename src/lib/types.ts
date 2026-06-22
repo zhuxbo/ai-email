@@ -177,3 +177,41 @@ export interface AddAccountForm {
 export interface TextTranslation {
   text: string;
 }
+
+export interface AutoReplyRule {
+  id: string;
+  accountId: string;
+  name: string;
+  enabled: boolean;
+  /** 发件地址子串匹配；null=不限。 */
+  matchDomain: string | null;
+  matchCategory: Category | null;
+  /** 命中 message.priority <= 该值（1=最重要，3=最次）；null=不限。 */
+  matchPriorityCeiling: number | null;
+  draftIntent: string;
+  createdAt: string;
+}
+
+export interface AutoReplyRuleInput {
+  accountId: string;
+  name: string;
+  enabled: boolean;
+  matchDomain: string | null;
+  matchCategory: Category | null;
+  matchPriorityCeiling: number | null;
+  draftIntent: string;
+}
+
+export interface SuggestedReply {
+  id: string;
+  messageId: string;
+  accountId: string;
+  ruleNameSnapshot: string;
+  intentSnapshot: string;
+  subject: string | null;
+  fromAddr: string | null;
+  sentAt: string | null;
+  category: Category | null;
+  priority: number | null;
+  createdAt: string;
+}
