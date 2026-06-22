@@ -46,12 +46,16 @@ pub async fn upsert(pool: &Pool, account_id: Uuid, info: &MailboxInfo) -> AppRes
     Ok(())
 }
 
+/// Lookup by name, case-insensitively (`COLLATE NOCASE`). IMAP folder names like INBOX are
+/// case-insensitive by spec, and servers may advertise mixed case ("Inbox"); without NOCASE the
+/// hardcoded "INBOX" lookup in sync would miss such rows. Matches the frontend's
+/// `name.toUpperCase() === 'INBOX'` so both sides resolve the same row (audit #27).
 pub async fn get_by_name(pool: &Pool, account_id: Uuid, name: &str) -> AppResult<Option<Mailbox>> {
     let row = sqlx::query_as::<_, Mailbox>(
         r#"
         SELECT id, account_id, name, delimiter, uid_validity, uid_next, last_synced_at
         FROM mailboxes
-        WHERE account_id = ?1 AND name = ?2
+        WHERE account_id = ?1 AND name = ?2 COLLATE NOCASE
         "#,
     )
     .bind(account_id)
@@ -90,8 +94,13 @@ pub async fn list(pool: &Pool, account_id: Uuid) -> AppResult<Vec<Mailbox>> {
     Ok(rows)
 }
 
-/// Update sync bookkeeping. `COALESCE` keeps the old value when the IMAP server omits the
-/// field — happens for very minimal SELECT responses.
+/// Update sync bookkeeping after a successful IMAP SELECT + FETCH.
+///
+/// - `uid_validity`: `COALESCE(new, old)` — new value overwrites when present, server omitting
+///   it (minimal SELECT response) preserves the stored value (audit #9).
+/// - `uid_next`: monotonic MAX guard — never lets a stale interleaved sync regress the pointer
+///   (audit #73). When the stored value is NULL (first-ever write or post-reset), the new value
+///   is used unconditionally; otherwise `MAX(stored, new)` applies.
 pub async fn update_after_sync(
     pool: &Pool,
     id: Uuid,
@@ -101,8 +110,13 @@ pub async fn update_after_sync(
     sqlx::query(
         r#"
         UPDATE mailboxes
-        SET uid_next = COALESCE(?2, uid_next),
-            uid_validity = COALESCE(?3, uid_validity),
+        SET uid_next      = CASE
+                                WHEN ?2 IS NULL    THEN uid_next
+                                WHEN uid_next IS NULL THEN ?2
+                                WHEN ?2 > uid_next THEN ?2
+                                ELSE uid_next
+                            END,
+            uid_validity  = COALESCE(?3, uid_validity),
             last_synced_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
         WHERE id = ?1
         "#,
@@ -112,5 +126,36 @@ pub async fn update_after_sync(
     .bind(uid_validity)
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+/// Drop all cached message rows for this mailbox and reset `uid_next` to NULL, then record
+/// the new `uid_validity`. Called when the server's UIDVALIDITY differs from the stored one,
+/// meaning the mailbox was rebuilt and every local UID is now invalid (RFC 3501 §2.3.1.1,
+/// audit #2). Wrapped in a transaction so the reset is atomic.
+pub async fn reset_mailbox_for_uidvalidity_change(
+    pool: &Pool,
+    mailbox_id: Uuid,
+    new_uid_validity: i64,
+) -> AppResult<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM messages WHERE mailbox_id = ?1")
+        .bind(mailbox_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        r#"
+        UPDATE mailboxes
+        SET uid_next     = NULL,
+            uid_validity = ?2,
+            last_synced_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+        WHERE id = ?1
+        "#,
+    )
+    .bind(mailbox_id)
+    .bind(new_uid_validity)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(())
 }
