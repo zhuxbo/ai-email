@@ -25,7 +25,7 @@ pub mod suggested_replies;
 
 use std::path::Path;
 
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 
 use crate::error::AppResult;
 
@@ -44,11 +44,14 @@ pub async fn connect(db_path: &Path) -> AppResult<Pool> {
         std::fs::create_dir_all(parent)?;
     }
 
+    // WAL + NORMAL：在 WAL 模式下 NORMAL 是官方推荐值，断电最多丢最后一笔已提交事务但绝不损坏数据库，
+    // 同时显著减少 fsync 次数，降低后台 classify 批量写与前台命令并发时的写锁持有时长。
     let opts = SqliteConnectOptions::new()
         .filename(db_path)
         .create_if_missing(true)
         .foreign_keys(true)
-        .journal_mode(SqliteJournalMode::Wal);
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal);
 
     let pool = SqlitePoolOptions::new()
         .max_connections(5)

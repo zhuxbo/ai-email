@@ -252,25 +252,28 @@ pub struct ClassifyInput {
     pub snippet: Option<String>,
 }
 
+/// 分块 IN 查询的批大小。SQLite SQLITE_MAX_VARIABLE_NUMBER 默认 32766，500 远低于上限，
+/// 且与调用方的 AI 批大小（BATCH_SIZE=20）解耦，使 DB 层自身安全。
+pub const IN_CHUNK_SIZE: usize = 500;
+
+/// 对 ids 按 `IN_CHUNK_SIZE` 分块执行多次查询并合并结果，避免超过 SQLite 绑定变量上限。
 pub async fn fetch_for_classify(pool: &Pool, ids: &[Uuid]) -> AppResult<Vec<ClassifyInput>> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    // SQLite has no `= ANY($1)`; build an `IN (?, ?, …)` list and bind each id in turn.
-    let placeholders = vec!["?"; ids.len()].join(", ");
-    let sql = format!(
-        r#"
-        SELECT id, subject, from_addr, snippet
-        FROM messages
-        WHERE id IN ({placeholders})
-        "#
-    );
-    let mut query = sqlx::query_as::<_, ClassifyInput>(&sql);
-    for id in ids {
-        query = query.bind(id);
+    let mut out = Vec::with_capacity(ids.len());
+    for chunk in ids.chunks(IN_CHUNK_SIZE) {
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        let sql = format!(
+            "SELECT id, subject, from_addr, snippet FROM messages WHERE id IN ({placeholders})"
+        );
+        let mut query = sqlx::query_as::<_, ClassifyInput>(&sql);
+        for id in chunk {
+            query = query.bind(id);
+        }
+        out.extend(query.fetch_all(pool).await?);
     }
-    let rows = query.fetch_all(pool).await?;
-    Ok(rows)
+    Ok(out)
 }
 
 /// List by mailbox, most recent first. SQLite sorts NULLs last under `DESC` by default, so

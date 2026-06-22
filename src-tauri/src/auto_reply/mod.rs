@@ -9,19 +9,25 @@ use crate::error::AppResult;
 use rules::{rule_matches, MatchCandidate};
 
 /// 取一批邮件的匹配相关字段（仅 from_addr/category/priority，省 token）。
+/// 按 IN_CHUNK_SIZE 分块查询，避免超过 SQLite 绑定变量上限（增量同步无上界）。
 async fn fetch_candidates(pool: &Pool, ids: &[Uuid]) -> AppResult<Vec<MatchCandidate>> {
+    use crate::db::messages::IN_CHUNK_SIZE;
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let placeholders = vec!["?"; ids.len()].join(", ");
-    let sql = format!(
-        "SELECT id, from_addr, category, priority FROM messages WHERE id IN ({placeholders})"
-    );
-    let mut q = sqlx::query_as::<_, MatchCandidate>(&sql);
-    for id in ids {
-        q = q.bind(id);
+    let mut out = Vec::with_capacity(ids.len());
+    for chunk in ids.chunks(IN_CHUNK_SIZE) {
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        let sql = format!(
+            "SELECT id, from_addr, category, priority FROM messages WHERE id IN ({placeholders})"
+        );
+        let mut q = sqlx::query_as::<_, MatchCandidate>(&sql);
+        for id in chunk {
+            q = q.bind(id);
+        }
+        out.extend(q.fetch_all(pool).await?);
     }
-    Ok(q.fetch_all(pool).await?)
+    Ok(out)
 }
 
 /// 对 new_ids 评估该账户的启用规则，命中首个即入队（懒：仅入队、不起草、不发送）。
