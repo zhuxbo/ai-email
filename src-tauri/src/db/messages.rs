@@ -198,6 +198,23 @@ pub async fn update_flags(pool: &Pool, id: Uuid, flags: &[String]) -> AppResult<
     Ok(())
 }
 
+/// 按 `(mailbox_id, imap_uid)` 刷新 flags，用于增量同步时对已存在 UID 的 flags 更新（audit #64）。
+/// 若该 UID 尚未落库（正常不会发生）则是 no-op。
+pub async fn update_flags_by_uid(
+    pool: &Pool,
+    mailbox_id: Uuid,
+    imap_uid: i64,
+    flags: &[String],
+) -> AppResult<()> {
+    sqlx::query("UPDATE messages SET flags = ?1 WHERE mailbox_id = ?2 AND imap_uid = ?3")
+        .bind(serde_json::to_string(flags)?)
+        .bind(mailbox_id)
+        .bind(imap_uid)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// 删除本地消息行。bodies 等子表对 messages 均 ON DELETE CASCADE + 连接启用 foreign_keys，
 /// 故单删 messages 即级联清理，无需显式删 body。
 pub async fn remove(pool: &Pool, id: Uuid) -> AppResult<()> {
