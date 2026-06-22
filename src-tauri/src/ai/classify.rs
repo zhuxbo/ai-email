@@ -4,6 +4,10 @@
 //!   1. Resolve "classify" role default → AiModel. Bail with a UI-friendly error if unset.
 //!   2. Pull keychain key on a blocking thread.
 //!   3. Fetch the message rows (id + subject + from + snippet).
+//!      snippet 在首次 sync 时可能为 NULL（正文尚未懒加载）。build_chunk_prompt 用
+//!      "(无片段)" 兜底，分类仍基于 subject + from_addr 正常执行，不会跳过或崩溃。
+//!      当用户打开邮件详情触发正文懒加载后，snippet 更新 → prompt_hash 改变 → 下次
+//!      通过 `ai_classify` 命令重分类时自动走 fresh 路径获取更高质量分类结果。
 //!   4. Chunk into batches of `BATCH_SIZE`; for each chunk:
 //!      - Build a numbered prompt — the model echoes back the input ids.
 //!      - Per-message sha256(system || \n---\n || per_msg_payload) used as the

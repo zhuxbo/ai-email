@@ -4,7 +4,7 @@
 //!   1. Resolve the user-configured "summary" model via `ai_role_defaults`. Bail with a
 //!      clear "请先在 AI 设置中配置默认摘要模型" error if none is configured.
 //!   2. Pull the API key for that model from the OS keychain (spawn_blocking).
-//!   3. Load message header + cached body from PG. Bail if the body isn't cached — we want
+//!   3. Load message header + cached body from SQLite. Bail if the body isn't cached — we want
 //!      the user to open the message first so the lazy-fetch lands the body.
 //!   4. Compute `prompt_hash = sha256(system_prompt || \n---\n || user_prompt)`.
 //!   5. `ai_results::get` by `(message_id, "summary", prompt_hash)` — return immediately
