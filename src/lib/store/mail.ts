@@ -9,6 +9,34 @@ import type { Account, AddAccountForm, Category, MessageBody, MessageHeader } fr
 import { errMsg } from '../utils';
 import { useAiStore } from './ai';
 
+function patchFlag(flags: string[], flag: string, add: boolean): string[] {
+  const has = flags.includes(flag);
+  if (add && !has) return [...flags, flag];
+  if (!add && has) return flags.filter((f) => f !== flag);
+  return flags;
+}
+
+async function setFlagOptimistic(
+  set: (partial: Partial<MailState>) => void,
+  get: () => MailState,
+  id: string,
+  flag: string,
+  value: boolean,
+  call: (id: string, value: boolean) => Promise<void>,
+): Promise<void> {
+  const prev = get().messages;
+  // 开始新操作即清除上一次遗留的错误提示；失败时下方 catch 再写入新 error。
+  set({
+    messages: prev.map((m) => (m.id === id ? { ...m, flags: patchFlag(m.flags, flag, value) } : m)),
+    error: null,
+  });
+  try {
+    await call(id, value);
+  } catch (e) {
+    set({ messages: prev, error: errMsg(e) });
+  }
+}
+
 interface MailState {
   accounts: Account[];
   selectedAccountId: string | null;
@@ -43,6 +71,9 @@ interface MailState {
   classifyVisibleMessages: () => Promise<void>;
   toggleCategoryFilter: (cat: Category) => void;
   setSortByPriority: (on: boolean) => void;
+
+  setSeen: (id: string, seen: boolean) => Promise<void>;
+  setFlagged: (id: string, flagged: boolean) => Promise<void>;
 
   clearError: () => void;
 }
@@ -202,6 +233,14 @@ export const useMailStore = create<MailState>((set, get) => ({
 
   setSortByPriority: (on) => {
     set({ sortByPriority: on });
+  },
+
+  setSeen: async (id, seen) => {
+    await setFlagOptimistic(set, get, id, '\\Seen', seen, tauri.messageSetSeen);
+  },
+
+  setFlagged: async (id, flagged) => {
+    await setFlagOptimistic(set, get, id, '\\Flagged', flagged, tauri.messageSetFlagged);
   },
 
   clearError: () => {

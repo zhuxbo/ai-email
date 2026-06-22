@@ -15,6 +15,9 @@ vi.mock('../tauri', () => ({
   aiClassify: vi.fn().mockResolvedValue(undefined),
   accountAdd: vi.fn(),
   accountRemove: vi.fn().mockResolvedValue(undefined),
+  messageSetSeen: vi.fn().mockResolvedValue(undefined),
+  messageSetFlagged: vi.fn().mockResolvedValue(undefined),
+  messageDelete: vi.fn().mockResolvedValue(undefined),
 }));
 import * as tauri from '../tauri';
 describe('mail store 聚合新成员', () => {
@@ -53,5 +56,48 @@ describe('mail store 聚合新成员', () => {
     await useMailStore.getState().reloadMessages();
     expect(useMailStore.getState().accountErrors).toEqual({});
     expect(useMailStore.getState().error).toContain('boom');
+  });
+});
+
+describe('mail store flag 乐观更新', () => {
+  beforeEach(() => {
+    useMailStore.setState({
+      messages: [{ id: 'm1', accountId: 'a1', flags: [] }] as never,
+      selectedMessageId: 'm1',
+      accountErrors: {},
+      error: null,
+    } as never);
+    vi.clearAllMocks();
+  });
+
+  it('setSeen 乐观加 \\Seen 并调命令', async () => {
+    await useMailStore.getState().setSeen('m1', true);
+    const [msg] = useMailStore.getState().messages;
+    expect(msg?.flags).toContain('\\Seen');
+    expect(tauri.messageSetSeen).toHaveBeenCalledWith('m1', true);
+  });
+
+  it('setFlagged 失败回滚 + 记 error', async () => {
+    let rejectCall!: (e: Error) => void;
+    vi.mocked(tauri.messageSetFlagged).mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectCall = reject;
+        }),
+    );
+    const pending = useMailStore.getState().setFlagged('m1', true);
+    // 命令仍 in-flight：乐观写已发生
+    expect(useMailStore.getState().messages[0]?.flags).toContain('\\Flagged');
+    rejectCall(new Error('boom'));
+    await pending;
+    // 失败后回滚 + 记 error
+    expect(useMailStore.getState().messages[0]?.flags).not.toContain('\\Flagged');
+    expect(useMailStore.getState().error).toContain('boom');
+  });
+
+  it('setSeen 成功清除遗留 error', async () => {
+    useMailStore.setState({ error: 'old error' } as never);
+    await useMailStore.getState().setSeen('m1', true);
+    expect(useMailStore.getState().error).toBeNull();
   });
 });
