@@ -253,3 +253,70 @@ async fn dismiss_removes_suggestion_from_pending() {
         "dismissed 建议应从 pending 队列消失"
     );
 }
+
+#[tokio::test]
+async fn evaluate_rules_matches_after_classification_and_degrades_without_it() {
+    use ai_email_lib::auto_reply::evaluate_rules;
+    use ai_email_lib::db::suggested_replies as q;
+    let pool = mem_pool().await;
+    let (account_id, msg_id) = seed_account_and_message(&pool).await; // from_addr=NULL, category=NULL, priority=NULL
+
+    sqlx::query("UPDATE messages SET from_addr = 'boss@client.com' WHERE id = ?1")
+        .bind(msg_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // 规则 A：category=work（依赖分类）；规则 B：domain=client.com（不依赖分类）。
+    // 平铺插入，不用闭包——避免「闭包产 async block 捕获外部 &pool」的借用检查坑。
+    sqlx::query(
+        "INSERT INTO auto_reply_rules (id, account_id, name, match_category, draft_intent)
+         VALUES (?1, ?2, 'A-work', 'work', 'i')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(account_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_reply_rules (id, account_id, name, match_domain, draft_intent)
+         VALUES (?1, ?2, 'B-domain', 'client.com', 'i')",
+    )
+    .bind(Uuid::new_v4())
+    .bind(account_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // ① category 仍为 NULL（classify 未跑）→ 仅 domain 规则命中
+    evaluate_rules(&pool, account_id, &[msg_id]).await.unwrap();
+    let pend = q::list_pending(&pool).await.unwrap();
+    assert_eq!(pend.len(), 1);
+    assert_eq!(
+        pend[0].rule_name_snapshot, "B-domain",
+        "未分类时只应 domain 规则命中"
+    );
+
+    // ② 第二封邮件已分类（category=work）→ category 规则命中
+    let msg2 = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO messages (id, account_id, mailbox_id, imap_uid, from_addr, category, priority, to_addrs, cc_addrs, flags)
+         SELECT ?1, account_id, mailbox_id, 2, 'x@nowhere.com', 'work', 2, '[]', '[]', '[]' FROM messages WHERE id = ?2",
+    )
+    .bind(msg2)
+    .bind(msg_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    evaluate_rules(&pool, account_id, &[msg2]).await.unwrap();
+    let names: Vec<String> = q::list_pending(&pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|s| s.rule_name_snapshot)
+        .collect();
+    assert!(
+        names.contains(&"A-work".to_string()),
+        "分类写回后 category 规则应命中"
+    );
+}
