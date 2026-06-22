@@ -84,6 +84,18 @@ export async function smtpSend(draft: SendDraft): Promise<SendReceipt> {
   return invoke('smtp_send', { draft });
 }
 
+export async function messageSetSeen(id: string, seen: boolean): Promise<void> {
+  await invoke('message_set_seen', { id, seen });
+}
+
+export async function messageSetFlagged(id: string, flagged: boolean): Promise<void> {
+  await invoke('message_set_flagged', { id, flagged });
+}
+
+export async function messageDelete(id: string): Promise<void> {
+  await invoke('message_delete', { id });
+}
+
 export async function modelsList(): Promise<AiModel[]> {
   return invoke('models_list');
 }
