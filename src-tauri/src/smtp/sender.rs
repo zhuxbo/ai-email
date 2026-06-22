@@ -202,16 +202,37 @@ fn dedup_addrs(addrs: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// 把裸 message-id 规范成 RFC 5322 的 `<id>` 形式；已带角括号则原样返回（幂等）。
+///
+/// mail-parser 0.10.2 在解析时剥离角括号，DB 中存储的是无括号值（如 `c@example.com`）。
+/// lettre 的 `in_reply_to`/`references` 是纯文本头、原样透传不补括号，因此必须在此层规范化。
+fn wrap_msgid(id: &str) -> String {
+    let t = id.trim();
+    if t.starts_with('<') && t.ends_with('>') {
+        t.to_string()
+    } else {
+        format!("<{t}>")
+    }
+}
+
 /// Build an RFC 5322 Message.
 ///
-/// `rfc_id` is the RFC Message-ID (`<id@host>`) of the original message being replied to.
-/// `original_refs` is the space-separated References header of that original message.
+/// `rfc_id` is the RFC Message-ID of the original message being replied to.
+/// DB stores the value without angle brackets (mail-parser strips them), so `wrap_msgid`
+/// is applied to normalize both `In-Reply-To` and each token in `References`.
 ///
-/// When replying, `In-Reply-To` is set to `rfc_id`, and `References` is built per RFC 5322 §3.6.4:
-///   - Start with the original message's own References chain (if any).
-///   - Append the original message's Message-ID at the end.
+/// `original_refs` is the space-separated References header of that original message (also
+/// without angle brackets as stored in DB).
+///
+/// When replying, `In-Reply-To` is set to `wrap_msgid(rfc_id)`, and `References` is built
+/// per RFC 5322 §3.6.4:
+///   - Start with the original message's own References chain (if any), each token wrapped.
+///   - Append `wrap_msgid(rfc_id)` at the end.
 ///
 /// This produces a complete chain: `<a> <b> … <c>` where `<c>` is the message being replied to.
+///
+/// NOTE: References folding (RFC 5322 long-line wrap) is not implemented; most MTA accept
+/// long unfolded References headers. MVP non-issue.
 fn build_message(
     account: &Account,
     draft: &SendDraft,
@@ -238,13 +259,19 @@ fn build_message(
     }
 
     // #7: set threading headers when replying.
-    // References = original_refs (existing chain) + space + rfc_id (the message being replied to).
-    // In-Reply-To = rfc_id only (RFC 5322 §3.6.4).
+    // DB values have angle brackets stripped by mail-parser; wrap_msgid restores them.
+    // In-Reply-To = wrap_msgid(rfc_id) (RFC 5322 §3.6.4).
+    // References  = each token from original_refs wrapped + wrap_msgid(rfc_id) appended.
     if let Some(mid) = rfc_id {
-        builder = builder.in_reply_to(mid.to_string());
+        let wrapped_mid = wrap_msgid(mid);
+        builder = builder.in_reply_to(wrapped_mid.clone());
         let references = match original_refs {
-            Some(refs) if !refs.trim().is_empty() => format!("{} {}", refs.trim(), mid),
-            _ => mid.to_string(),
+            Some(refs) if !refs.trim().is_empty() => {
+                let mut parts: Vec<String> = refs.split_whitespace().map(wrap_msgid).collect();
+                parts.push(wrapped_mid);
+                parts.join(" ")
+            }
+            _ => wrapped_mid,
         };
         builder = builder.header(header::References::from(references));
     }
@@ -361,33 +388,82 @@ mod tests {
         assert!(dedup_addrs(&[]).is_empty());
     }
 
+    // ── wrap_msgid helper ─────────────────────────────────────────────────────
+
+    #[test]
+    fn wrap_msgid_adds_angle_brackets_to_bare_id() {
+        assert_eq!(wrap_msgid("c@example.com"), "<c@example.com>");
+    }
+
+    #[test]
+    fn wrap_msgid_is_idempotent_when_already_wrapped() {
+        // 防御：已带括号不产生 <<id>>
+        assert_eq!(wrap_msgid("<c@example.com>"), "<c@example.com>");
+    }
+
+    #[test]
+    fn wrap_msgid_trims_whitespace() {
+        assert_eq!(wrap_msgid("  c@example.com  "), "<c@example.com>");
+    }
+
     // ── #7: In-Reply-To / References headers ──────────────────────────────────
 
-    /// 无原链时 References = 单个被回复的 message-id（In-Reply-To 同）。
+    /// 无原链，DB 裸 id（无括号）→ 输出带括号。
     #[test]
-    fn build_message_sets_in_reply_to_and_references_no_prior_chain() {
+    fn build_message_no_prior_chain_bare_id_gets_angle_brackets() {
         let account = dummy_account("alice@example.com");
         let draft = draft_base();
-        let rfc_id = "<original-msg-id@mail.example.com>";
+        // DB 存储的真值：无括号
+        let rfc_id = "c@example.com";
 
         let msg = build_message(&account, &draft, &draft.to, &draft.cc, Some(rfc_id), None)
             .expect("build_message must succeed");
 
         let raw = String::from_utf8_lossy(&msg.formatted()).into_owned();
         assert!(
-            raw.contains(&format!("In-Reply-To: {rfc_id}")),
-            "In-Reply-To header missing or wrong in:\n{raw}"
+            raw.contains("In-Reply-To: <c@example.com>"),
+            "In-Reply-To must have angle brackets:\n{raw}"
         );
         assert!(
-            raw.contains(&format!("References: {rfc_id}")),
-            "References header missing or wrong in:\n{raw}"
+            raw.contains("References: <c@example.com>"),
+            "References must have angle brackets:\n{raw}"
         );
     }
 
-    /// 多层链：被回复邮件有 references_header = "<a@x> <b@x>"，message-id = "<c@x>"。
-    /// 回复的 References 应为 "<a@x> <b@x> <c@x>"（延续链 + 追加），In-Reply-To = "<c@x>"。
+    /// 多层链，DB 裸 id（无括号）：rfc_id="c@example.com"，original_refs="a@example.com b@example.com"
+    /// → In-Reply-To: <c@example.com>，References: <a@example.com> <b@example.com> <c@example.com>
     #[test]
-    fn build_message_extends_references_chain() {
+    fn build_message_extends_references_chain_bare_ids() {
+        let account = dummy_account("alice@example.com");
+        let draft = draft_base();
+        // DB 真值：空格分隔、无括号
+        let original_refs = "a@example.com b@example.com";
+        let rfc_id = "c@example.com";
+
+        let msg = build_message(
+            &account,
+            &draft,
+            &draft.to,
+            &draft.cc,
+            Some(rfc_id),
+            Some(original_refs),
+        )
+        .expect("build_message must succeed");
+
+        let raw = String::from_utf8_lossy(&msg.formatted()).into_owned();
+        assert!(
+            raw.contains("In-Reply-To: <c@example.com>"),
+            "In-Reply-To must be the direct parent with angle brackets:\n{raw}"
+        );
+        assert!(
+            raw.contains("References: <a@example.com> <b@example.com> <c@example.com>"),
+            "References must extend the chain with angle brackets:\n{raw}"
+        );
+    }
+
+    /// 幂等：若 token 已带括号（防御性），不产生 <<id>>。
+    #[test]
+    fn build_message_already_wrapped_ids_are_idempotent() {
         let account = dummy_account("alice@example.com");
         let draft = draft_base();
         let original_refs = "<a@x> <b@x>";
@@ -406,11 +482,15 @@ mod tests {
         let raw = String::from_utf8_lossy(&msg.formatted()).into_owned();
         assert!(
             raw.contains("In-Reply-To: <c@x>"),
-            "In-Reply-To must be the direct parent:\n{raw}"
+            "In-Reply-To must not double-wrap:\n{raw}"
         );
         assert!(
             raw.contains("References: <a@x> <b@x> <c@x>"),
-            "References must extend the prior chain:\n{raw}"
+            "References must not double-wrap:\n{raw}"
+        );
+        assert!(
+            !raw.contains("<<"),
+            "double angle brackets must not appear:\n{raw}"
         );
     }
 
