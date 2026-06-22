@@ -151,6 +151,32 @@ impl ImapClient {
         Ok(body.to_vec())
     }
 
+    /// `UID STORE <uid> ±FLAGS (<flag>)`。flag 传字面 IMAP 形式（如 `"\\Seen"` / `"\\Flagged"`）。
+    /// add=true → `+FLAGS`，false → `-FLAGS`。STORE 回流更新后的 FLAGS（fetch 流），全部 drain。
+    /// 安全：`flag` 必须是受控的 IMAP flag 字面（如 `\\Seen` / `\\Flagged` 或 `flag_to_string` 输出），
+    /// 由调用方保证，不接受用户自由输入——直接拼进命令串，无服务端转义。
+    pub async fn uid_set_flag(&mut self, uid: u32, flag: &str, add: bool) -> AppResult<()> {
+        let sign = if add { "+" } else { "-" };
+        let query = format!("{sign}FLAGS ({flag})");
+        let mut stream = self
+            .session
+            .uid_store(uid.to_string(), query)
+            .await
+            .map_err(|e| AppError::Imap(e.to_string()))?;
+        while let Some(item) = stream.next().await {
+            item.map_err(|e| AppError::Imap(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// `UID MOVE <uid> <dest>`。需先 `select` 源文件夹。
+    pub async fn uid_move(&mut self, uid: u32, dest: &str) -> AppResult<()> {
+        self.session
+            .uid_mv(uid.to_string(), dest)
+            .await
+            .map_err(|e| AppError::Imap(e.to_string()))
+    }
+
     pub async fn logout(mut self) -> AppResult<()> {
         self.session
             .logout()
@@ -184,6 +210,31 @@ where
     Ok(out)
 }
 
+/// 从实时 LIST 结果里挑废纸篓：按 `delimiter` 切出末段，小写后精确等于某别名才命中。
+/// 这样 `[QQ邮箱]/已删除`（末段「已删除」）命中，而用户自建 `To be deleted` 不会被误判。
+pub fn resolve_trash_mailbox(mailboxes: &[MailboxInfo]) -> Option<String> {
+    const ALIASES: [&str; 5] = [
+        "deleted messages",
+        "deleted",
+        "deleted items",
+        "trash",
+        "已删除",
+    ];
+    mailboxes
+        .iter()
+        .find(|m| {
+            let delim = m.delimiter.as_deref().unwrap_or("/");
+            let leaf = m
+                .name
+                .rsplit(delim)
+                .next()
+                .unwrap_or(&m.name)
+                .to_lowercase();
+            ALIASES.contains(&leaf.as_str())
+        })
+        .map(|m| m.name.clone())
+}
+
 /// `async_imap::types::Flag` doesn't implement `Display`, so spell out the canonical IMAP
 /// wire form here. We persist these as `TEXT[]` rows verbatim — frontend filters look for
 /// the literal `\Seen` / `\Flagged` substrings.
@@ -198,5 +249,62 @@ fn flag_to_string(f: async_imap::types::Flag<'_>) -> String {
         Flag::Recent => "\\Recent".into(),
         Flag::MayCreate => "\\*".into(),
         Flag::Custom(c) => c.into_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mb(name: &str) -> MailboxInfo {
+        MailboxInfo {
+            name: name.to_string(),
+            delimiter: Some("/".to_string()),
+        }
+    }
+
+    fn mb_flat(name: &str) -> MailboxInfo {
+        MailboxInfo {
+            name: name.to_string(),
+            delimiter: None,
+        }
+    }
+
+    #[test]
+    fn resolve_trash_matches_known_leaf() {
+        let list = vec![mb("INBOX"), mb("Sent Messages"), mb("Deleted Messages")];
+        assert_eq!(
+            resolve_trash_mailbox(&list),
+            Some("Deleted Messages".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_trash_matches_hierarchical_chinese_leaf() {
+        let list = vec![mb("INBOX"), mb("[QQ邮箱]/已删除")];
+        assert_eq!(
+            resolve_trash_mailbox(&list),
+            Some("[QQ邮箱]/已删除".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_trash_uppercase_hits_lookalike_misses() {
+        // "To be deleted" 末段 "to be deleted" ∉ 别名（不误判）；"TRASH" 小写后 == "trash" → 命中。
+        let list = vec![mb("INBOX"), mb("To be deleted"), mb("TRASH")];
+        assert_eq!(resolve_trash_mailbox(&list), Some("TRASH".to_string()));
+    }
+
+    #[test]
+    fn resolve_trash_none_when_absent() {
+        let list = vec![mb("INBOX"), mb("Sent Messages")];
+        assert_eq!(resolve_trash_mailbox(&list), None);
+    }
+
+    #[test]
+    fn resolve_trash_handles_flat_namespace() {
+        // delimiter=None → fallback 切分，整个 name 即末段；"Trash" 小写命中别名。
+        let list = vec![mb_flat("INBOX"), mb_flat("Trash")];
+        assert_eq!(resolve_trash_mailbox(&list), Some("Trash".to_string()));
     }
 }
