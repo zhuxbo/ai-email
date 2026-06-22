@@ -75,6 +75,13 @@ pub fn run() {
             commands::ai_config::role_defaults_list,
             commands::ai_config::role_default_set,
             commands::ai_config::role_default_clear,
+            commands::auto_reply::auto_reply_rules_list,
+            commands::auto_reply::auto_reply_rule_add,
+            commands::auto_reply::auto_reply_rule_update,
+            commands::auto_reply::auto_reply_rule_remove,
+            commands::auto_reply::auto_reply_rule_set_enabled,
+            commands::auto_reply::suggested_replies_list,
+            commands::auto_reply::suggested_reply_dismiss,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
