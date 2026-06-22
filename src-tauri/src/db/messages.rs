@@ -215,6 +215,51 @@ pub async fn update_flags(pool: &Pool, id: Uuid, flags: &[String]) -> AppResult<
     Ok(())
 }
 
+/// 原子地对单个 flag 做 add/remove，避免并发读-改-写冲突。
+///
+/// - `add = true`：将 `flag` 插入数组（若已存在则 no-op，UNION 自动去重）。
+/// - `add = false`：将 `flag` 从数组中移除（若不存在则 no-op）。
+///
+/// 全程在单条 SQL 内完成，不需要先读出 flags 再写回。
+pub async fn update_flag_atomic(pool: &Pool, id: Uuid, flag: &str, add: bool) -> AppResult<()> {
+    if add {
+        sqlx::query(
+            r#"
+            UPDATE messages
+            SET flags = (
+                SELECT json_group_array(value)
+                FROM (
+                    SELECT value FROM json_each(flags)
+                    UNION SELECT ?2
+                )
+            )
+            WHERE id = ?1
+            "#,
+        )
+        .bind(id)
+        .bind(flag)
+        .execute(pool)
+        .await?;
+    } else {
+        sqlx::query(
+            r#"
+            UPDATE messages
+            SET flags = (
+                SELECT json_group_array(value)
+                FROM json_each(flags)
+                WHERE value != ?2
+            )
+            WHERE id = ?1
+            "#,
+        )
+        .bind(id)
+        .bind(flag)
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
+}
+
 /// 按 `(mailbox_id, imap_uid)` 刷新 flags，用于增量同步时对已存在 UID 的 flags 更新（audit #64）。
 /// 若该 UID 尚未落库（正常不会发生）则是 no-op。
 pub async fn update_flags_by_uid(
@@ -303,4 +348,137 @@ pub async fn list_in_mailbox(
         .fetch_all(pool)
         .await?;
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db;
+
+    /// 构造测试专用内存 SQLite pool（单连接，迁移已跑完，外键启用）。
+    ///
+    /// `:memory:` 的每个连接是独立实例；必须用 `max_connections(1)` 保证所有操作
+    /// 走同一连接，否则迁移建的表对其他连接不可见。
+    async fn test_pool() -> Pool {
+        let opts = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(":memory:")
+            .foreign_keys(true);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        db::MIGRATOR.run(&pool).await.unwrap();
+        pool
+    }
+
+    /// 插入一条最简消息行（含合法的父行 accounts + mailboxes），返回其 id。
+    async fn insert_minimal(pool: &Pool) -> Uuid {
+        let account_id = Uuid::new_v4();
+        let mailbox_id = Uuid::new_v4();
+        let msg_id = Uuid::new_v4();
+
+        sqlx::query(
+            "INSERT INTO accounts (id, email, provider, imap_host, smtp_host) \
+             VALUES (?1, ?2, 'imap', 'imap.test', 'smtp.test')",
+        )
+        .bind(account_id)
+        .bind(format!("test-{}@test.invalid", account_id))
+        .execute(pool)
+        .await
+        .unwrap();
+
+        sqlx::query("INSERT INTO mailboxes (id, account_id, name) VALUES (?1, ?2, 'INBOX')")
+            .bind(mailbox_id)
+            .bind(account_id)
+            .execute(pool)
+            .await
+            .unwrap();
+
+        sqlx::query(
+            "INSERT INTO messages (id, account_id, mailbox_id, imap_uid, flags) \
+             VALUES (?1, ?2, ?3, 1, '[]')",
+        )
+        .bind(msg_id)
+        .bind(account_id)
+        .bind(mailbox_id)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        msg_id
+    }
+
+    // ── #30: update_flag_atomic 原子 add/remove ──────────────────────────────
+
+    #[tokio::test]
+    async fn flag_add_is_idempotent() {
+        let pool = test_pool().await;
+        let id = insert_minimal(&pool).await;
+
+        update_flag_atomic(&pool, id, "\\Seen", true).await.unwrap();
+        update_flag_atomic(&pool, id, "\\Seen", true).await.unwrap(); // 第二次 no-op
+
+        let row: (String,) = sqlx::query_as("SELECT flags FROM messages WHERE id = ?1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let flags: Vec<String> = serde_json::from_str(&row.0).unwrap();
+        assert_eq!(flags, vec!["\\Seen"]);
+    }
+
+    #[tokio::test]
+    async fn flag_remove_is_idempotent() {
+        let pool = test_pool().await;
+        let id = insert_minimal(&pool).await;
+
+        update_flag_atomic(&pool, id, "\\Seen", true).await.unwrap();
+        update_flag_atomic(&pool, id, "\\Seen", false)
+            .await
+            .unwrap();
+        update_flag_atomic(&pool, id, "\\Seen", false)
+            .await
+            .unwrap(); // 第二次 no-op
+
+        let row: (String,) = sqlx::query_as("SELECT flags FROM messages WHERE id = ?1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let flags: Vec<String> = serde_json::from_str(&row.0).unwrap();
+        assert!(flags.is_empty());
+    }
+
+    /// 并发加 \\Seen 与 \\Flagged，验证两个 flag 都保留（不丢失）。
+    #[tokio::test]
+    async fn concurrent_flag_adds_do_not_lose_updates() {
+        let pool = test_pool().await;
+        let id = insert_minimal(&pool).await;
+
+        // 两个原子写并发执行，互不干扰
+        let (r1, r2) = tokio::join!(
+            update_flag_atomic(&pool, id, "\\Seen", true),
+            update_flag_atomic(&pool, id, "\\Flagged", true),
+        );
+        r1.unwrap();
+        r2.unwrap();
+
+        let row: (String,) = sqlx::query_as("SELECT flags FROM messages WHERE id = ?1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let mut flags: Vec<String> = serde_json::from_str(&row.0).unwrap();
+        flags.sort();
+        // 两个 flag 均须存在
+        assert!(
+            flags.contains(&"\\Seen".to_string()),
+            "\\Seen missing: {flags:?}"
+        );
+        assert!(
+            flags.contains(&"\\Flagged".to_string()),
+            "\\Flagged missing: {flags:?}"
+        );
+    }
 }

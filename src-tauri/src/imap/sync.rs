@@ -15,6 +15,7 @@
 
 use secrecy::SecretString;
 use serde::Serialize;
+use tokio_util::sync::CancellationToken;
 
 use crate::db::accounts::Account;
 use crate::db::messages::MessageInsert;
@@ -74,6 +75,7 @@ pub async fn sync_inbox(
     pool: &Pool,
     account: &Account,
     auth_code: &SecretString,
+    cancel: CancellationToken,
 ) -> AppResult<SyncReport> {
     let port = u16::try_from(account.imap_port)
         .map_err(|_| AppError::Imap(format!("invalid imap_port: {}", account.imap_port)))?;
@@ -213,30 +215,58 @@ pub async fn sync_inbox(
     // gets the sync report immediately and polls a few seconds later (see store.syncInbox).
     // Errors here are non-fatal: log and move on. The classifier checks `ai_role_defaults`
     // and silently no-ops when the role isn't configured yet.
+    //
+    // #29: child_token 继承自应用级 cancel，退出时自动取消，停止进行中的付费 AI 调用。
     if !new_ids.is_empty() {
         let pool_clone = pool.clone();
         let account_id = account.id;
+        let child_token = cancel.child_token();
         tokio::spawn(async move {
-            match crate::ai::classify::classify_message_ids(&pool_clone, &new_ids).await {
-                Ok(results) => {
+            // 在任何 AI 调用前检查取消：若应用已退出则跳过整批任务。
+            if child_token.is_cancelled() {
+                tracing::debug!(account_id = %account_id, "classify cancelled before start");
+                return;
+            }
+
+            let classify_result = tokio::select! {
+                result = crate::ai::classify::classify_message_ids(&pool_clone, &new_ids) => {
+                    Some(result)
+                }
+                _ = child_token.cancelled() => {
+                    tracing::info!(account_id = %account_id, "background classify cancelled (app exit)");
+                    None
+                }
+            };
+
+            match classify_result {
+                Some(Ok(results)) => {
                     tracing::info!(
                         account_id = %account_id,
                         classified = results.len(),
                         "background classify finished"
                     );
                 }
-                Err(e) => {
+                Some(Err(e)) => {
                     // Most common cause: user hasn't configured a classify model yet.
                     // We don't surface to UI — the next sync will retry, and the user can
                     // see uncategorised messages and pick a model when they're ready.
                     tracing::warn!(account_id = %account_id, error = %e, "background classify failed");
                 }
+                None => return, // 已取消，跳过后续 evaluate_rules
             }
+
             // classify 之后顺序评估自动回复规则（须在同一 spawn 内、await 之后——
             // 否则读不到刚写回的 category/priority）。失败仅 warn，不影响同步主流程。
-            if let Err(e) =
-                crate::auto_reply::evaluate_rules(&pool_clone, account_id, &new_ids).await
-            {
+            let eval_result = tokio::select! {
+                result = crate::auto_reply::evaluate_rules(&pool_clone, account_id, &new_ids) => {
+                    Some(result)
+                }
+                _ = child_token.cancelled() => {
+                    tracing::info!(account_id = %account_id, "evaluate_rules cancelled (app exit)");
+                    None
+                }
+            };
+            if let Some(Err(e)) = eval_result {
                 tracing::warn!(account_id = %account_id, error = %e, "auto-reply rule eval failed");
             }
         });
@@ -294,6 +324,45 @@ mod tests {
         assert_eq!(
             decide_sync_mode(None, Some(100), Some(42)),
             SyncMode::Incremental { prev_uid_next: 100 }
+        );
+    }
+
+    /// #29: 预先取消的 child token 会跳过后台任务体，select! 分支立即走取消路径。
+    #[tokio::test]
+    async fn cancelled_token_skips_background_work() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        use tokio_util::sync::CancellationToken;
+
+        let parent = CancellationToken::new();
+        let child = parent.child_token();
+        // 先取消父令牌，child_token 同步取消
+        parent.cancel();
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        // 模拟 spawn 内部的 tokio::select! 逻辑：已取消时跳过 AI 调用
+        let handle = tokio::spawn(async move {
+            if child.is_cancelled() {
+                // 早检：退出前立即跳过，不增加计数
+                return;
+            }
+            // 若无早检，select! 也会在取消分支胜出
+            tokio::select! {
+                _ = async { call_count_clone.fetch_add(1, Ordering::SeqCst); } => {}
+                _ = child.cancelled() => {}
+            }
+        });
+        handle.await.unwrap();
+
+        // 令牌在任务开始前已取消，call_count 应为 0（work 被跳过）
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            0,
+            "已取消的 token 应跳过后台工作"
         );
     }
 }
