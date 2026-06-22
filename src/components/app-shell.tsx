@@ -18,6 +18,7 @@ interface NavProps {
   onRemoveAccount: (id: string) => void;
   onOpenSettings: () => void;
   onOpenAutoReply: () => void;
+  autoReplyCount: number;
 }
 
 interface Props {

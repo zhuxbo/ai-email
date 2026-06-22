@@ -17,6 +17,7 @@ const navProps = {
   onRemoveAccount: noop,
   onOpenSettings: noop,
   onOpenAutoReply: noop,
+  autoReplyCount: 0,
 };
 
 function shell(messageOpenSeq: number) {

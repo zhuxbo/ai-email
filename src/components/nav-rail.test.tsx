@@ -28,6 +28,7 @@ function baseProps() {
     onRemoveAccount: vi.fn(),
     onOpenSettings: vi.fn(),
     onOpenAutoReply: vi.fn(),
+    autoReplyCount: 0,
   };
 }
 

@@ -12,6 +12,7 @@ interface Props {
   onRemoveAccount: (id: string) => void;
   onOpenSettings: () => void;
   onOpenAutoReply: () => void;
+  autoReplyCount: number;
 }
 
 export function NavRail({
@@ -24,6 +25,7 @@ export function NavRail({
   onRemoveAccount,
   onOpenSettings,
   onOpenAutoReply,
+  autoReplyCount,
 }: Props) {
   return (
     <nav className="flex w-[54px] shrink-0 flex-col items-center gap-3 bg-ink py-3">
@@ -78,13 +80,20 @@ export function NavRail({
       >
         {syncing ? '⟳' : '🔄'}
       </IconButton>
-      <IconButton
-        label="自动回复中心"
-        onClick={onOpenAutoReply}
-        className="h-8 w-8 text-amber-400 hover:bg-slate-700"
-      >
-        ⚡
-      </IconButton>
+      <div className="relative">
+        <IconButton
+          label="自动回复中心"
+          onClick={onOpenAutoReply}
+          className="h-8 w-8 text-amber-400 hover:bg-slate-700"
+        >
+          ⚡
+        </IconButton>
+        {autoReplyCount > 0 && (
+          <span className="pointer-events-none absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-danger px-1 text-[9px] font-bold text-white">
+            {autoReplyCount > 99 ? '99+' : autoReplyCount}
+          </span>
+        )}
+      </div>
       <IconButton
         label="设置"
         onClick={onOpenSettings}
