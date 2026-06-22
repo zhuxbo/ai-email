@@ -91,15 +91,16 @@ pub(crate) fn extract_json(raw: &str) -> &str {
     if let Some(rest) = trimmed.strip_prefix("```") {
         // Opening fence: skip the remainder of that first line (covers ```json, ```JSON,
         // bare ```), then drop a trailing ``` fence if present.
-        let after_lang = match rest.find('\n') {
-            Some(nl) => &rest[nl + 1..],
-            None => "", // fence with nothing after it
-        };
-        let inner = after_lang
-            .trim_end()
-            .strip_suffix("```")
-            .unwrap_or(after_lang);
-        return inner.trim();
+        if let Some(nl) = rest.find('\n') {
+            let after_lang = &rest[nl + 1..];
+            let inner = after_lang
+                .trim_end()
+                .strip_suffix("```")
+                .unwrap_or(after_lang);
+            return inner.trim();
+        }
+        // 同行围栏（开头 fence 后无换行，如 ```json{"a":1}```）：
+        // 不返回空串，落到下方的 brace-slice 分支继续处理。
     }
 
     let start = trimmed.find(['{', '[']).unwrap_or(0);
@@ -261,5 +262,14 @@ mod tests {
     #[test]
     fn empty_input_stays_empty() {
         assert_eq!(extract_json("   "), "");
+    }
+
+    #[test]
+    fn strips_same_line_fence() {
+        // 同行围栏（fence 开头与 JSON 内容在同一行，无换行）之前会走 None => "" 分支返回
+        // 空串导致解析失败；修复后应正确截出花括号内容。
+        let raw = r#"```json{"a":1}```"#;
+        let v = parse(raw);
+        assert_eq!(v["a"], 1);
     }
 }

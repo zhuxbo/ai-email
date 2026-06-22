@@ -92,6 +92,9 @@ fn parse_completion(
         serde_json::from_slice(bytes).unwrap_or(serde_json::Value::Null);
 
     if !status.is_success() {
+        // Anthropic 错误格式单一稳定：始终为 {"error":{"message":...}}，
+        // 无需像 openai.rs 那样兜底多厂商的非标准错误体（顶层 message、嵌套层等）。
+        // 勿"对齐" openai 改成多步兜底——差异是刻意的，不是遗漏。
         let msg = payload["error"]["message"]
             .as_str()
             .map(str::to_string)
