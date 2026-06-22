@@ -295,7 +295,7 @@ mod tests {
 
     #[test]
     fn normalize_target_multibyte_exceeding_byte_limit_is_rejected() {
-        // 6 个汉字 = 18 字节 > 16，用字节计数 → 应拒绝
+        // 7 个汉字 = 21 字节 > 16，用字节计数 → 应拒绝
         // （BCP-47 不会出现此情形，但验证上限判断不会 panic 或截断字符边界）
         let long_cjk = "中文语言目标设"; // 7 CJK = 21 字节
         assert!(normalize_target(long_cjk).is_err());
