@@ -467,6 +467,136 @@ async fn ai_results_conflict_update_refreshes_model_and_tokens() {
     assert_eq!(out["category"], "personal", "output 应刷新为新值");
 }
 
+// ── #71: draft force 绕过缓存 ─────────────────────────────────────────────────────
+//
+// 测试策略：不连 AI，直接通过 ai_results DB 层验证 force 语义。
+// draft_reply 在 force=false 命中 ai_results 缓存就返回；force=true 时应跳过缓存。
+// 此处用 get/insert 函数模拟"有缓存"的场景，再用 force 路径验证跳过行为。
+
+/// force=false 时，ai_results 缓存命中 → get() 返回 Some（对应 draft_reply 提前返回 cached）。
+/// force=true 时 draft_reply 跳过 get() 直接生成；这里通过检查 get() 的语义来间接验证。
+#[tokio::test]
+async fn ai_results_cache_get_returns_some_when_present_simulating_non_force() {
+    use ai_email_lib::db;
+    use ai_email_lib::db::accounts::AccountInput;
+    use ai_email_lib::db::ai_results::{self, AiResultInsert};
+    use ai_email_lib::db::messages::MessageInsert;
+
+    let pool = temp_db().await;
+    let acc = db::accounts::insert(
+        &pool,
+        &AccountInput {
+            email: "force@example.com".into(),
+            display_name: None,
+            provider: "imap".into(),
+            imap_host: "h".into(),
+            imap_port: 993,
+            smtp_host: "h".into(),
+            smtp_port: 465,
+        },
+    )
+    .await
+    .expect("insert account");
+
+    let mailbox_id = uuid::Uuid::new_v4();
+    sqlx::query("INSERT INTO mailboxes (id, account_id, name) VALUES (?1, ?2, 'INBOX')")
+        .bind(mailbox_id)
+        .bind(acc.id)
+        .execute(&pool)
+        .await
+        .expect("insert mailbox");
+
+    let msg_id = db::messages::insert(
+        &pool,
+        &MessageInsert {
+            account_id: acc.id,
+            mailbox_id,
+            imap_uid: 10,
+            rfc_message_id: None,
+            thread_id: None,
+            subject: Some("Test force".into()),
+            from_addr: Some("sender@x.com".into()),
+            to_addrs: vec![],
+            cc_addrs: vec![],
+            sent_at: None,
+            internal_date: None,
+            flags: vec![],
+            size_bytes: None,
+            has_attachment: false,
+            snippet: None,
+            references_header: None,
+        },
+    )
+    .await
+    .expect("insert message")
+    .expect("new row id");
+
+    let prompt_hash = "test-hash-for-force-check".to_string();
+
+    // 初始：缓存为空 → get() 返回 None（force=true 路径跳过 get，两者行为等价：都继续生成）
+    let before = ai_results::get(&pool, msg_id, "draft", &prompt_hash)
+        .await
+        .expect("get");
+    assert!(before.is_none(), "初始无缓存");
+
+    // 插入一条缓存（模拟 force=false 路径的首次生成）
+    let original_output =
+        serde_json::json!({"subject":"Re: Test","body":"first draft","tone":"polite"});
+    ai_results::insert(
+        &pool,
+        &AiResultInsert {
+            message_id: msg_id,
+            kind: "draft".into(),
+            model: "haiku".into(),
+            prompt_hash: prompt_hash.clone(),
+            output: original_output.clone(),
+            input_tokens: Some(100),
+            output_tokens: Some(50),
+            cache_read_tokens: None,
+        },
+    )
+    .await
+    .expect("insert first draft");
+
+    // force=false 路径：get() 返回 Some → draft_reply 直接返回 cached（不调 AI）
+    let cached = ai_results::get(&pool, msg_id, "draft", &prompt_hash)
+        .await
+        .expect("get after insert");
+    assert!(cached.is_some(), "force=false：有缓存，get 返回 Some");
+    assert_eq!(cached.unwrap().output["body"], "first draft");
+
+    // force=true 路径：draft_reply 跳过 get()，调 AI 后用 insert (ON CONFLICT) 覆盖旧缓存
+    // 此处用 insert 模拟"重新生成后覆盖缓存"
+    let new_output =
+        serde_json::json!({"subject":"Re: Test","body":"regenerated draft","tone":"polite"});
+    ai_results::insert(
+        &pool,
+        &AiResultInsert {
+            message_id: msg_id,
+            kind: "draft".into(),
+            model: "sonnet".into(),
+            prompt_hash: prompt_hash.clone(),
+            output: new_output,
+            input_tokens: Some(200),
+            output_tokens: Some(80),
+            cache_read_tokens: None,
+        },
+    )
+    .await
+    .expect("insert regenerated (ON CONFLICT update)");
+
+    // 强制重生后，缓存已更新为新版本（ON CONFLICT DO UPDATE）
+    let after_regen = ai_results::get(&pool, msg_id, "draft", &prompt_hash)
+        .await
+        .expect("get after regen");
+    let after_regen = after_regen.unwrap();
+    assert_eq!(
+        after_regen.output["body"], "regenerated draft",
+        "force 重新生成后缓存应更新为新草稿"
+    );
+    assert_eq!(after_regen.model, "sonnet", "force 重新生成后 model 应更新");
+}
+
 // ── #74: connect() 应设置 synchronous=NORMAL ──────────────────────────────────────
 
 #[tokio::test]

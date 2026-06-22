@@ -79,8 +79,12 @@ export async function aiTranslateText(text: string, target: string): Promise<Tex
   return invoke('ai_translate_text', { text, target });
 }
 
-export async function aiDraftReply(id: string, intent: string | null): Promise<DraftResult> {
-  return invoke('ai_draft_reply', { id, intent });
+export async function aiDraftReply(
+  id: string,
+  intent: string | null,
+  force = false,
+): Promise<DraftResult> {
+  return invoke('ai_draft_reply', { id, intent, force });
 }
 
 export async function smtpSend(draft: SendDraft): Promise<SendReceipt> {

@@ -132,6 +132,20 @@ export function ComposeTab() {
               >
                 {drafting ? '起草中…' : 'AI 起草'}
               </button>
+              {/* #71 已有草稿时显示"重新生成"按钮，强制绕过缓存重新起草 */}
+              {bodyForeign !== '' && (
+                <button
+                  type="button"
+                  disabled={drafting}
+                  onClick={() => {
+                    void runDraft(true);
+                  }}
+                  className="rounded bg-surface-2 px-2 py-1 text-[10px] font-medium text-text-2 hover:bg-surface-3 disabled:cursor-not-allowed disabled:opacity-50"
+                  title="强制重新生成，忽略缓存"
+                >
+                  {drafting ? '…' : '重新生成'}
+                </button>
+              )}
             </div>
           </label>
         </div>

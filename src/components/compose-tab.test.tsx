@@ -54,4 +54,30 @@ describe('ComposeTab', () => {
     render(<ComposeTab />);
     expect(screen.getByRole('button', { name: '刷新对照' })).toBeInTheDocument();
   });
+
+  it('#71 有草稿正文时显示"重新生成"按钮', () => {
+    render(<ComposeTab />);
+    expect(screen.getByRole('button', { name: '重新生成' })).toBeInTheDocument();
+  });
+
+  it('#71 正文为空时不显示"重新生成"按钮', () => {
+    useComposeStore.setState({ bodyForeign: '' } as never);
+    render(<ComposeTab />);
+    expect(screen.queryByRole('button', { name: '重新生成' })).toBeNull();
+  });
+
+  it('#71 点击"重新生成"传 force=true 调 runDraft', async () => {
+    vi.mocked(tauri.aiDraftReply).mockResolvedValue({
+      subject: 'Re: Hi',
+      body: 'regenerated',
+      tone: 'friendly',
+      source: 'fresh',
+    } as never);
+    vi.mocked(tauri.aiTranslateText).mockResolvedValue({ text: '重新生成' });
+
+    render(<ComposeTab />);
+    await userEvent.click(screen.getByRole('button', { name: '重新生成' }));
+
+    expect(tauri.aiDraftReply).toHaveBeenCalledWith('m1', null, true);
+  });
 });

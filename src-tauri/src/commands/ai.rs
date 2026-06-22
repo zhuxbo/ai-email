@@ -55,11 +55,13 @@ pub async fn ai_translate_text(
     translate::translate_text(&state.db, &text, &target).await
 }
 
+// #71 force=Some(true) 时绕过缓存强制重新生成，省略或 false 时走正常缓存路径。
 #[tauri::command]
 pub async fn ai_draft_reply(
     state: State<'_, AppState>,
     id: Uuid,
     intent: Option<String>,
+    force: Option<bool>,
 ) -> AppResult<DraftResult> {
-    draft::draft_reply(&state.db, id, intent.as_deref()).await
+    draft::draft_reply(&state.db, id, intent.as_deref(), force.unwrap_or(false)).await
 }

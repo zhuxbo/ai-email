@@ -45,10 +45,12 @@ pub struct DraftResult {
     pub cache_read_tokens: Option<i32>,
 }
 
+/// `force=true` 时跳过 ai_results 缓存强制重新生成，并用新结果覆盖旧缓存。
 pub async fn draft_reply(
     pool: &Pool,
     message_id: Uuid,
     intent: Option<&str>,
+    force: bool,
 ) -> AppResult<DraftResult> {
     let model = ai_role_defaults::resolve_model(pool, ROLE)
         .await?
@@ -75,17 +77,20 @@ pub async fn draft_reply(
     let user_prompt = build_user_prompt(&msg, &body_text, intent_text);
     let prompt_hash = compute_prompt_hash(prompts::DRAFT_SYSTEM, intent_text, &user_prompt);
 
-    if let Some(cached) = ai_results::get(pool, message_id, KIND, &prompt_hash).await? {
-        let draft: Draft = serde_json::from_value(cached.output)?;
-        tracing::info!(message_id = %message_id, "draft cache hit");
-        return Ok(DraftResult {
-            draft,
-            source: "cached",
-            model: cached.model,
-            input_tokens: cached.input_tokens,
-            output_tokens: cached.output_tokens,
-            cache_read_tokens: cached.cache_read_tokens,
-        });
+    // #71 force=true 时绕过缓存直接重新生成；默认行为不变。
+    if !force {
+        if let Some(cached) = ai_results::get(pool, message_id, KIND, &prompt_hash).await? {
+            let draft: Draft = serde_json::from_value(cached.output)?;
+            tracing::info!(message_id = %message_id, "draft cache hit");
+            return Ok(DraftResult {
+                draft,
+                source: "cached",
+                model: cached.model,
+                input_tokens: cached.input_tokens,
+                output_tokens: cached.output_tokens,
+                cache_read_tokens: cached.cache_read_tokens,
+            });
+        }
     }
 
     let client = AiClient::build(&model, api_key)?;
