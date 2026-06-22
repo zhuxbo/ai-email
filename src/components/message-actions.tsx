@@ -6,12 +6,18 @@ export function MessageActions() {
   const body = useMailStore((s) => s.body);
   const selectedMessageId = useMailStore((s) => s.selectedMessageId);
   const messages = useMailStore((s) => s.messages);
+  const deleteMessage = useMailStore((s) => s.deleteMessage);
+  const setSeen = useMailStore((s) => s.setSeen);
+  const setFlagged = useMailStore((s) => s.setFlagged);
 
   // 早 return 让闭包里 selectedMessageId 收窄为 string，无需 non-null assertion。
   if (selectedMessageId === null) return null;
 
   const hasBody = body !== null;
   const message = messages.find((m) => m.id === selectedMessageId);
+
+  const seen = message?.flags.includes('\\Seen') ?? false;
+  const flagged = message?.flags.includes('\\Flagged') ?? false;
 
   return (
     <div className="mt-4 border-t border-[var(--color-border)] pt-3">
@@ -52,21 +58,41 @@ export function MessageActions() {
         >
           翻译
         </button>
+        <span aria-hidden className="mx-1 w-px self-stretch bg-[var(--color-border)]" />
         <button
           type="button"
-          disabled
-          title="P3b 接入"
-          className="rounded border border-[var(--color-border)] px-3 py-1 text-xs font-medium text-text-3 disabled:cursor-not-allowed"
+          disabled={message === undefined}
+          onClick={() => {
+            if (message && window.confirm('删除这封邮件？将移到废纸篓，可在邮箱中找回。')) {
+              void deleteMessage(message.id);
+            }
+          }}
+          className="rounded border border-[var(--color-border)] bg-panel px-3 py-1 text-xs font-medium text-text-1 hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          title={message ? '将此邮件移到废纸篓' : '选中邮件后可用'}
         >
-          归档
+          删除
         </button>
         <button
           type="button"
-          disabled
-          title="P3b 接入"
-          className="rounded border border-[var(--color-border)] px-3 py-1 text-xs font-medium text-text-3 disabled:cursor-not-allowed"
+          disabled={message === undefined}
+          onClick={() => {
+            if (message) void setSeen(message.id, !seen);
+          }}
+          className="rounded border border-[var(--color-border)] bg-panel px-3 py-1 text-xs font-medium text-text-1 hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          title={message ? (seen ? '标记为未读' : '标记为已读') : '选中邮件后可用'}
         >
-          删除
+          {seen ? '标记未读' : '标记已读'}
+        </button>
+        <button
+          type="button"
+          disabled={message === undefined}
+          onClick={() => {
+            if (message) void setFlagged(message.id, !flagged);
+          }}
+          className="rounded border border-[var(--color-border)] bg-panel px-3 py-1 text-xs font-medium text-text-1 hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          title={message ? (flagged ? '取消星标' : '添加星标') : '选中邮件后可用'}
+        >
+          {flagged ? '取消加星' : '加星'}
         </button>
       </div>
     </div>
