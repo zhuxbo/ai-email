@@ -66,7 +66,7 @@ interface ComposeState {
       Pick<ComposeState, 'to' | 'cc' | 'subject' | 'intentZh' | 'bodyForeign' | 'fromAccountId'>
     >,
   ) => void;
-  runDraft: () => Promise<void>;
+  runDraft: (force?: boolean) => Promise<void>;
   refreshBackTranslation: () => Promise<void>;
   runSend: () => Promise<void>;
   reset: () => void;
@@ -128,17 +128,24 @@ export const useComposeStore = create<ComposeState>((set, get) => ({
     }
   },
 
-  runDraft: async () => {
+  runDraft: async (force = false) => {
     const ctx = get().replyContext;
     if (ctx === null) return;
     // #68 每次起草前用递增 token 标记本次请求身份，取代单纯比对 messageId。
     // 同一邮件连续起草时，旧 token 与新 token 不同，旧响应返回后守卫不匹配即丢弃。
     const token = (get().draftingFor ?? '') + ':' + Date.now().toString();
+    // #17 快照起草开始时的正文：返回时若正文已变（用户在 in-flight 期间编辑），不覆盖。
+    const bodyAtDraftStart = get().bodyForeign;
     set({ drafting: true, draftingFor: token, error: null });
     try {
-      const draft = await tauri.aiDraftReply(ctx.messageId, get().intentZh.trim() || null);
+      // #71 force=true 时传入后端，绕过缓存强制重新生成。
+      const draft = await tauri.aiDraftReply(ctx.messageId, get().intentZh.trim() || null, force);
       // 守卫：draftingFor 已被更新（新起草）时丢弃本次响应
       if (get().draftingFor !== token) return;
+
+      // #17 用户在起草期间编辑过正文（aiAssisted 被 setField 重置为 false 且内容变化）→ 不覆盖
+      const userEditedBody = get().bodyForeign !== bodyAtDraftStart;
+      if (userEditedBody) return;
 
       // #18 bilingual 基于实际草稿语言重判，而非仅依赖 openReply 时的 subject+snippet 判断
       const draftIsForeign = detectForeign(draft.body);

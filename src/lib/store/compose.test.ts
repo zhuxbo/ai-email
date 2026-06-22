@@ -268,3 +268,120 @@ describe('compose store', () => {
     expect(closeDrawerSpy).not.toHaveBeenCalled();
   });
 });
+
+describe('#71 runDraft force 参数透传', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    useComposeStore.getState().reset();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('默认调用（无 force）→ 后端收到 force=false', async () => {
+    vi.mocked(tauri.aiDraftReply).mockResolvedValue({
+      subject: 'Re: s',
+      body: 'body',
+      tone: 'friendly',
+      source: 'cached',
+      model: 'm',
+      inputTokens: null,
+      outputTokens: null,
+      cacheReadTokens: null,
+    } as never);
+    vi.mocked(tauri.aiTranslateText).mockResolvedValue({ text: '翻译' });
+
+    useComposeStore.getState().openReply(enMsg);
+    await useComposeStore.getState().runDraft();
+
+    expect(tauri.aiDraftReply).toHaveBeenCalledWith('m-en', null, false);
+  });
+
+  it('force=true 时传给后端（重新生成）', async () => {
+    vi.mocked(tauri.aiDraftReply).mockResolvedValue({
+      subject: 'Re: s',
+      body: 'regenerated body',
+      tone: 'friendly',
+      source: 'fresh',
+      model: 'm',
+      inputTokens: null,
+      outputTokens: null,
+      cacheReadTokens: null,
+    } as never);
+    vi.mocked(tauri.aiTranslateText).mockResolvedValue({ text: '重新生成回译' });
+
+    useComposeStore.getState().openReply(enMsg);
+    await useComposeStore.getState().runDraft(true);
+
+    expect(tauri.aiDraftReply).toHaveBeenCalledWith('m-en', null, true);
+    expect(useComposeStore.getState().bodyForeign).toBe('regenerated body');
+  });
+});
+
+describe('#17 runDraft 不覆盖起草期间用户编辑的正文', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    useComposeStore.getState().reset();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('【竞态核心】起草 in-flight 期间用户修改正文 → 起草结果不覆盖用户编辑', async () => {
+    let resolveDraft!: (v: unknown) => void;
+    vi.mocked(tauri.aiDraftReply).mockReturnValue(
+      new Promise((res) => {
+        resolveDraft = res;
+      }) as never,
+    );
+
+    useComposeStore.getState().openReply(enMsg);
+    const draftPending = useComposeStore.getState().runDraft();
+
+    // 起草 in-flight 期间，用户手动编辑了正文（setField 设 aiAssisted=false）
+    useComposeStore.getState().setField({ bodyForeign: '用户自己写的内容' });
+    expect(useComposeStore.getState().aiAssisted).toBe(false);
+
+    // 起草结果返回
+    resolveDraft({
+      subject: 'Re: Meeting next week',
+      body: 'AI 起草的内容',
+      tone: 'friendly',
+      source: 'fresh',
+      model: 'm',
+      inputTokens: null,
+      outputTokens: null,
+      cacheReadTokens: null,
+    });
+    await draftPending;
+
+    // 用户编辑的内容不应被 AI 草稿覆盖
+    expect(useComposeStore.getState().bodyForeign).toBe('用户自己写的内容');
+    expect(useComposeStore.getState().aiAssisted).toBe(false);
+  });
+
+  it('起草期间未编辑正文 → 起草结果正常写入', async () => {
+    vi.mocked(tauri.aiDraftReply).mockResolvedValue({
+      subject: 'Re: Meeting next week',
+      body: 'AI 起草的内容',
+      tone: 'friendly',
+      source: 'fresh',
+      model: 'm',
+      inputTokens: null,
+      outputTokens: null,
+      cacheReadTokens: null,
+    } as never);
+    vi.mocked(tauri.aiTranslateText).mockResolvedValue({ text: '可以。' });
+
+    useComposeStore.getState().openReply(enMsg);
+    await useComposeStore.getState().runDraft();
+
+    // 用户没有编辑过（aiAssisted 仍为 true），草稿写入
+    expect(useComposeStore.getState().bodyForeign).toBe('AI 起草的内容');
+    expect(useComposeStore.getState().aiAssisted).toBe(true);
+  });
+});
