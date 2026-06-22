@@ -5,14 +5,14 @@ import type { SuggestedReply } from '../lib/types';
 
 /** 打开队列项 → 复用 P3a 双语回复台：锁邮件 account、预填规则意图、即时起草、开抽屉。 */
 function goReply(s: SuggestedReply): void {
-  // snippet 队列 DTO 不携带 → 传 null：双语检测仅凭 subject（可接受降级，
-  // runDraft 内对 draft.body 还有二次 detectForeign 兜底）。
+  // 队列 DTO 携带 snippet（JOIN messages 派生），双语检测可凭 subject + snippet，
+  // 不再降级；runDraft 内对 draft.body 另有二次 detectForeign 兜底。
   useComposeStore.getState().openReply({
     id: s.messageId,
     accountId: s.accountId,
     fromAddr: s.fromAddr,
     subject: s.subject,
-    snippet: null,
+    snippet: s.snippet,
   });
   useComposeStore.getState().setField({ intentZh: s.intentSnapshot });
   void useComposeStore.getState().runDraft();

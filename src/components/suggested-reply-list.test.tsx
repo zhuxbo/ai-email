@@ -15,6 +15,7 @@ const sug = (id: string): SuggestedReply => ({
   intentSnapshot: '礼貌确认今天内回复',
   subject: '合同问题',
   fromAddr: 'boss@client.com',
+  snippet: '合同草案请查收',
   sentAt: null,
   category: 'work',
   priority: 1,

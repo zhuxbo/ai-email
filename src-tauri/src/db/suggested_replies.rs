@@ -1,5 +1,5 @@
 //! Repository for `suggested_replies` — 物化的建议回复队列。
-//! 列队 DTO 的 account_id/subject/from_addr/sent_at/category/priority 全部 JOIN messages 派生
+//! 列队 DTO 的 account_id/subject/from_addr/snippet/sent_at/category/priority 全部 JOIN messages 派生
 //! （本表不存这些列）。「已回复」不落库：列队查询排除 send_log.in_reply_to 命中的邮件。
 
 use serde::Serialize;
@@ -20,6 +20,7 @@ pub struct SuggestedReply {
     pub intent_snapshot: String,
     pub subject: Option<String>,
     pub from_addr: Option<String>,
+    pub snippet: Option<String>,
     #[serde(with = "time::serde::rfc3339::option")]
     pub sent_at: Option<OffsetDateTime>,
     pub category: Option<String>,
@@ -55,7 +56,7 @@ pub async fn insert_if_absent(
 pub async fn list_pending(pool: &Pool) -> AppResult<Vec<SuggestedReply>> {
     let rows = sqlx::query_as::<_, SuggestedReply>(
         "SELECT s.id, s.message_id, m.account_id, s.rule_name_snapshot, s.intent_snapshot,
-                m.subject, m.from_addr, m.sent_at, m.category, m.priority, s.created_at
+                m.subject, m.from_addr, m.snippet, m.sent_at, m.category, m.priority, s.created_at
          FROM suggested_replies s
          JOIN messages m ON m.id = s.message_id
          WHERE s.status = 'pending'

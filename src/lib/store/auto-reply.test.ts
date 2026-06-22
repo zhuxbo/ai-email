@@ -22,6 +22,7 @@ const sug = (id: string): SuggestedReply => ({
   intentSnapshot: '意图',
   subject: 's',
   fromAddr: 'x@y.com',
+  snippet: null,
   sentAt: null,
   category: null,
   priority: null,

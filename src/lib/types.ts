@@ -210,6 +210,7 @@ export interface SuggestedReply {
   intentSnapshot: string;
   subject: string | null;
   fromAddr: string | null;
+  snippet: string | null;
   sentAt: string | null;
   category: Category | null;
   priority: number | null;
