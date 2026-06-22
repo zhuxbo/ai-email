@@ -74,9 +74,10 @@ pub async fn list_enabled_by_account(
     pool: &Pool,
     account_id: Uuid,
 ) -> AppResult<Vec<AutoReplyRule>> {
+    // 加 id 作次级排序键，使同毫秒内插入的多条规则首命中确定性可复现。
     let rows = sqlx::query_as::<_, AutoReplyRule>(&format!(
         "SELECT {COLS} FROM auto_reply_rules
-         WHERE account_id = ?1 AND enabled = 1 ORDER BY created_at ASC"
+         WHERE account_id = ?1 AND enabled = 1 ORDER BY created_at ASC, id ASC"
     ))
     .bind(account_id)
     .fetch_all(pool)

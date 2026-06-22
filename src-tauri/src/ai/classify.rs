@@ -214,29 +214,46 @@ async fn classify_chunk(
             tags: tags.clone(),
         };
 
-        // Persist
-        messages::update_classification(pool, msg.id, priority, &category).await?;
-        message_tags::replace_ai_tags(pool, msg.id, &tags).await?;
-        ai_results::insert(
-            pool,
-            &AiResultInsert {
-                message_id: msg.id,
-                kind: KIND.into(),
-                model: response.model.clone(),
-                prompt_hash: (*hash).to_string(),
-                output: serde_json::to_value(&classification)?,
-                input_tokens: i32::try_from(per_input).ok(),
-                output_tokens: i32::try_from(per_output).ok(),
-                cache_read_tokens: per_cache.and_then(|n| i32::try_from(n).ok()),
-            },
-        )
-        .await?;
+        // Persist — 若消息在分类进行中被并发删除，FK 约束会失败。
+        // 这是已付费但目标已消失的良性竞态；记 warn 后跳过，不阻断本批其余消息。
+        let persist_result: AppResult<()> = async {
+            messages::update_classification(pool, msg.id, priority, &category).await?;
+            message_tags::replace_ai_tags(pool, msg.id, &tags).await?;
+            ai_results::insert(
+                pool,
+                &AiResultInsert {
+                    message_id: msg.id,
+                    kind: KIND.into(),
+                    model: response.model.clone(),
+                    prompt_hash: (*hash).to_string(),
+                    output: serde_json::to_value(&classification)?,
+                    input_tokens: i32::try_from(per_input).ok(),
+                    output_tokens: i32::try_from(per_output).ok(),
+                    cache_read_tokens: per_cache.and_then(|n| i32::try_from(n).ok()),
+                },
+            )
+            .await?;
+            Ok(())
+        }
+        .await;
 
-        out.push(ClassifyResult {
-            message_id: msg.id,
-            classification,
-            source: "fresh",
-        });
+        match persist_result {
+            Ok(()) => {
+                out.push(ClassifyResult {
+                    message_id: msg.id,
+                    classification,
+                    source: "fresh",
+                });
+            }
+            Err(ref e) if is_fk_error(e) => {
+                tracing::warn!(
+                    message_id = %msg.id,
+                    error = %e,
+                    "classify: 写库 FK 失败（消息已被并发删除），已付费分类结果丢弃"
+                );
+            }
+            Err(e) => return Err(e),
+        }
     }
 
     Ok(out)
@@ -307,6 +324,16 @@ fn normalize_category(raw: &str) -> String {
 
 fn clamp_priority(p: i32) -> i32 {
     p.clamp(1, 3)
+}
+
+/// 判断错误是否为 SQLite FOREIGN KEY 约束失败（并发删除消息时可发生）。
+fn is_fk_error(e: &AppError) -> bool {
+    match e {
+        AppError::Db(sqlx::Error::Database(db_err)) => {
+            db_err.message().contains("FOREIGN KEY constraint failed")
+        }
+        _ => false,
+    }
 }
 
 fn truncate_for_log(s: &str) -> String {

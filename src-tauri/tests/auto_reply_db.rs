@@ -404,3 +404,117 @@ async fn successful_send_log_excludes_suggestion_from_pending() {
         "成功的 send_log 应把建议排出队列"
     );
 }
+
+// ── #42: list_enabled_by_account 同 created_at 下以 id 决定顺序 ──────────────────
+
+#[tokio::test]
+async fn list_enabled_by_account_deterministic_on_same_created_at() {
+    use ai_email_lib::db::auto_reply_rules as repo;
+    let pool = mem_pool().await;
+    let (account_id, _) = seed_account_and_message(&pool).await;
+
+    // 手动插入两条 created_at 完全相同的规则，id 不同
+    let id_a = Uuid::new_v4();
+    let id_b = Uuid::new_v4();
+    // 确保 id_a < id_b（UUID 比较用字节序）
+    let (id_first, id_second) = if id_a < id_b {
+        (id_a, id_b)
+    } else {
+        (id_b, id_a)
+    };
+    let same_ts = "2026-01-01T00:00:00.000+00:00";
+    sqlx::query(
+        "INSERT INTO auto_reply_rules (id, account_id, name, draft_intent, created_at)
+         VALUES (?1, ?2, 'rule-first', 'i', ?3)",
+    )
+    .bind(id_first)
+    .bind(account_id)
+    .bind(same_ts)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO auto_reply_rules (id, account_id, name, draft_intent, created_at)
+         VALUES (?1, ?2, 'rule-second', 'i', ?3)",
+    )
+    .bind(id_second)
+    .bind(account_id)
+    .bind(same_ts)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let rules = repo::list_enabled_by_account(&pool, account_id)
+        .await
+        .unwrap();
+    assert_eq!(rules.len(), 2);
+    assert_eq!(
+        rules[0].id, id_first,
+        "同 created_at 下 id 较小的规则应排在前"
+    );
+    assert_eq!(
+        rules[1].id, id_second,
+        "同 created_at 下 id 较大的规则应排在后"
+    );
+}
+
+// ── #67: insert_if_absent FK 失败 warn 不 panic，唯一约束冲突静默跳过 ─────────────
+
+#[tokio::test]
+async fn insert_if_absent_unique_conflict_is_silent() {
+    use ai_email_lib::db::suggested_replies as q;
+    let pool = mem_pool().await;
+    let (account_id, msg_id) = seed_account_and_message(&pool).await;
+    let rule_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO auto_reply_rules (id, account_id, name, draft_intent) VALUES (?1, ?2, 'r', 'i')",
+    )
+    .bind(rule_id)
+    .bind(account_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // 第一次应成功
+    q::insert_if_absent(&pool, msg_id, rule_id, "i", "r")
+        .await
+        .expect("first insert ok");
+    // 第二次 UNIQUE(message_id) 冲突，应静默跳过（不返回 Err）
+    q::insert_if_absent(&pool, msg_id, rule_id, "i", "r")
+        .await
+        .expect("second insert (unique conflict) should be silently skipped");
+
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM suggested_replies WHERE message_id = ?1")
+            .bind(msg_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 1, "唯一约束冲突后应仍只有 1 条建议");
+}
+
+#[tokio::test]
+async fn insert_if_absent_fk_failure_is_warned_not_panicked() {
+    use ai_email_lib::db::suggested_replies as q;
+    let pool = mem_pool().await;
+    let (_, msg_id) = seed_account_and_message(&pool).await;
+
+    // 使用一个不存在的 rule_id，触发 FK 违约
+    let nonexistent_rule_id = Uuid::new_v4();
+    let result = q::insert_if_absent(&pool, msg_id, nonexistent_rule_id, "i", "r").await;
+    // FK 违约应被 warn 并返回 Ok（不传播错误，不留孤儿行）
+    assert!(
+        result.is_ok(),
+        "FK 违约应 warn 后返回 Ok，不传播错误；got: {:?}",
+        result
+    );
+
+    // 不应有行被插入
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM suggested_replies WHERE message_id = ?1")
+            .bind(msg_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count, 0, "FK 违约后不应留下孤儿行");
+}

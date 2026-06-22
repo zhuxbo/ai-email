@@ -78,7 +78,11 @@ pub async fn insert(pool: &Pool, r: &AiResultInsert) -> AppResult<AiResult> {
         )
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
         ON CONFLICT (message_id, kind, prompt_hash) DO UPDATE
-        SET output = excluded.output
+        SET output             = excluded.output,
+            model              = excluded.model,
+            input_tokens       = excluded.input_tokens,
+            output_tokens      = excluded.output_tokens,
+            cache_read_tokens  = excluded.cache_read_tokens
         RETURNING id, message_id, kind, model, prompt_hash, output,
                   input_tokens, output_tokens, cache_read_tokens, created_at
         "#,
