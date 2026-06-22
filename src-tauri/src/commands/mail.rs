@@ -10,7 +10,7 @@ use crate::db::mailboxes::{self, Mailbox};
 use crate::db::messages::{self, MessageHeader};
 use crate::db::{self};
 use crate::error::{AppError, AppResult};
-use crate::imap::client::ImapClient;
+use crate::imap::client::{resolve_trash_mailbox, ImapClient};
 use crate::imap::parse;
 use crate::imap::sync::{self, SyncReport};
 use crate::keychain;
@@ -108,4 +108,99 @@ pub async fn message_body(state: State<'_, AppState>, id: Uuid) -> AppResult<Mes
 #[tauri::command]
 pub async fn smtp_send(state: State<'_, AppState>, draft: SendDraft) -> AppResult<SendReceipt> {
     smtp::send_draft(&state.db, &draft).await
+}
+
+/// `set_seen` / `set_flagged` 公共流程：解析 → connect → select → STORE → logout → 本地 flags 同步。
+async fn set_flag_impl(db: &db::Pool, id: Uuid, flag: &str, add: bool) -> AppResult<()> {
+    let msg = messages::get(db, id)
+        .await?
+        .ok_or_else(|| AppError::Config(format!("message {id} not found")))?;
+    let account = db::accounts::get(db, msg.account_id)
+        .await?
+        .ok_or_else(|| AppError::Config(format!("account {} not found", msg.account_id)))?;
+    let mailbox = mailboxes::get(db, msg.mailbox_id)
+        .await?
+        .ok_or_else(|| AppError::Config(format!("mailbox {} not found", msg.mailbox_id)))?;
+    let uid = u32::try_from(msg.imap_uid)
+        .map_err(|_| AppError::Imap(format!("invalid imap_uid: {}", msg.imap_uid)))?;
+
+    let account_id = account.id;
+    let auth = tokio::task::spawn_blocking(move || keychain::get_auth_code(account_id))
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
+    let port = u16::try_from(account.imap_port)
+        .map_err(|_| AppError::Imap(format!("invalid imap_port: {}", account.imap_port)))?;
+
+    let mut client = ImapClient::connect(&account.imap_host, port, &account.email, &auth).await?;
+    client.select(&mailbox.name).await?;
+    client.uid_set_flag(uid, flag, add).await?;
+    if let Err(e) = client.logout().await {
+        tracing::warn!(error = ?e, "imap logout failed (non-fatal)");
+    }
+
+    // 本地 flags 与服务端同步：在原 flags 基础上去重 add / remove。
+    let mut flags = msg.flags.clone();
+    let f = flag.to_string();
+    if add {
+        if !flags.contains(&f) {
+            flags.push(f);
+        }
+    } else {
+        flags.retain(|x| x != &f);
+    }
+    messages::update_flags(db, id, &flags).await
+}
+
+#[tauri::command]
+pub async fn message_set_seen(state: State<'_, AppState>, id: Uuid, seen: bool) -> AppResult<()> {
+    set_flag_impl(&state.db, id, "\\Seen", seen).await
+}
+
+#[tauri::command]
+pub async fn message_set_flagged(
+    state: State<'_, AppState>,
+    id: Uuid,
+    flagged: bool,
+) -> AppResult<()> {
+    set_flag_impl(&state.db, id, "\\Flagged", flagged).await
+}
+
+/// 删除 = 移到废纸篓（可恢复）。move 成功即逻辑成功；本地 remove 失败仅 warn 返 Ok
+/// （服务端权威态已变，宁留极罕见幽灵行也不让用户看到删除回退）。
+#[tauri::command]
+pub async fn message_delete(state: State<'_, AppState>, id: Uuid) -> AppResult<()> {
+    let db = &state.db;
+    let msg = messages::get(db, id)
+        .await?
+        .ok_or_else(|| AppError::Config(format!("message {id} not found")))?;
+    let account = db::accounts::get(db, msg.account_id)
+        .await?
+        .ok_or_else(|| AppError::Config(format!("account {} not found", msg.account_id)))?;
+    let mailbox = mailboxes::get(db, msg.mailbox_id)
+        .await?
+        .ok_or_else(|| AppError::Config(format!("mailbox {} not found", msg.mailbox_id)))?;
+    let uid = u32::try_from(msg.imap_uid)
+        .map_err(|_| AppError::Imap(format!("invalid imap_uid: {}", msg.imap_uid)))?;
+
+    let account_id = account.id;
+    let auth = tokio::task::spawn_blocking(move || keychain::get_auth_code(account_id))
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
+    let port = u16::try_from(account.imap_port)
+        .map_err(|_| AppError::Imap(format!("invalid imap_port: {}", account.imap_port)))?;
+
+    let mut client = ImapClient::connect(&account.imap_host, port, &account.email, &auth).await?;
+    let boxes = client.list_mailboxes().await?;
+    let trash = resolve_trash_mailbox(&boxes)
+        .ok_or_else(|| AppError::Imap("未找到废纸篓文件夹".to_string()))?;
+    client.select(&mailbox.name).await?;
+    client.uid_move(uid, &trash).await?;
+    if let Err(e) = client.logout().await {
+        tracing::warn!(error = ?e, "imap logout failed (non-fatal)");
+    }
+
+    if let Err(e) = messages::remove(db, id).await {
+        tracing::warn!(message_id = %id, error = ?e, "local remove after trash-move failed (non-fatal)");
+    }
+    Ok(())
 }
