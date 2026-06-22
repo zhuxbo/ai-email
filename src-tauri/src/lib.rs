@@ -13,11 +13,10 @@ pub mod keychain;
 pub mod smtp;
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 
 use tauri::Manager;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{watch, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -27,12 +26,14 @@ use crate::db::Pool;
 /// DB 连接+迁移的超时时限。慢盘/大库下防止 setup 永久阻塞。
 const DB_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Shared state attached to the Tauri app handle. Cloning the pool is cheap (`Arc` inside).
+/// Shared state attached to the Tauri app handle. Cloning the pool is cheap (Arc inside).
 pub struct AppState {
     pub db: Pool,
     /// Single-flight map：防止并发 message_body 请求重复开 IMAP 会话。
-    /// key = message id，value = 首个 in-flight 请求完成时 notify 等待者的信号量。
-    pub body_in_flight: Mutex<HashMap<Uuid, Arc<Notify>>>,
+    /// key = message id，value = watch receiver（初始 false，leader 完成后 send(true)）。
+    /// 迟到者克隆 receiver 后先检查当前值；已 true 直接读缓存，否则 changed().await 等待。
+    /// watch 持有最新值，leader 先完成也不丢唤醒（不同于 Notify::notify_waiters）。
+    pub body_in_flight: Mutex<HashMap<Uuid, watch::Receiver<bool>>>,
     /// 应用级取消令牌。退出时触发，通知所有持有 child token 的后台任务（classify/eval）停止。
     pub cancel: CancellationToken,
 }

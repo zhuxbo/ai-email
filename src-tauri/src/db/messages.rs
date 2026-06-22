@@ -221,6 +221,9 @@ pub async fn update_flags(pool: &Pool, id: Uuid, flags: &[String]) -> AppResult<
 /// - `add = false`：将 `flag` 从数组中移除（若不存在则 no-op）。
 ///
 /// 全程在单条 SQL 内完成，不需要先读出 flags 再写回。
+///
+/// 注意：`json_group_array` + `UNION` 会按值字典序重排 flags，不保留原 IMAP 顺序。
+/// IMAP flags 是无序集合（RFC 3501），语义上无害；但勿在此之外依赖 flags 数组的顺序。
 pub async fn update_flag_atomic(pool: &Pool, id: Uuid, flag: &str, add: bool) -> AppResult<()> {
     if add {
         sqlx::query(
