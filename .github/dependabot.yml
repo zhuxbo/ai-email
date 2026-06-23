@@ -6,6 +6,11 @@ updates:
       interval: weekly
       day: monday
     open-pull-requests-limit: 5
+    # 供应链冷却：仅提发布满 N 天的版本，与 CI 的 pnpm minimumReleaseAge(1 天)门对齐，
+    # 避免 dependabot 把 group PR bump 到刚发布的新包而撞门
+    # （@typescript-eslint 每周一发版，是高频触发源）。
+    cooldown:
+      default-days: 7
     groups:
       types:
         patterns:
