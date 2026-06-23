@@ -46,7 +46,6 @@ pub async fn mailboxes_list(
 /// (Sent, Drafts, Trash, etc.). Does not trigger AI classification or auto-reply evaluation.
 #[tauri::command]
 pub async fn mailbox_sync(
-    app: tauri::AppHandle,
     state: State<'_, AppState>,
     account_id: Uuid,
     mailbox_name: String,
@@ -59,7 +58,7 @@ pub async fn mailbox_sync(
         .await
         .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
 
-    sync::sync_mailbox(&state.db, &account, &auth, &mailbox_name, &app).await
+    sync::sync_mailbox(&state.db, &account, &auth, &mailbox_name).await
 }
 
 #[tauri::command]

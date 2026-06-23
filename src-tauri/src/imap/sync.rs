@@ -367,36 +367,16 @@ pub async fn sync_inbox(
 
 /// Sync a specific mailbox on demand (called when the user navigates to a non-INBOX folder).
 /// Does NOT kick off AI classification or auto-reply evaluation — those are INBOX-only.
-/// Emits `mail://synced` with the mailbox id so the frontend can refresh the message list.
+/// The frontend refresh is handled by the caller via the `mailboxSync(...).then(reload)` promise
+/// chain in `selectMailbox` — no event emission needed here.
 pub async fn sync_mailbox(
     pool: &Pool,
     account: &Account,
     auth_code: &SecretString,
     mailbox_name: &str,
-    app_handle: &AppHandle,
 ) -> AppResult<SyncReport> {
     let (report, _new_ids) = sync_mailbox_inner(pool, account, auth_code, mailbox_name).await?;
-
-    // Notify the frontend so it can refresh the current mailbox view.
-    if let Err(e) = app_handle.emit(
-        "mail://synced",
-        MailboxSyncedPayload {
-            account_id: account.id,
-            mailbox_name: mailbox_name.to_string(),
-        },
-    ) {
-        tracing::warn!(error = %e, "emit mail://synced failed (non-fatal)");
-    }
-
     Ok(report)
-}
-
-/// Payload for the `mail://synced` event emitted after a non-INBOX mailbox sync completes.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MailboxSyncedPayload {
-    pub account_id: uuid::Uuid,
-    pub mailbox_name: String,
 }
 
 #[cfg(test)]
