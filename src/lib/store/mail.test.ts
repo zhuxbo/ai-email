@@ -2,12 +2,14 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { useMailStore } from './mail';
 import { useComposeStore } from './compose';
+import type { MessageHeader } from '../types';
 vi.mock('../tauri', () => ({
   accountsList: vi.fn().mockResolvedValue([{ id: 'a1' }, { id: 'a2' }]),
   unifiedInbox: vi
     .fn()
     .mockResolvedValue({ messages: [{ id: 'm1', accountId: 'a1' }], errors: {} }),
   inboxSync: vi.fn().mockResolvedValue({ newMessageCount: 0, totalInMailbox: 0 }),
+  mailboxSync: vi.fn().mockResolvedValue({ newMessageCount: 0, totalInMailbox: 5 }),
   messageBody: vi
     .fn()
     .mockResolvedValue({ messageId: 'm1', textPlain: 'x', html: null, fetchedAt: '' }),
@@ -405,5 +407,107 @@ describe('#16 selectMessage 切换邮件重置 compose 上下文', () => {
     // 草稿应被 reset
     expect(useComposeStore.getState().bodyForeign).toBe('');
     expect(useComposeStore.getState().replyContext).toBeNull();
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// Phase 15 多信箱路径单测
+// 补全 selectedMailboxId 非 null 时走 messagesList 路径的分支覆盖，
+// 并验证 selectMailbox 切换迟到守卫正确工作。
+// ────────────────────────────────────────────────────────────────────────────
+
+const INBOX_BOX = { id: 'box-inbox', name: 'INBOX', specialUse: 'inbox', accountId: 'a1' };
+const SENT_BOX = { id: 'box-sent', name: 'Sent', specialUse: 'sent', accountId: 'a1' };
+
+describe('mail store 多信箱路径 (Phase 15)', () => {
+  beforeEach(() => {
+    useMailStore.setState({
+      accounts: [{ id: 'a1' }] as never,
+      selectedAccountId: 'a1',
+      mailboxes: [INBOX_BOX, SENT_BOX] as never,
+      selectedMailboxId: INBOX_BOX.id,
+      messages: [],
+      selectedMessageId: null,
+      messageOpenSeq: 0,
+      body: null,
+      accountErrors: {},
+      error: null,
+    } as never);
+    vi.clearAllMocks();
+    vi.mocked(tauri.messagesList).mockResolvedValue([{ id: 'm-s1', accountId: 'a1' }] as never);
+    vi.mocked(tauri.mailboxSync).mockResolvedValue({ newMessageCount: 0, totalInMailbox: 1 });
+  });
+
+  it('selectMailbox 切非 INBOX 信箱：调用 mailboxSync + messagesList，不走 unifiedInbox', async () => {
+    await useMailStore.getState().selectMailbox(SENT_BOX.id);
+
+    // 单信箱路径：messagesList 按 mailboxId 拉取
+    expect(tauri.messagesList).toHaveBeenCalledWith(SENT_BOX.id, 50, 0);
+    // 非 INBOX 触发按需同步
+    expect(tauri.mailboxSync).toHaveBeenCalledWith('a1', 'Sent');
+    // 聚合路径绝不应被调用
+    expect(tauri.unifiedInbox).not.toHaveBeenCalled();
+  });
+
+  it('INBOX 选中走单信箱 messagesList 路径，不走 unifiedInbox', async () => {
+    // selectedMailboxId 已是 INBOX_BOX.id（beforeEach 默认），INBOX 不触发 mailboxSync
+    vi.mocked(tauri.messagesList).mockResolvedValue([{ id: 'm-i1', accountId: 'a1' }] as never);
+
+    await useMailStore.getState().reloadMessages();
+
+    expect(tauri.messagesList).toHaveBeenCalledWith(INBOX_BOX.id, 50, 0);
+    expect(tauri.unifiedInbox).not.toHaveBeenCalled();
+    expect(useMailStore.getState().messages[0]?.id).toBe('m-i1');
+  });
+
+  it('聚合视图（selectedAccountId=null）仍走 unifiedInbox 不变', async () => {
+    useMailStore.setState({
+      selectedAccountId: null,
+      selectedMailboxId: null,
+      mailboxes: [],
+    } as never);
+    vi.mocked(tauri.unifiedInbox).mockResolvedValue({
+      messages: [{ id: 'm-u1', accountId: 'a1' }],
+      errors: {},
+    } as never);
+
+    await useMailStore.getState().reloadMessages();
+
+    expect(tauri.unifiedInbox).toHaveBeenCalled();
+    expect(tauri.messagesList).not.toHaveBeenCalled();
+    expect(useMailStore.getState().messages[0]?.id).toBe('m-u1');
+  });
+
+  it('切换迟到守卫：reloadMessages 迟到（mailboxId 已变）时不覆盖新信箱列表', async () => {
+    // 直接测试 reloadMessages 里的 selectedMailboxId 守卫：
+    // 1. store 设置 selectedMailboxId = SENT_BOX（A）
+    // 2. 发起 reloadMessages()（内部调用 messagesList(SENT_BOX)，请求挂起）
+    // 3. 在请求返回前，将 selectedMailboxId 切到 INBOX_BOX（B）并拉到 B 的数据
+    // 4. A 的响应迟到 resolve → 守卫 selectedMailboxId===SENT_BOX 不成立 → 不覆盖
+    let resolveA!: (msgs: MessageHeader[] | PromiseLike<MessageHeader[]>) => void;
+    vi.mocked(tauri.messagesList).mockImplementationOnce(
+      () =>
+        new Promise((res) => {
+          resolveA = res;
+        }),
+    );
+
+    // A：切到 Sent，发起 reloadMessages（挂起）
+    useMailStore.setState({ selectedMailboxId: SENT_BOX.id } as never);
+    const pendingA = useMailStore.getState().reloadMessages();
+
+    // 模拟用户已切到 B（INBOX）并完成加载
+    useMailStore.setState({
+      selectedMailboxId: INBOX_BOX.id,
+      messages: [{ id: 'm-inbox', accountId: 'a1' }] as never,
+    } as never);
+
+    // A 的迟到响应 resolve — 守卫：get().selectedMailboxId（INBOX）!== SENT_BOX → 不写入
+    resolveA([{ id: 'm-sent-late', accountId: 'a1' }] as unknown as MessageHeader[]);
+    await pendingA;
+
+    // B 的列表不被覆盖
+    expect(useMailStore.getState().messages[0]?.id).toBe('m-inbox');
+    expect(useMailStore.getState().selectedMailboxId).toBe(INBOX_BOX.id);
   });
 });
