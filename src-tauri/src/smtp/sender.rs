@@ -231,8 +231,8 @@ fn wrap_msgid(id: &str) -> String {
 ///
 /// This produces a complete chain: `<a> <b> … <c>` where `<c>` is the message being replied to.
 ///
-/// NOTE: References folding (RFC 5322 long-line wrap) is not implemented; most MTA accept
-/// long unfolded References headers. MVP non-issue.
+/// NOTE: lettre 在序列化时自动将 References 头按 RFC 5322 折叠（每个 <id> 独占一行，
+/// CRLF + 前导空格），无需手动处理。
 fn build_message(
     account: &Account,
     draft: &SendDraft,
@@ -560,5 +560,108 @@ mod tests {
         let resp = Response::new(code, vec![]);
         let formatted = format_smtp_response(&resp);
         assert_eq!(formatted, "250", "code-only response: {formatted}");
+    }
+
+    // ── References 长链折叠行为（由 lettre 自动处理）────────────────────────────
+
+    /// lettre 对超长 References（>20 个 id，总长远超 998 字节）自动折叠：
+    /// 每个 <id> 独占一行（CRLF + 前导空格），每行 ≤ 998 字节，且每个 <id> 完整不被拆断。
+    #[test]
+    fn references_long_chain_is_folded_by_lettre() {
+        let account = dummy_account("alice@example.com");
+        let draft = draft_base();
+
+        // 22 个 id，每个 68 字节（含角括号），总长 > 998；DB 中无括号形式存储
+        let ids: Vec<String> = (1..=22)
+            .map(|i| format!("msg-{i:03}@very-long-hostname-for-folding-test.example.com"))
+            .collect();
+        let original_refs = ids[..21].join(" ");
+        let rfc_id = &ids[21];
+
+        let msg = build_message(
+            &account,
+            &draft,
+            &draft.to,
+            &draft.cc,
+            Some(rfc_id),
+            Some(&original_refs),
+        )
+        .expect("build_message must succeed");
+
+        let raw = String::from_utf8_lossy(&msg.formatted()).into_owned();
+
+        // 提取 References 所有折叠行（首行 + CRLF+空白延续行）
+        let mut in_refs = false;
+        let mut refs_lines: Vec<&str> = Vec::new();
+        for line in raw.split("\r\n") {
+            if line.starts_with("References:") {
+                in_refs = true;
+                refs_lines.push(line);
+            } else if in_refs && (line.starts_with(' ') || line.starts_with('\t')) {
+                refs_lines.push(line);
+            } else if in_refs {
+                break;
+            }
+        }
+
+        // 断言 1：已折叠为多行（lettre 自动折叠）
+        assert!(
+            refs_lines.len() > 1,
+            "22 个超长 id 的 References 应被折叠为多行，实际行数: {}",
+            refs_lines.len()
+        );
+
+        // 断言 2：每行不超过 998 字节（RFC 5322 硬上限）
+        for (i, line) in refs_lines.iter().enumerate() {
+            assert!(
+                line.len() <= 998,
+                "References 行[{i}] 超过 998 字节：{} 字节",
+                line.len()
+            );
+        }
+
+        // 断言 3：unfold 后语义不变——所有 22 个 id 完整保留，无拆断
+        let unfolded = refs_lines.join(" "); // 模拟 unfold（实际应去掉 CRLF+空白，此处拼接等效）
+        for id in &ids {
+            let wrapped = format!("<{id}>");
+            assert!(unfolded.contains(&wrapped), "unfold 后缺失 id {wrapped}");
+        }
+
+        // 断言 4：无双角括号（幂等性）
+        assert!(!raw.contains("<<"), "序列化输出不应出现双角括号");
+    }
+
+    /// 短链（单个 id）：References 为单行，无折叠。
+    #[test]
+    fn references_short_chain_is_single_line() {
+        let account = dummy_account("alice@example.com");
+        let draft = draft_base();
+        let rfc_id = "single@example.com";
+
+        let msg = build_message(&account, &draft, &draft.to, &draft.cc, Some(rfc_id), None)
+            .expect("build_message must succeed");
+
+        let raw = String::from_utf8_lossy(&msg.formatted()).into_owned();
+
+        // 找到 References 行；短链应只有一行
+        let refs_line = raw
+            .split("\r\n")
+            .find(|l| l.starts_with("References:"))
+            .expect("References 头必须存在");
+        let next_is_continuation = raw
+            .split("\r\n")
+            .skip_while(|l| !l.starts_with("References:"))
+            .nth(1)
+            .map(|l| l.starts_with(' ') || l.starts_with('\t'))
+            .unwrap_or(false);
+
+        assert!(
+            !next_is_continuation,
+            "短链 References 不应折叠，但检测到折叠延续行：{refs_line}"
+        );
+        assert!(
+            refs_line.contains("<single@example.com>"),
+            "References 应含 <single@example.com>：{refs_line}"
+        );
     }
 }
