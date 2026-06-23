@@ -149,10 +149,12 @@ vi.mock('./components/message-list', () => ({
 }));
 
 import App from './App';
-import { onMailClassified, onAutoReplyUpdated } from './lib/tauri';
+import { onMailClassified, onAutoReplyUpdated, onDbReady, onDbError } from './lib/tauri';
 
 const onMailClassifiedMock = vi.mocked(onMailClassified);
 const onAutoReplyUpdatedMock = vi.mocked(onAutoReplyUpdated);
+const onDbReadyMock = vi.mocked(onDbReady);
+const onDbErrorMock = vi.mocked(onDbError);
 
 describe('App — event-driven subscription wiring', () => {
   beforeEach(() => {
@@ -257,6 +259,49 @@ describe('App — event-driven subscription wiring', () => {
     // mounted 守卫应在 resolve 时发现组件已卸载，立即调用 unlisten fn
     expect(mockUnlistenClassified).toHaveBeenCalledTimes(1);
     expect(mockUnlistenAutoReply).toHaveBeenCalledTimes(1);
+  });
+
+  it('db effect: unmount 早于 Promise resolve 时 guard 清理孤儿 listener（StrictMode 对抗）', async () => {
+    // 复现 db effect 竞态路径：onDbReady/onDbError 的 Promise 尚未 resolve，组件已卸载。
+    // mounted 守卫（guard.mounted=false）应在 resolve 时立即调用返回的 unlisten fn 清理孤儿监听器。
+
+    let resolveReady!: (fn: () => void) => void;
+    let resolveError!: (fn: () => void) => void;
+
+    const mockUnlistenDbReady = vi.fn<() => void>();
+    const mockUnlistenDbError = vi.fn<() => void>();
+
+    const delayedReadyPromise = new Promise<() => void>((res) => {
+      resolveReady = res;
+    });
+    const delayedErrorPromise = new Promise<() => void>((res) => {
+      resolveError = res;
+    });
+
+    onDbReadyMock.mockReturnValueOnce(delayedReadyPromise);
+    onDbErrorMock.mockReturnValueOnce(delayedErrorPromise);
+
+    let unmount!: () => void;
+    act(() => {
+      const result = render(<App />);
+      unmount = result.unmount;
+    });
+
+    // 先 unmount，此时 db listener Promise 还未 resolve
+    act(() => {
+      unmount();
+    });
+
+    // 再 resolve（模拟 Tauri IPC 在卸载后才返回 unlisten fn）
+    await act(async () => {
+      resolveReady(mockUnlistenDbReady);
+      resolveError(mockUnlistenDbError);
+      await Promise.resolve();
+    });
+
+    // guard.mounted=false 分支应立即调用两个 unlisten fn，不留孤儿监听器
+    expect(mockUnlistenDbReady).toHaveBeenCalledTimes(1);
+    expect(mockUnlistenDbError).toHaveBeenCalledTimes(1);
   });
 });
 
