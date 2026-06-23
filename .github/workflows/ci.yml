@@ -139,7 +139,7 @@ jobs:
       # tauri's generated project targets compileSdk = 36; install it explicitly
       # so the build never depends on AGP's best-effort auto-download.
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
 
       - name: Install SDK platform + build-tools (compileSdk = 36)
         run: |
