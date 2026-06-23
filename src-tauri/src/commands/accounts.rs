@@ -28,7 +28,9 @@ const KNOWN_PROVIDERS: &[&str] = &["qq", "imap"];
 
 /// What the add-account form sends across the FFI. `authCode` is split out and never
 /// round-tripped back to the frontend.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// `Debug` is implemented manually so that `auth_code` never appears in log output.
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AddAccountForm {
     pub email: String,
@@ -39,6 +41,21 @@ pub struct AddAccountForm {
     pub smtp_host: String,
     pub smtp_port: i32,
     pub auth_code: String,
+}
+
+impl std::fmt::Debug for AddAccountForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AddAccountForm")
+            .field("email", &self.email)
+            .field("display_name", &self.display_name)
+            .field("provider", &self.provider)
+            .field("imap_host", &self.imap_host)
+            .field("imap_port", &self.imap_port)
+            .field("smtp_host", &self.smtp_host)
+            .field("smtp_port", &self.smtp_port)
+            .field("auth_code", &"[redacted]")
+            .finish()
+    }
 }
 
 /// Validate port number is in the legal TCP range 1–65535.
@@ -184,4 +201,37 @@ mod tests {
     // that check the DB row is gone after a remove call.  The keychain path cannot be
     // tested without a real OS keychain, so we document the invariant here rather than
     // mock the entire Tauri State machinery. ----
+
+    // ---- credentials must not appear in Debug output (#2) ----
+
+    #[test]
+    fn add_account_form_debug_redacts_auth_code() {
+        let form = super::AddAccountForm {
+            email: "user@qq.com".into(),
+            display_name: Some("Test User".into()),
+            provider: "qq".into(),
+            imap_host: "imap.qq.com".into(),
+            imap_port: 993,
+            smtp_host: "smtp.qq.com".into(),
+            smtp_port: 465,
+            auth_code: "super_secret_auth_code".into(),
+        };
+        let debug = format!("{:?}", form);
+        assert!(
+            !debug.contains("super_secret_auth_code"),
+            "auth_code must not appear in Debug"
+        );
+        assert!(
+            debug.contains("[redacted]"),
+            "Debug must show [redacted] for auth_code"
+        );
+        assert!(
+            debug.contains("user@qq.com"),
+            "non-secret fields must still appear in Debug"
+        );
+        assert!(
+            debug.contains("imap.qq.com"),
+            "non-secret fields must still appear in Debug"
+        );
+    }
 }

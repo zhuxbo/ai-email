@@ -26,7 +26,9 @@ use crate::keychain;
 use crate::AppState;
 
 /// Add-model form. `apiKey` is split out and goes straight to the keychain.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// `Debug` is implemented manually so that `api_key` never appears in log output.
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AddModelForm {
     pub display_name: String,
@@ -34,6 +36,18 @@ pub struct AddModelForm {
     pub model_id: String,
     pub base_url: Option<String>,
     pub api_key: String,
+}
+
+impl std::fmt::Debug for AddModelForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AddModelForm")
+            .field("display_name", &self.display_name)
+            .field("provider", &self.provider)
+            .field("model_id", &self.model_id)
+            .field("base_url", &self.base_url)
+            .field("api_key", &"[redacted]")
+            .finish()
+    }
 }
 
 /// Validate that a `base_url`, if provided, uses HTTPS and has a non-empty host.
@@ -269,5 +283,35 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(url, "https://x");
+    }
+
+    // ---- credentials must not appear in Debug output (#2) ----
+
+    #[test]
+    fn add_model_form_debug_redacts_api_key() {
+        let form = super::AddModelForm {
+            display_name: "Claude Sonnet".into(),
+            provider: "anthropic".into(),
+            model_id: "claude-sonnet-4-6".into(),
+            base_url: Some("https://api.anthropic.com".into()),
+            api_key: "sk-ant-super_secret_key_12345".into(),
+        };
+        let debug = format!("{:?}", form);
+        assert!(
+            !debug.contains("sk-ant-super_secret_key_12345"),
+            "api_key must not appear in Debug"
+        );
+        assert!(
+            debug.contains("[redacted]"),
+            "Debug must show [redacted] for api_key"
+        );
+        assert!(
+            debug.contains("Claude Sonnet"),
+            "non-secret fields must still appear in Debug"
+        );
+        assert!(
+            debug.contains("anthropic"),
+            "non-secret fields must still appear in Debug"
+        );
     }
 }
