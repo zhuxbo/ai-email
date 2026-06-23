@@ -18,18 +18,19 @@ git diff --cached --stat
 
 对照下表逐项判「是/否」，决定后面重点跑什么。**不确定一律视为「是」**。
 
-| 维度                                           | 涉及？   | 触发                                                 |
-| ---------------------------------------------- | -------- | ---------------------------------------------------- |
-| `src-tauri/src/commands/`                      | 是/否    | #1 panic 跨 FFI 必查；命令返回 `Result<T, AppError>` |
-| `src-tauri/src/imap/`、`smtp/`                 | 是/否    | #3 TLS；集成测试用 in-memory，**绝不碰真 QQ**        |
-| `src-tauri/src/ai/`                            | 是/否    | #3 TLS；token 成本；改 prompt 见下一行               |
-| `src-tauri/src/ai/prompts.rs`                  | 是/否    | #6 prompt 改动用语义/结构断言，非字面比较            |
-| `src-tauri/migrations/` + `src/db/`            | 是/否    | #4 迁移幂等 + SQLite 方言；改结构实跑迁移验证生效    |
-| 凭据面（secrecy/keyring/auth_code/api_key）    | 是/否    | #2 凭据泄露核心查                                    |
-| `src/`（前端）                                 | 是/否    | #5 不直调 invoke；prettier/eslint/tsc/vitest         |
-| 删除了类型/函数/命令/表/字段/配置              | 是/否    | §1.5 删除审核必跑                                    |
-| `.github/workflows`、`lefthook.yml` 等门禁配置 | 是/否    | 改后确认无 job/检查被无意短路或禁用                  |
-| **兜底**：上述未覆盖的改动路径                 | 文件清单 | 逐个声明归入上面哪行，或写一句「确认无触发」，不留空 |
+| 维度                                            | 涉及？   | 触发                                                        |
+| ----------------------------------------------- | -------- | ----------------------------------------------------------- |
+| `src-tauri/src/commands/`                       | 是/否    | #1 panic 跨 FFI 必查；命令返回 `Result<T, AppError>`        |
+| `src-tauri/src/imap/`、`smtp/`                  | 是/否    | #3 TLS；集成测试用 in-memory，**绝不碰真 QQ**               |
+| `src-tauri/src/ai/`                             | 是/否    | #3 TLS；token 成本；#11 响应解析降级；改 prompt 见下一行    |
+| `src-tauri/src/ai/prompts.rs`                   | 是/否    | #6 prompt 改动用语义/结构断言，非字面比较                   |
+| `src-tauri/migrations/` + `src/db/`             | 是/否    | #4 迁移幂等 + SQLite 方言；改结构实跑迁移验证生效           |
+| 凭据面（secrecy/keyring/auth_code/api_key）     | 是/否    | #2 凭据泄露核心查                                           |
+| `src/`（前端）                                  | 是/否    | #5 不直调 invoke；prettier/eslint/tsc/vitest                |
+| `src/lib/store/`、`src/components/`（前端并发） | 是/否    | #10 乐观更新精准回滚 / 异步竞态守卫 /「同对象并发」对抗测试 |
+| 删除了类型/函数/命令/表/字段/配置               | 是/否    | §1.5 删除审核必跑                                           |
+| `.github/workflows`、`lefthook.yml` 等门禁配置  | 是/否    | 改后确认无 job/检查被无意短路或禁用                         |
+| **兜底**：上述未覆盖的改动路径                  | 文件清单 | 逐个声明归入上面哪行，或写一句「确认无触发」，不留空        |
 
 **棘轮规则**：判「是」的行要降级须附一行理由；不确定只能升不能降。
 
@@ -115,7 +116,9 @@ git status --short | grep '^??'
 
 **数据**：迁移是否丢数据 / 能否在线平滑执行；`send_log` 审计行只增不删；缓存键（`prompt_hash`）是否含必要区分量（target/intent），防碰撞串味。
 
-**兼容**：Rust serde 形状改动是否同步 `types.ts`；命令签名变更是否影响 `tauri.ts` 封装与前端调用。
+**兼容**：Rust serde 形状改动是否同步 `types.ts`；命令签名变更是否影响 `tauri.ts` 封装与前端调用；跨层数据**真实形态**一致（如 message-id 经 mail-parser 剥 `<>`、`internal_date` 线上恒 NULL —— 别信单元假设，追生产真实值）。
+
+**并发/竞态（#10）**：前端乐观更新失败是否精准回滚单项（非整列快照）；异步响应（AI 起草/翻译、邮件/信箱切换）是否有请求标识 / 迟到守卫防陈旧覆盖；single-flight 是否用持状态原语不丢唤醒；useEffect 订阅是否 mounted 守卫清理（StrictMode 双订阅）；后端 async 是否有 TOCTOU、后台 spawn 是否可取消；是否有「同对象并发」对抗测试（仅测「不同对象」会绕过）。
 
 **性能/成本**：AI 调用 token 上限（正文截断）；批量分类 ≤20/请求；大邮箱查询走索引。
 

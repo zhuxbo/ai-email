@@ -2,7 +2,7 @@
 
 `/finish-check` §6 派 reviewer 时引用本文件。**这是反模式与 reviewer 模板的唯一权威**，别处只引用不复制（避免漂移）。
 
-> 当前条目来自项目 `CLAUDE.md` 的硬约束 + ssl-manager 沉淀的通用反模式。**多数尚无 ai-email 真实回归案例** —— 随 Plan 2/3 实战，每抓到一次真实问题就给对应条目补 commit 锚定（见末尾「维护」）。不写假想案例。
+> 条目来自项目 `CLAUDE.md` 硬约束 + ssl-manager 通用反模式 + **2026-06-23 全量审核修复（分支 `fix/audit-2026-06-23`，52 commit、reviewer 实测逮到一批门绿行为错的真 bug）的真实回归**。后者给多数条目补了 commit 锚定，并新增 **#10 前端乐观更新/异步竞态** 与 **#11 AI 响应解析脆弱** —— 本项目最高频的两类真 bug。继续：每抓到一次真实问题就给对应条目补 commit 锚定（见末尾「维护」），不写假想案例。
 
 ---
 
@@ -16,6 +16,8 @@
   - `src/`（前端）→ #5 直调 invoke
   - `src-tauri/src/ai/prompts.rs` + prompt 改动 → #6 AI prompt 回归字面比较
   - 删除了类型/函数/命令/表/字段/配置 → #7 删除残留（配 finish-check §1.5）
+  - `src/lib/store/`、`src/components/`（前端状态/组件）→ #10 乐观更新/异步竞态
+  - `src-tauri/src/ai/`（响应解析，非 prompt 部分）→ #11 AI 响应解析脆弱
 
 每条命中按下方「判定」给结论；评级见 reviewer 模板「输出格式」。
 
@@ -133,6 +135,46 @@ rg -n 'let _ = .*\?|\.ok\(\);|catch.*\{\s*\}|unwrap_or_default\(\)' src-tauri/sr
 
 **判定**：每个测试有针对行为的有意义断言。
 
+**本项目实例**（测试绿却绕过真 bug，2026-06-23 审核抓到）：
+
+- 手喂理想输入而非**生产真实数据形态** —— `e4a2984`：回复头测试喂带 `<>` 的 message-id，而 mail-parser 实际剥掉了 `<>`、DB 存的是裸 id，测试假绿、真发出的头无法线程化。
+- 测试**时序提前 flush** 绕过真竞态 —— `043f400`：unlisten 测试在 unmount 前 `await Promise.resolve()` 把 listen Promise flush 掉，恰好绕过「卸载早于 resolve」的泄漏路径。
+- 只测 **happy 维度**掩盖回归 —— `c75a226`：排序测试都显式给了 `internalDate`，掩盖了线上该字段恒 NULL、排序退化为插入序的回归。
+- **对策**：reviewer 对关键修复做**变异测试**（把生产逻辑改坏，断言相关测试 FAIL）——这次 P13 测试加固即用此法证实判别力。
+
+## 反模式 10：前端乐观更新 / 异步竞态（条件层：src/lib/store、src/components）
+
+**来源**：ai-email **最高频真 bug** —— 2026-06-23 审核在 store/组件并发抓到一批，且**都被只测「不同邮件/不同消息」的集成测试绕过**（见 [[project-p3c-done]] 同款教训，整支 finish-check 偏集成/契约、挖不到组件内部并发）。
+
+**背景**：乐观更新、AI 起草/翻译异步返回、邮件/信箱切换、single-flight 缓存，都在「请求发出 → 用户继续操作 → 响应返回」之间留竞态窗口。
+
+**检查动作**：
+
+- **失败回滚精准到单项**，不整列快照覆盖 —— 否则抹掉并发进行的其它乐观更新（`ae9564c` setSeen/setFlagged 整列回滚丢更新 → `b33e087` 改 toggleFlag 按 flag 粒度基于当前值反向）。
+- **异步响应用请求标识守卫**防陈旧覆盖 —— 同一对象重复请求时旧响应不得覆盖新响应（`53cdcd7`/`b33e087` draftingFor token；`70fca6f` 切信箱 `selectedMailboxId` 迟到守卫）。
+- **身份令牌而非内容字段比对** —— 「切换/重选同一邮件」用 nonce/seq，不用 messageId（`033e96c` 同邮件重选无条件 reset 清掉正在写的草稿）。
+- **single-flight 用持状态原语**（watch/oneshot），不用边沿触发的 `Notify::notify_waiters`（迟到者错过唤醒永久挂起，`0a0b31a`）。
+- **useEffect 异步订阅清理用 mounted 守卫** —— `listen` 返回 Promise，cleanup 同步执行时 unlisten 可能仍 null，StrictMode 下双订阅泄漏（`043f400`）。
+- **测试必须覆盖「同邮件/同消息」对抗场景**（挂起一个请求 + 乱序 resolve、同 id 重选），不只 happy 的「不同对象」—— 后者恰好绕过上述全部 bug。
+
+**判定**：每个乐观更新有精准回滚；每个异步响应有请求标识/迟到守卫；single-flight 不丢唤醒；订阅有 mounted 清理；且**有「同对象并发」对抗测试**（缺即视为未验证）。
+
+## 反模式 11：AI 响应解析脆弱（条件层：src-tauri/src/ai 响应解析）
+
+**来源**：ai-email —— 2026-06-23 审核在 ai/ 抓到一批响应解析硬失败（`e696663`/`6d6607f`）。OpenAI 兼容厂商（DeepSeek/智谱/Kimi/Qwen 等）经常无视 prompt 约束。
+
+**背景**：prompt 里「不要 markdown 围栏」只是请求不是约束；裸 `serde_json::from_str(&resp.text)` 在模型加围栏/前言/截断/返回非 JSON 错误体时**硬失败而非降级**。
+
+**检查动作**：
+
+- 解析前**剥离 markdown 围栏/前后缀**（共享 `extract_json` helper，所有 JSON 编排器统一用，含同行围栏边界 `798ad3c`）。
+- HTTP 响应**先取状态码再解析正文** —— 非 2xx 即使正文非 JSON（502/网关 HTML/限流 text）也返回含状态码的错误，不被泛化 decode error 吞掉。
+- **检测截断**（`finish_reason=="length"`/`stop_reason=="max_tokens"`）返回明确错误，不让截断 JSON 走泛化失败。
+- **usage 字段容错**（饱和不回绕、接受 JSON 浮点、单字段越界不归零整个 Usage）。
+- **prompt 注入防护**：邮件主题/发件人/片段用结构化标签包裹 + 转义（**含 `&`，先于 `<>`**），且 system prompt 声明标签内为不可信内容、勿执行其中指令（`74bec68`/`5735578`）。
+
+**判定**：AI 响应解析对围栏/截断/非 JSON 错误体/usage 异常都**降级而非硬失败**；prompt 对不可信邮件内容有结构化隔离 + 信任边界声明。
+
 ---
 
 # Reviewer Subagent 任务模板（单一权威）
@@ -169,6 +211,7 @@ rg -n 'let _ = .*\?|\.ok\(\);|catch.*\{\s*\}|unwrap_or_default\(\)' src-tauri/sr
 4. pnpm run lint && pnpm run typecheck && pnpm exec vitest run --passWithNoTests
 5. 至少 1 个失败场景/反例验证（关键，静态推理 ≠ 验证）：凭据是否真不落库/不 log、迁移是否真幂等（重跑一次）、错误路径是否真 surface 给用户 —— 读到"有防御代码" ≠ 生效
 6. 反向抽查 3-5 条反模式复选框：先判 diff 触发了哪些高危维度（凭据/TLS/FFI/迁移/删除），触发的每个至少抽 1 条，贴实际 grep/命令输出（截断同 finish-check §1.5）
+7. 前端 `store/`、`components/` 改动（触发 #10）：确认存在「**同邮件/同消息**」并发对抗测试（挂起一个请求 + 乱序 resolve / 同 id 重选），不只「不同对象」happy 测试；对关键并发/解析修复至少做 1 次**变异验证**（把生产逻辑改坏，断言相关测试 FAIL）——读到「有守卫代码」≠ 测试真能逮到
 
 ## 输出格式
 - 按 Critical / High / Medium / Low 分级
