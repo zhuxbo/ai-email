@@ -6,13 +6,16 @@ import { useBreakpoint } from '../lib/hooks/use-breakpoint';
 import { useUiStore } from '../lib/store/ui';
 import { useMailStore } from '../lib/store/mail';
 import { useComposeStore } from '../lib/store/compose';
-import type { Account } from '../lib/types';
+import type { Account, Mailbox } from '../lib/types';
 
 interface NavProps {
   accounts: Account[];
   selectedAccountId: string | null;
+  mailboxes: Mailbox[];
+  selectedMailboxId: string | null;
   syncing: boolean;
   onSelectAccount: (id: string | null) => void;
+  onSelectMailbox: (mailboxId: string) => void;
   onAddAccount: () => void;
   onSync: () => void;
   onRemoveAccount: (id: string) => void;

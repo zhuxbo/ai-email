@@ -19,6 +19,9 @@ function App() {
   const loadAccounts = useMailStore((s) => s.loadAccounts);
   const accounts = useMailStore((s) => s.accounts);
   const selectedAccountId = useMailStore((s) => s.selectedAccountId);
+  const mailboxes = useMailStore((s) => s.mailboxes);
+  const selectedMailboxId = useMailStore((s) => s.selectedMailboxId);
+  const selectMailbox = useMailStore((s) => s.selectMailbox);
   const messageOpenSeq = useMailStore((s) => s.messageOpenSeq);
   const syncing = useMailStore((s) => s.syncing);
   const setFilter = useMailStore((s) => s.setFilter);
@@ -108,8 +111,11 @@ function App() {
         nav={{
           accounts,
           selectedAccountId,
+          mailboxes,
+          selectedMailboxId,
           syncing,
           onSelectAccount: (id) => void setFilter(id),
+          onSelectMailbox: (mailboxId) => void selectMailbox(mailboxId),
           onAddAccount: () => {
             setAddOpen(true);
           },

@@ -45,6 +45,10 @@ export async function inboxSync(accountId: string): Promise<SyncReport> {
   return invoke('inbox_sync', { accountId });
 }
 
+export async function mailboxSync(accountId: string, mailboxName: string): Promise<SyncReport> {
+  return invoke('mailbox_sync', { accountId, mailboxName });
+}
+
 export async function mailboxesList(accountId: string): Promise<Mailbox[]> {
   return invoke('mailboxes_list', { accountId });
 }

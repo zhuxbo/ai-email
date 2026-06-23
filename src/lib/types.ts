@@ -14,6 +14,8 @@ export interface Account {
   lastSyncedAt: string | null;
 }
 
+export type SpecialUse = 'inbox' | 'sent' | 'drafts' | 'trash' | 'junk';
+
 export interface Mailbox {
   id: string;
   accountId: string;
@@ -22,6 +24,8 @@ export interface Mailbox {
   uidValidity: number | null;
   uidNext: number | null;
   lastSyncedAt: string | null;
+  /** Detected special-use role; null means regular folder. */
+  specialUse: SpecialUse | null;
 }
 
 export type Category = 'personal' | 'work' | 'notification' | 'promotion' | 'spam';

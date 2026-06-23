@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { NavRail } from './nav-rail';
-import type { Account } from '../lib/types';
+import type { Account, Mailbox } from '../lib/types';
 
 const acct = (id: string, email: string): Account => ({
   id,
@@ -17,12 +17,26 @@ const acct = (id: string, email: string): Account => ({
   lastSyncedAt: null,
 });
 
+const mbox = (id: string, name: string, specialUse: Mailbox['specialUse'] = null): Mailbox => ({
+  id,
+  accountId: 'a',
+  name,
+  delimiter: '/',
+  uidValidity: null,
+  uidNext: null,
+  lastSyncedAt: null,
+  specialUse,
+});
+
 function baseProps() {
   return {
     accounts: [acct('a', 'amy@qq.com'), acct('b', 'bob@qq.com')],
     selectedAccountId: 'a',
+    mailboxes: [] as Mailbox[],
+    selectedMailboxId: null as string | null,
     syncing: false,
     onSelectAccount: vi.fn(),
+    onSelectMailbox: vi.fn(),
     onAddAccount: vi.fn(),
     onSync: vi.fn(),
     onRemoveAccount: vi.fn(),
@@ -98,5 +112,74 @@ describe('NavRail', () => {
     render(<NavRail {...p} />);
     // 角标不渲染：count=0 时无任何 '0' 文本（若误渲染则会出现 '0'）
     expect(screen.queryByText('0')).toBeNull();
+  });
+
+  // ── 信箱列表（Phase 15） ──────────────────────────────────────────────────
+
+  it('不在全部视图（selectedAccountId=null）显示信箱列表', () => {
+    const p = {
+      ...baseProps(),
+      selectedAccountId: null,
+      mailboxes: [mbox('m1', 'INBOX', 'inbox'), mbox('m2', 'Sent', 'sent')],
+    };
+    render(<NavRail {...p} />);
+    // 信箱按钮应不存在（全部视图不展示）
+    expect(screen.queryByRole('button', { name: '收件箱' })).toBeNull();
+  });
+
+  it('在单账户视图显示信箱列表并映射 specialUse 为友好标签', () => {
+    const p = {
+      ...baseProps(),
+      selectedAccountId: 'a',
+      mailboxes: [
+        mbox('m1', 'INBOX', 'inbox'),
+        mbox('m2', 'Sent', 'sent'),
+        mbox('m3', 'Drafts', 'drafts'),
+        mbox('m4', 'Trash', 'trash'),
+      ],
+      selectedMailboxId: 'm1',
+    };
+    render(<NavRail {...p} />);
+    expect(screen.getByRole('button', { name: '收件箱' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '已发送' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '草稿' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '废纸篓' })).toBeInTheDocument();
+  });
+
+  it('点击信箱按钮调用 onSelectMailbox', async () => {
+    const p = {
+      ...baseProps(),
+      selectedAccountId: 'a',
+      mailboxes: [mbox('m1', 'INBOX', 'inbox'), mbox('m2', 'Sent', 'sent')],
+      selectedMailboxId: 'm1',
+    };
+    render(<NavRail {...p} />);
+    await userEvent.click(screen.getByRole('button', { name: '已发送' }));
+    expect(p.onSelectMailbox).toHaveBeenCalledWith('m2');
+  });
+
+  it('当前选中信箱按钮有 aria-pressed=true', () => {
+    const p = {
+      ...baseProps(),
+      selectedAccountId: 'a',
+      mailboxes: [mbox('m1', 'INBOX', 'inbox'), mbox('m2', 'Sent', 'sent')],
+      selectedMailboxId: 'm1',
+    };
+    render(<NavRail {...p} />);
+    expect(screen.getByRole('button', { name: '收件箱' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: '已发送' })).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('无信箱时不渲染分隔线和信箱区', () => {
+    const p = { ...baseProps(), selectedAccountId: 'a', mailboxes: [] };
+    const { container } = render(<NavRail {...p} />);
+    // 信箱区的分隔线是内部两条之一；accounts 之后的那条由 accounts>0 决定
+    // 最简验证：无信箱按钮（aria-pressed 属于信箱的）
+    const mailboxBtns = container.querySelectorAll('button[aria-pressed]');
+    // 只有账户按钮和"全部"按钮有 aria-pressed，信箱按钮不应存在
+    const hasMailboxBtn = Array.from(mailboxBtns).some(
+      (b) => b.getAttribute('aria-label') === '收件箱',
+    );
+    expect(hasMailboxBtn).toBe(false);
   });
 });

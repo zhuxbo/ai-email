@@ -31,8 +31,11 @@ const noop = vi.fn();
 const navProps = {
   accounts: [],
   selectedAccountId: null,
+  mailboxes: [],
+  selectedMailboxId: null,
   syncing: false,
   onSelectAccount: noop,
+  onSelectMailbox: noop,
   onAddAccount: noop,
   onSync: noop,
   onRemoveAccount: noop,

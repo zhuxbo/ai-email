@@ -5,7 +5,14 @@
 import { create } from 'zustand';
 
 import * as tauri from '../tauri';
-import type { Account, AddAccountForm, Category, MessageBody, MessageHeader } from '../types';
+import type {
+  Account,
+  AddAccountForm,
+  Category,
+  Mailbox,
+  MessageBody,
+  MessageHeader,
+} from '../types';
 import { errMsg } from '../utils';
 import { useAiStore } from './ai';
 import { useComposeStore } from './compose';
@@ -54,6 +61,15 @@ interface MailState {
   accounts: Account[];
   selectedAccountId: string | null;
 
+  /** 当前账户下已加载的信箱列表；切换账户时重新拉取。 */
+  mailboxes: Mailbox[];
+  /**
+   * 当前选中的信箱 id（仅当 selectedAccountId 非 null 时有意义）。
+   * null = 统一收件箱视图（跨账户聚合 INBOX）。
+   * 切换到单账户时默认设为该账户 INBOX 的 id；再切走/切回聚合恢复 null。
+   */
+  selectedMailboxId: string | null;
+
   messages: MessageHeader[];
   selectedMessageId: string | null;
   messageOpenSeq: number;
@@ -80,6 +96,8 @@ interface MailState {
 
   reloadMessages: () => Promise<void>;
   setFilter: (accountId: string | null) => Promise<void>;
+  /** 切换到同一账户下的某个信箱（只在 selectedAccountId 非 null 时调用）。 */
+  selectMailbox: (mailboxId: string) => Promise<void>;
   setQuery: (q: string) => void;
   classifyVisibleMessages: () => Promise<void>;
   toggleCategoryFilter: (cat: Category) => void;
@@ -95,6 +113,9 @@ interface MailState {
 export const useMailStore = create<MailState>((set, get) => ({
   accounts: [],
   selectedAccountId: null,
+
+  mailboxes: [],
+  selectedMailboxId: null,
 
   messages: [],
   selectedMessageId: null,
@@ -209,11 +230,29 @@ export const useMailStore = create<MailState>((set, get) => ({
   },
 
   reloadMessages: async () => {
-    const filter = get().selectedAccountId;
+    const { selectedAccountId: filter, selectedMailboxId: mailboxId } = get();
+
+    // 单账户且已选中特定信箱（非 INBOX 聚合）：直接按 mailboxId 取消息。
+    if (filter !== null && mailboxId !== null) {
+      try {
+        const messages = await tauri.messagesList(mailboxId, 50, 0);
+        // 守卫：迟到 reload 不覆盖已切换的筛选。
+        if (get().selectedAccountId === filter && get().selectedMailboxId === mailboxId) {
+          set({ messages, accountErrors: {} });
+        }
+      } catch (e) {
+        set({ error: errMsg(e) });
+      }
+      return;
+    }
+
+    // 默认：跨账户聚合 INBOX（selectedAccountId=null 或 selectedMailboxId=null 时）。
     try {
       const { messages, errors } = await tauri.unifiedInbox({ accountId: filter });
       // filter 守卫：迟到 reload 不覆盖已切换的筛选。
-      if (get().selectedAccountId === filter) set({ messages, accountErrors: errors });
+      if (get().selectedAccountId === filter && get().selectedMailboxId === mailboxId) {
+        set({ messages, accountErrors: errors });
+      }
     } catch (e) {
       // 整体聚合失败（如 accountsList 抛错）：清掉过时的 per-account 错误，由全局 error 接管。
       set({ error: errMsg(e), accountErrors: {} });
@@ -221,8 +260,60 @@ export const useMailStore = create<MailState>((set, get) => ({
   },
 
   setFilter: async (accountId: string | null) => {
-    set({ selectedAccountId: accountId, selectedMessageId: null, body: null }); // 不 bump messageOpenSeq
+    if (accountId === null) {
+      // 切回聚合视图：清信箱列表和选中信箱，回统一 INBOX。
+      set({
+        selectedAccountId: null,
+        selectedMailboxId: null,
+        mailboxes: [],
+        selectedMessageId: null,
+        body: null,
+      });
+      useAiStore.getState().resetForMessage('');
+      await get().reloadMessages();
+      return;
+    }
+
+    // 切换到单账户：拉取该账户信箱列表，默认选中 INBOX。
+    set({ selectedAccountId: accountId, selectedMessageId: null, body: null });
     useAiStore.getState().resetForMessage('');
+
+    try {
+      const boxes = await tauri.mailboxesList(accountId);
+      // 守卫：防止拉取期间用户已再次切换。
+      if (get().selectedAccountId !== accountId) return;
+
+      const inbox = boxes.find((m) => m.specialUse === 'inbox' || m.name.toUpperCase() === 'INBOX');
+      set({
+        mailboxes: boxes,
+        // 找到 INBOX 就选中它并走 mailboxId 路径；找不到（空账户）则回聚合路径。
+        selectedMailboxId: inbox?.id ?? null,
+      });
+    } catch (e) {
+      set({ error: errMsg(e) });
+    }
+
+    await get().reloadMessages();
+  },
+
+  selectMailbox: async (mailboxId: string) => {
+    const { selectedAccountId, mailboxes } = get();
+    if (selectedAccountId === null) return;
+
+    set({ selectedMailboxId: mailboxId, selectedMessageId: null, body: null });
+    useAiStore.getState().resetForMessage('');
+
+    // 触发按需同步（非 INBOX 信箱首次访问时拉取新邮件），不阻塞 UI。
+    const box = mailboxes.find((m) => m.id === mailboxId);
+    if (box !== undefined && box.specialUse !== 'inbox' && box.name.toUpperCase() !== 'INBOX') {
+      void tauri
+        .mailboxSync(selectedAccountId, box.name)
+        .then(() => get().reloadMessages())
+        .catch((e: unknown) => {
+          set({ error: errMsg(e) });
+        });
+    }
+
     await get().reloadMessages();
   },
 
