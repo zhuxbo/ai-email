@@ -166,17 +166,14 @@ export const useMailStore = create<MailState>((set, get) => ({
     results.forEach((r, i) => {
       if (r.status === 'rejected') syncErrs[targets[i] ?? ''] = errMsg(r.reason);
     });
-    const anyNew = results.some((r) => r.status === 'fulfilled' && r.value.newMessageCount > 0);
     set({ syncing: false });
     await get().reloadMessages();
     // 同步阶段失败叠加在加载失败之上 —— 两类失败汇入同一个 accountErrors 通道。
     if (Object.keys(syncErrs).length > 0) {
       set((s) => ({ accountErrors: { ...s.accountErrors, ...syncErrs } }));
     }
-    if (anyNew)
-      setTimeout(() => {
-        void get().reloadMessages();
-      }, 3500); // 有新邮件才延迟 reload（复用带 filter 守卫的 reloadMessages）
+    // 后台 classify 写回 category/priority 后会 emit mail://classified，
+    // App.tsx 订阅该事件后刷新列表，不再需要固定延迟计时器。
   },
 
   selectMessage: async (id) => {

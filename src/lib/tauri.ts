@@ -1,8 +1,10 @@
-// The ONLY place we touch `invoke`. Every Tauri command gets a typed wrapper here so
-// components depend on stable TS signatures, not loose argument bags. Rust command names are
-// snake_case and Tauri auto-converts to camelCase on the wire.
+// The ONLY place we touch `invoke` and `listen`. Every Tauri command/event gets a typed
+// wrapper here so components depend on stable TS signatures, not loose argument bags. Rust
+// command names are snake_case and Tauri auto-converts to camelCase on the wire.
 
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+import type { UnlistenFn } from '@tauri-apps/api/event';
 
 import type {
   Account,
@@ -153,6 +155,47 @@ export async function suggestedRepliesList(): Promise<SuggestedReply[]> {
 
 export async function suggestedReplyDismiss(id: string): Promise<void> {
   await invoke('suggested_reply_dismiss', { id });
+}
+
+// ---------------------------------------------------------------------------
+// Tauri event subscriptions — backend pushes these after background AI tasks
+// finish, so the frontend can refresh without fixed-delay polling timers.
+// ---------------------------------------------------------------------------
+
+/** Payload emitted by `mail://classified` when background classify finishes. */
+export interface MailClassifiedPayload {
+  accountId: string;
+  count: number;
+}
+
+/** Payload emitted by `autoreply://updated` when evaluate_rules finishes. */
+export interface AutoReplyPayload {
+  accountId: string;
+}
+
+/**
+ * Subscribe to `mail://classified` — fired after background classify writes
+ * category/priority back to the messages table. Call the returned unlisten fn
+ * on cleanup (component unmount / store teardown).
+ */
+export async function onMailClassified(
+  cb: (payload: MailClassifiedPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<MailClassifiedPayload>('mail://classified', (event) => {
+    cb(event.payload);
+  });
+}
+
+/**
+ * Subscribe to `autoreply://updated` — fired after evaluate_rules inserts
+ * new suggested replies. Call the returned unlisten fn on cleanup.
+ */
+export async function onAutoReplyUpdated(
+  cb: (payload: AutoReplyPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<AutoReplyPayload>('autoreply://updated', (event) => {
+    cb(event.payload);
+  });
 }
 
 /**

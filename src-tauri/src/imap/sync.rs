@@ -11,10 +11,17 @@
 //!   6. Bookkeeping: `mailboxes.uid_next` / `last_synced_at`, `accounts.last_synced_at`
 //!   7. LOGOUT (best-effort — already-committed sync isn't undone by logout failure)
 //!
+//! After returning the SyncReport, new messages are classified and auto-reply rules are
+//! evaluated in a detached tokio::spawn. On completion, Tauri events are emitted so the
+//! frontend can refresh without fixed-delay timers:
+//!   - `mail://classified`    — background classify finished (payload: ClassifiedPayload)
+//!   - `autoreply://updated`  — evaluate_rules finished (payload: AutoReplyPayload)
+//!
 //! Body, snippet, `has_attachment`, `internal_date` are left blank — Sprint 1.4.
 
 use secrecy::SecretString;
 use serde::Serialize;
+use tauri::{AppHandle, Emitter};
 use tokio_util::sync::CancellationToken;
 
 use crate::db::accounts::Account;
@@ -23,6 +30,21 @@ use crate::db::{accounts, mailboxes, messages, Pool};
 use crate::error::{AppError, AppResult};
 use crate::imap::client::ImapClient;
 use crate::imap::parse;
+
+/// Payload for the `mail://classified` event.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClassifiedPayload {
+    pub account_id: uuid::Uuid,
+    pub count: usize,
+}
+
+/// Payload for the `autoreply://updated` event.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoReplyPayload {
+    pub account_id: uuid::Uuid,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -76,6 +98,7 @@ pub async fn sync_inbox(
     account: &Account,
     auth_code: &SecretString,
     cancel: CancellationToken,
+    app_handle: AppHandle,
 ) -> AppResult<SyncReport> {
     let port = u16::try_from(account.imap_port)
         .map_err(|_| AppError::Imap(format!("invalid imap_port: {}", account.imap_port)))?;
@@ -212,11 +235,13 @@ pub async fn sync_inbox(
     );
 
     // Kick off background classification for the freshly-landed rows. We don't await — UI
-    // gets the sync report immediately and polls a few seconds later (see store.syncInbox).
+    // gets the sync report immediately and is notified via Tauri events when background
+    // work finishes (see mail://classified and autoreply://updated).
     // Errors here are non-fatal: log and move on. The classifier checks `ai_role_defaults`
     // and silently no-ops when the role isn't configured yet.
     //
     // #29: child_token 继承自应用级 cancel，退出时自动取消，停止进行中的付费 AI 调用。
+    // #23: app_handle move 进闭包，完成节点 emit 事件通知前端，取代固定计时器盲轮询。
     if !new_ids.is_empty() {
         let pool_clone = pool.clone();
         let account_id = account.id;
@@ -245,12 +270,28 @@ pub async fn sync_inbox(
                         classified = results.len(),
                         "background classify finished"
                     );
+                    // 通知前端刷新邮件列表（category/priority 已写回）。
+                    // emit 失败不影响业务流程，只记 warn。
+                    if let Err(e) = app_handle.emit(
+                        "mail://classified",
+                        ClassifiedPayload {
+                            account_id,
+                            count: results.len(),
+                        },
+                    ) {
+                        tracing::warn!(
+                            account_id = %account_id,
+                            error = %e,
+                            "emit mail://classified failed (non-fatal)"
+                        );
+                    }
                 }
                 Some(Err(e)) => {
                     // Most common cause: user hasn't configured a classify model yet.
                     // We don't surface to UI — the next sync will retry, and the user can
                     // see uncategorised messages and pick a model when they're ready.
                     tracing::warn!(account_id = %account_id, error = %e, "background classify failed");
+                    return; // classify 失败则不再评估规则（依赖 category 写回）
                 }
                 None => return, // 已取消，跳过后续 evaluate_rules
             }
@@ -266,8 +307,23 @@ pub async fn sync_inbox(
                     None
                 }
             };
-            if let Some(Err(e)) = eval_result {
-                tracing::warn!(account_id = %account_id, error = %e, "auto-reply rule eval failed");
+            match eval_result {
+                Some(Ok(())) => {
+                    // 通知前端刷新建议回复队列。
+                    if let Err(e) =
+                        app_handle.emit("autoreply://updated", AutoReplyPayload { account_id })
+                    {
+                        tracing::warn!(
+                            account_id = %account_id,
+                            error = %e,
+                            "emit autoreply://updated failed (non-fatal)"
+                        );
+                    }
+                }
+                Some(Err(e)) => {
+                    tracing::warn!(account_id = %account_id, error = %e, "auto-reply rule eval failed");
+                }
+                None => {} // 已取消
             }
         });
     }

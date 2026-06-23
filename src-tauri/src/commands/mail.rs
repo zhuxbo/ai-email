@@ -18,7 +18,11 @@ use crate::smtp::{self, SendDraft, SendReceipt};
 use crate::AppState;
 
 #[tauri::command]
-pub async fn inbox_sync(state: State<'_, AppState>, account_id: Uuid) -> AppResult<SyncReport> {
+pub async fn inbox_sync(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    account_id: Uuid,
+) -> AppResult<SyncReport> {
     let account = db::accounts::get(&state.db, account_id)
         .await?
         .ok_or_else(|| AppError::Config(format!("account {account_id} not found")))?;
@@ -27,7 +31,7 @@ pub async fn inbox_sync(state: State<'_, AppState>, account_id: Uuid) -> AppResu
         .await
         .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
 
-    sync::sync_inbox(&state.db, &account, &auth, state.cancel.clone()).await
+    sync::sync_inbox(&state.db, &account, &auth, state.cancel.clone(), app).await
 }
 
 #[tauri::command]

@@ -3,6 +3,7 @@ import { create } from 'zustand';
 import * as tauri from '../tauri';
 import type { MessageHeader } from '../types';
 import { errMsg } from '../utils';
+import { useAutoReplyStore } from './auto-reply';
 import { useMailStore } from './mail';
 import { useUiStore } from './ui';
 
@@ -218,6 +219,11 @@ export const useComposeStore = create<ComposeState>((set, get) => ({
       set({
         receiptInfo: `已发送，send_log ${receipt.sendLog.id.slice(0, 8)} · ${receipt.sendLog.smtpResponse ?? ''}`,
       });
+      // #24 发送成功后立即刷新邮件列表与建议回复队列：
+      // - 列表：send_log 记录 in_reply_to，已回复邮件的状态可能变化。
+      // - 队列：list_pending 用子查询排除 send_log.in_reply_to 命中项，发送后对应建议应消失。
+      void useMailStore.getState().reloadMessages();
+      void useAutoReplyStore.getState().loadQueue();
       setTimeout(() => {
         // nonce 仍相同 → 用户尚未开启新草稿会话，安全清理。
         // nonce 已变（openReply/openBlank/reset 被调用）→ 跳过，保留新草稿。
