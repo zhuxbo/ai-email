@@ -148,8 +148,11 @@ pub(crate) async fn apply_db_init_result(
 ) -> (&'static str, Option<String>) {
     match result {
         Ok(Ok(pool)) => {
-            // set() 失败仅在重复 set 时发生（此处不会），忽略 Err。
-            let _ = db_cell.set(pool);
+            // OnceCell 在单次 spawn 下只会 set 一次；若意外重复 set，记录而非静默吞掉。
+            // 不 panic（FFI 边界）：重复 set 只意味着已就绪，沿用首个 pool 即可。
+            if db_cell.set(pool).is_err() {
+                tracing::error!("db OnceCell 已设置，忽略重复的数据库初始化结果");
+            }
             // 先写状态，再 emit——兜底查询不会读到旧状态。
             *db_init_status.lock().await = DbInitStatus::Ready;
             ("db://ready", None)
@@ -436,5 +439,70 @@ mod tests {
         );
         assert_eq!(event, "db://error");
         assert!(msg.is_some());
+    }
+
+    /// run_db_init 超时路径：apply_db_init_result 收到真实 Elapsed → Failed + 超时文案，
+    /// cell 保持空。Elapsed 无 pub 构造器，故用 1ns 超时包住 pending（永不就绪）产出一个
+    /// 真 Elapsed 再喂入，覆盖第三个决策分支。
+    #[tokio::test]
+    async fn run_db_init_timeout_leaves_cell_empty() {
+        use tokio::sync::Mutex;
+
+        let elapsed: Result<crate::error::AppResult<Pool>, tokio::time::error::Elapsed> =
+            tokio::time::timeout(
+                Duration::from_nanos(1),
+                std::future::pending::<crate::error::AppResult<Pool>>(),
+            )
+            .await;
+        assert!(elapsed.is_err(), "1ns 超时应产出 Elapsed");
+
+        let cell: Arc<OnceCell<Pool>> = Arc::new(OnceCell::new());
+        let status = Arc::new(Mutex::new(crate::DbInitStatus::Initializing));
+        let (event, msg) = crate::apply_db_init_result(elapsed, &cell, &status).await;
+
+        assert!(cell.get().is_none(), "超时路径 OnceCell 应保持空");
+        assert!(
+            matches!(*status.lock().await, crate::DbInitStatus::Failed(_)),
+            "超时路径状态应为 Failed"
+        );
+        assert_eq!(event, "db://error");
+        // 关键：超时分支与普通失败分支都返回 (db://error, Some)，唯一区别是文案——
+        // 必须断言"超时"专属文案，否则与 run_db_init_error_leaves_cell_empty 无异 = 伪绿。
+        let msg = msg.expect("超时路径应携带消息");
+        assert!(
+            msg.contains("超时") && msg.contains("30"),
+            "超时文案应含'超时'与秒数，实际: {msg}"
+        );
+    }
+
+    /// apply_db_init_result 在 OnceCell 已被 set 时：忽略重复 pool、不 panic，状态仍置 Ready。
+    /// 覆盖 set() 的 Err 分支（生产用 tracing 记录而非静默吞掉）。
+    #[tokio::test]
+    async fn apply_db_init_result_ignores_duplicate_set() {
+        use tokio::sync::Mutex;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let first: Pool = crate::db::connect(&tmp.path().join("first.db"))
+            .await
+            .expect("first pool");
+        let second: Pool = crate::db::connect(&tmp.path().join("second.db"))
+            .await
+            .expect("second pool");
+
+        let cell: Arc<OnceCell<Pool>> = Arc::new(OnceCell::new());
+        cell.set(first).expect("首次 set 应成功");
+        let status = Arc::new(Mutex::new(crate::DbInitStatus::Initializing));
+
+        // 再喂一个成功结果：set 必失败（已占用），但不 panic、仍走 Ready 路径。
+        let result: Result<crate::error::AppResult<Pool>, tokio::time::error::Elapsed> =
+            Ok(Ok(second));
+        let (event, msg) = crate::apply_db_init_result(result, &cell, &status).await;
+
+        assert_eq!(event, "db://ready");
+        assert!(msg.is_none());
+        assert!(
+            matches!(*status.lock().await, crate::DbInitStatus::Ready),
+            "重复 set 后状态仍应为 Ready"
+        );
     }
 }

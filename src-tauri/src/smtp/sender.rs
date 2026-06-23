@@ -620,8 +620,10 @@ mod tests {
             );
         }
 
-        // 断言 3：unfold 后语义不变——所有 22 个 id 完整保留，无拆断
-        let unfolded = refs_lines.join(" "); // 模拟 unfold（实际应去掉 CRLF+空白，此处拼接等效）
+        // 断言 3：RFC 5322 unfold 后语义不变——所有 22 个 id 完整保留、无拆断。
+        // unfold = 删除折行 CRLF、保留其后 WSP；split("\r\n") 已消费 CRLF，各延续行
+        // 自带前导 WSP，故直接拼接（concat）即精确 unfold，无需额外插入分隔符。
+        let unfolded = refs_lines.concat();
         for id in &ids {
             let wrapped = format!("<{id}>");
             assert!(unfolded.contains(&wrapped), "unfold 后缺失 id {wrapped}");
