@@ -47,23 +47,28 @@ function App() {
 
     // 后台 classify 完成 → 刷新邮件列表（category/priority 已写回）。
     // 后台 evaluate_rules 完成 → 刷新建议回复队列。
-    // 两个 listen 均返回 Promise<unlisten>，在 useEffect 清理时调用。
+    // mounted 守卫：若 Promise resolve 时组件已卸载，立即调用返回的 unlisten，
+    // 避免孤儿监听器泄漏（在 StrictMode dev 双 mount 场景尤为必要）。
+    let mounted = true;
     let unlistenClassified: (() => void) | null = null;
     let unlistenAutoReply: (() => void) | null = null;
 
     void onMailClassified(() => {
       void useMailStore.getState().reloadMessages();
     }).then((fn) => {
-      unlistenClassified = fn;
+      if (!mounted) fn();
+      else unlistenClassified = fn;
     });
 
     void onAutoReplyUpdated(() => {
       void useAutoReplyStore.getState().loadQueue();
     }).then((fn) => {
-      unlistenAutoReply = fn;
+      if (!mounted) fn();
+      else unlistenAutoReply = fn;
     });
 
     return () => {
+      mounted = false;
       unlistenClassified?.();
       unlistenAutoReply?.();
     };

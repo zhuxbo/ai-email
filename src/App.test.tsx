@@ -195,4 +195,45 @@ describe('App — event-driven subscription wiring', () => {
     expect(mockUnlistenClassified).toHaveBeenCalledTimes(1);
     expect(mockUnlistenAutoReply).toHaveBeenCalledTimes(1);
   });
+
+  it('calls unlisten even when unmount races ahead of Promise resolve (mounted guard)', async () => {
+    // 复现 I1 真泄漏路径：listen Promise 尚未 resolve，组件已卸载。
+    // 旧代码：unlisten 变量仍是 null，cleanup 是 no-op，最终 resolve 的 fn 进死闭包永不调用。
+    // 新代码（mounted 守卫）：resolve 时发现 mounted=false，立即调用 fn() 清理。
+
+    let resolveClassified!: (fn: () => void) => void;
+    let resolveAutoReply!: (fn: () => void) => void;
+
+    const delayedClassifiedPromise = new Promise<() => void>((res) => {
+      resolveClassified = res;
+    });
+    const delayedAutoReplyPromise = new Promise<() => void>((res) => {
+      resolveAutoReply = res;
+    });
+
+    onMailClassifiedMock.mockReturnValueOnce(delayedClassifiedPromise);
+    onAutoReplyUpdatedMock.mockReturnValueOnce(delayedAutoReplyPromise);
+
+    let unmount!: () => void;
+    act(() => {
+      const result = render(<App />);
+      unmount = result.unmount;
+    });
+
+    // 先 unmount，此时 listen Promise 还未 resolve
+    act(() => {
+      unmount();
+    });
+
+    // 再 resolve listen Promise（模拟网络/IPC 延迟后返回 unlisten fn）
+    await act(async () => {
+      resolveClassified(mockUnlistenClassified);
+      resolveAutoReply(mockUnlistenAutoReply);
+      await Promise.resolve();
+    });
+
+    // mounted 守卫应在 resolve 时发现组件已卸载，立即调用 unlisten fn
+    expect(mockUnlistenClassified).toHaveBeenCalledTimes(1);
+    expect(mockUnlistenAutoReply).toHaveBeenCalledTimes(1);
+  });
 });

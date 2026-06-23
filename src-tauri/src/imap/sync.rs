@@ -336,7 +336,7 @@ pub async fn sync_inbox(
 
 #[cfg(test)]
 mod tests {
-    use super::{decide_sync_mode, SyncMode};
+    use super::{decide_sync_mode, AutoReplyPayload, ClassifiedPayload, SyncMode};
 
     #[test]
     fn first_sync_when_no_local_uid_next() {
@@ -381,6 +381,38 @@ mod tests {
             decide_sync_mode(None, Some(100), Some(42)),
             SyncMode::Incremental { prev_uid_next: 100 }
         );
+    }
+
+    /// #21 payload serde 契约：前端依赖 camelCase 字段名，rename_all 不得被静默移除。
+    #[test]
+    fn classified_payload_serializes_camel_case() {
+        let id = uuid::Uuid::new_v4();
+        let payload = ClassifiedPayload {
+            account_id: id,
+            count: 3,
+        };
+        let v = serde_json::to_value(&payload).expect("serialize ClassifiedPayload");
+        // 前端读 accountId（camelCase）——若字段名变成 account_id 则事件回调静默收不到数据
+        assert!(
+            v.get("accountId").is_some(),
+            "accountId must be present (camelCase)"
+        );
+        assert!(v.get("account_id").is_none(), "snake_case must NOT appear");
+        assert_eq!(v["accountId"], id.to_string());
+        assert_eq!(v["count"], 3);
+    }
+
+    #[test]
+    fn autoreply_payload_serializes_camel_case() {
+        let id = uuid::Uuid::new_v4();
+        let payload = AutoReplyPayload { account_id: id };
+        let v = serde_json::to_value(&payload).expect("serialize AutoReplyPayload");
+        assert!(
+            v.get("accountId").is_some(),
+            "accountId must be present (camelCase)"
+        );
+        assert!(v.get("account_id").is_none(), "snake_case must NOT appear");
+        assert_eq!(v["accountId"], id.to_string());
     }
 
     /// #29: 预先取消的 child token 会跳过后台任务体，select! 分支立即走取消路径。
