@@ -2,6 +2,8 @@
 //!
 //! AI commands move into separate command modules in Sprints 2+.
 
+use std::sync::Arc;
+
 use tauri::State;
 use uuid::Uuid;
 
@@ -31,7 +33,15 @@ pub async fn inbox_sync(
         .await
         .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
 
-    sync::sync_inbox(&state.db, &account, &auth, state.cancel.clone(), app).await
+    sync::sync_inbox(
+        &state.db,
+        &account,
+        &auth,
+        state.cancel.clone(),
+        Arc::clone(&state.account_tokens),
+        app,
+    )
+    .await
 }
 
 #[tauri::command]

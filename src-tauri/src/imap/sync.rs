@@ -22,10 +22,15 @@
 //!
 //! Body, snippet, `has_attachment`, `internal_date` are left blank — Sprint 1.4.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use secrecy::SecretString;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use crate::db::accounts::Account;
 use crate::db::messages::MessageInsert;
@@ -259,11 +264,15 @@ async fn sync_mailbox_inner(
 }
 
 /// Sync INBOX and kick off background AI classification + auto-reply evaluation.
+///
+/// `account_tokens`：账户级子令牌注册表（来自 AppState）。spawn 前为该账户注册子令牌，
+/// 任务结束后注销，防止注册表无限增长。删除账户时可通过注册表取消对应令牌，终止在途任务。
 pub async fn sync_inbox(
     pool: &Pool,
     account: &Account,
     auth_code: &SecretString,
     cancel: CancellationToken,
+    account_tokens: Arc<Mutex<HashMap<Uuid, CancellationToken>>>,
     app_handle: AppHandle,
 ) -> AppResult<SyncReport> {
     let (report, new_ids) = sync_mailbox_inner(pool, account, auth_code, "INBOX").await?;
@@ -280,10 +289,19 @@ pub async fn sync_inbox(
         let pool_clone = pool.clone();
         let account_id = account.id;
         let child_token = cancel.child_token();
+
+        // 注册子令牌：删除账户时可通过注册表 cancel() 终止在途任务。
+        account_tokens
+            .lock()
+            .await
+            .insert(account_id, child_token.clone());
+        let tokens_clone = Arc::clone(&account_tokens);
+
         tokio::spawn(async move {
-            // 在任何 AI 调用前检查取消：若应用已退出则跳过整批任务。
+            // 在任何 AI 调用前检查取消：若应用已退出或账户已删除则跳过整批任务。
             if child_token.is_cancelled() {
                 tracing::debug!(account_id = %account_id, "classify cancelled before start");
+                tokens_clone.lock().await.remove(&account_id);
                 return;
             }
 
@@ -292,7 +310,7 @@ pub async fn sync_inbox(
                     Some(result)
                 }
                 _ = child_token.cancelled() => {
-                    tracing::info!(account_id = %account_id, "background classify cancelled (app exit)");
+                    tracing::info!(account_id = %account_id, "background classify cancelled");
                     None
                 }
             };
@@ -325,9 +343,13 @@ pub async fn sync_inbox(
                     // We don't surface to UI — the next sync will retry, and the user can
                     // see uncategorised messages and pick a model when they're ready.
                     tracing::warn!(account_id = %account_id, error = %e, "background classify failed");
+                    tokens_clone.lock().await.remove(&account_id);
                     return; // classify 失败则不再评估规则（依赖 category 写回）
                 }
-                None => return, // 已取消，跳过后续 evaluate_rules
+                None => {
+                    tokens_clone.lock().await.remove(&account_id);
+                    return; // 已取消，跳过后续 evaluate_rules
+                }
             }
 
             // classify 之后顺序评估自动回复规则（须在同一 spawn 内、await 之后——
@@ -337,10 +359,14 @@ pub async fn sync_inbox(
                     Some(result)
                 }
                 _ = child_token.cancelled() => {
-                    tracing::info!(account_id = %account_id, "evaluate_rules cancelled (app exit)");
+                    tracing::info!(account_id = %account_id, "evaluate_rules cancelled");
                     None
                 }
             };
+
+            // 任务结束（无论成功/失败/取消）注销注册表条目，防止注册表无限增长。
+            tokens_clone.lock().await.remove(&account_id);
+
             match eval_result {
                 Some(Ok(())) => {
                     // 通知前端刷新建议回复队列。

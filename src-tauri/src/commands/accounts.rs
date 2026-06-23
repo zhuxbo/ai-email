@@ -16,12 +16,28 @@
 use secrecy::SecretString;
 use serde::Deserialize;
 use tauri::State;
+use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::db::accounts::{self, Account, AccountInput};
 use crate::error::{AppError, AppResult};
 use crate::keychain;
 use crate::AppState;
+
+/// 取消指定账户的在途后台任务。
+///
+/// 从注册表中移除该账户的 CancellationToken 并调用 cancel()；若无对应条目则 no-op。
+/// 调用方保证在 DB 删除之前调用，以避免任务写入已删除的 mailbox 触发外键冲突。
+pub(crate) async fn cancel_account_tasks(
+    tokens: &Mutex<std::collections::HashMap<Uuid, CancellationToken>>,
+    id: Uuid,
+) {
+    if let Some(token) = tokens.lock().await.remove(&id) {
+        token.cancel();
+        tracing::info!(account_id = %id, "cancelled in-flight background tasks for account");
+    }
+}
 
 /// Known email provider identifiers.
 const KNOWN_PROVIDERS: &[&str] = &["qq", "imap"];
@@ -118,6 +134,10 @@ pub async fn account_add(state: State<'_, AppState>, form: AddAccountForm) -> Ap
 
 #[tauri::command]
 pub async fn account_remove(state: State<'_, AppState>, id: Uuid) -> AppResult<()> {
+    // 取消该账户的在途后台任务（classify/eval）：先于 DB 删除，避免任务写入已删除的 mailbox
+    // 触发外键冲突，同时节省 AI 调用配额。无在途任务时 no-op 不报错。
+    cancel_account_tasks(&state.account_tokens, id).await;
+
     // #11: delete keychain credential first (best-effort — warn on failure, never abort).
     // This avoids leaving an unreachable orphan auth-code if the DB delete succeeds but
     // the keychain delete fails. The delete-warn-not-fail invariant is intentional: a
@@ -148,8 +168,78 @@ pub async fn account_remove(state: State<'_, AppState>, id: Uuid) -> AppResult<(
 
 #[cfg(test)]
 mod tests {
-    use super::validate_port;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use tokio::sync::Mutex;
+    use tokio_util::sync::CancellationToken;
+    use uuid::Uuid;
+
+    use super::{cancel_account_tasks, validate_port};
     use crate::error::AppError;
+
+    // ---- 账户删除时取消在途后台任务 ----
+
+    /// 注册账户子令牌 → 调用 cancel_account_tasks → 断言该令牌 is_cancelled()，且其他账户不受影响。
+    #[tokio::test]
+    async fn account_cancel_only_affects_target_account() {
+        let tokens: Arc<Mutex<HashMap<Uuid, CancellationToken>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
+        let app_cancel = CancellationToken::new();
+        let id_a = Uuid::new_v4();
+        let id_b = Uuid::new_v4();
+
+        // 注册两个账户的子令牌（继承自应用级 cancel）
+        let token_a = app_cancel.child_token();
+        let token_b = app_cancel.child_token();
+        tokens.lock().await.insert(id_a, token_a.clone());
+        tokens.lock().await.insert(id_b, token_b.clone());
+
+        // 通过生产 helper 取消账户 A
+        cancel_account_tasks(&tokens, id_a).await;
+
+        // A 的令牌被取消
+        assert!(token_a.is_cancelled(), "账户 A 的令牌应被取消");
+        // B 的令牌不受影响（粒度隔离）
+        assert!(!token_b.is_cancelled(), "账户 B 的令牌不应被取消");
+        // B 的令牌仍在注册表中
+        assert!(
+            tokens.lock().await.contains_key(&id_b),
+            "账户 B 的令牌应保留在注册表中"
+        );
+    }
+
+    /// 退出路径：app_cancel.cancel() 级联取消所有子令牌（覆盖不变量，与 helper 无关）。
+    #[tokio::test]
+    async fn app_cancel_cascades_to_account_tokens() {
+        let app_cancel = CancellationToken::new();
+
+        let token_a = app_cancel.child_token();
+        let token_b = app_cancel.child_token();
+
+        // 两个子令牌都未取消
+        assert!(!token_a.is_cancelled());
+        assert!(!token_b.is_cancelled());
+
+        // 应用退出：取消父令牌
+        app_cancel.cancel();
+
+        // 所有子令牌同步被级联取消
+        assert!(token_a.is_cancelled(), "应用退出应级联取消账户 A 的令牌");
+        assert!(token_b.is_cancelled(), "应用退出应级联取消账户 B 的令牌");
+    }
+
+    /// 无在途任务时（注册表中无对应条目）cancel_account_tasks 应 no-op，不 panic。
+    #[tokio::test]
+    async fn cancel_nonexistent_account_is_noop() {
+        let tokens: Arc<Mutex<HashMap<Uuid, CancellationToken>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let nonexistent_id = Uuid::new_v4();
+
+        // 通过生产 helper 对空表取消，应安全 no-op
+        cancel_account_tasks(&tokens, nonexistent_id).await;
+    }
 
     // ---- #39: port validation ----
 

@@ -13,6 +13,7 @@ pub mod keychain;
 pub mod smtp;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tauri::Manager;
@@ -36,6 +37,11 @@ pub struct AppState {
     pub body_in_flight: Mutex<HashMap<Uuid, watch::Receiver<bool>>>,
     /// 应用级取消令牌。退出时触发，通知所有持有 child token 的后台任务（classify/eval）停止。
     pub cancel: CancellationToken,
+    /// 账户级子令牌注册表。key = account_id。Arc 包裹便于跨 spawn 共享引用。
+    /// 删除账户时取出对应 token 并 cancel()，使该账户的在途 classify/eval 任务提前终止，
+    /// 避免写入已删除的 mailbox（外键冲突）并浪费 AI 调用配额。
+    /// 父令牌 `cancel` 退出时级联取消所有子令牌，不变量不变。
+    pub account_tokens: Arc<Mutex<HashMap<Uuid, CancellationToken>>>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -96,6 +102,7 @@ pub fn run() {
                     db: pool,
                     body_in_flight: Mutex::new(HashMap::new()),
                     cancel: app_cancel,
+                    account_tokens: Arc::new(Mutex::new(HashMap::new())),
                 });
                 tracing::info!(db_path = %db_path.display(), "app state initialized");
                 Ok(())

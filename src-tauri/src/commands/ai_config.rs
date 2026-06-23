@@ -134,6 +134,16 @@ pub async fn model_add(state: State<'_, AppState>, form: AddModelForm) -> AppRes
 
 #[tauri::command]
 pub async fn model_remove(state: State<'_, AppState>, id: Uuid) -> AppResult<()> {
+    // 不需要像 account_remove 那样按模型粒度取消在途后台任务，原因如下：
+    //   1. 后台任务（classify/evaluate）以账户为粒度 spawn，注册在 AppState::account_tokens 中，
+    //      没有按模型分组的令牌注册表。
+    //   2. 任务内部通过 `ai_role_defaults JOIN ai_models` 实时查询当前配置的 model_id，
+    //      不会在任务启动时持久持有 model_id，所以模型切换/删除不影响已在运行的任务。
+    //   3. `ai_role_defaults.model_id` 设有 `ON DELETE RESTRICT` 外键约束：只要该模型
+    //      还被某个角色引用，DB 就会拒绝删除，彻底避免孤儿任务的产生。
+    //   4. classify/evaluate 的结果表（emails、ai_summaries 等）不含 model_id 外键，
+    //      删模型不会造成外键冲突，与删账户（cascade 多张表）的情形不同。
+    //
     // #44: delete keychain key first (best-effort — warn on failure, never abort).
     // Mirrors the delete-warn-not-fail invariant from account_remove (#11).
     // ON DELETE RESTRICT — the DB enforces "must reassign role defaults first".
