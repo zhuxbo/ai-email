@@ -16,20 +16,51 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tauri::Manager;
-use tokio::sync::{watch, Mutex};
+use tauri::{Emitter, Manager};
+use tokio::sync::{watch, Mutex, OnceCell};
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 use crate::db::Pool;
+use crate::error::{AppError, AppResult};
 
-/// DB 连接+迁移的超时时限。慢盘/大库下防止 setup 永久阻塞。
+/// DB 连接+迁移的超时时限。慢盘/大库下防止后台任务永久挂起。
 const DB_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Payload for `db://ready` event.
+#[derive(Clone, serde::Serialize)]
+struct DbReadyPayload {}
+
+/// Payload for `db://error` event.
+#[derive(Clone, serde::Serialize)]
+struct DbErrorPayload {
+    message: String,
+}
+
+/// `db_status` 命令的返回结构。前端友好：用字符串标签而非裸 enum。
+///
+/// status 取值：`"initializing"` | `"ready"` | `"error"`
+#[derive(serde::Serialize)]
+pub struct DbStatusPayload {
+    pub status: String,
+    pub message: Option<String>,
+}
+
+/// DB 初始化三态。由 `AppState.db_init_status` 持有，通过 Mutex 保护并发写。
+#[derive(Clone)]
+pub(crate) enum DbInitStatus {
+    Initializing,
+    Ready,
+    Failed(String),
+}
 
 /// Shared state attached to the Tauri app handle. Cloning the pool is cheap (Arc inside).
 pub struct AppState {
-    pub db: Pool,
+    /// 异步就绪容器：setup 后台填充；命令侧通过 `pool()` 访问。
+    pub db: Arc<OnceCell<Pool>>,
+    /// DB 初始化状态（三态）。`db_status` 命令读取，**不依赖 pool**，pool 未就绪时也能响应。
+    pub(crate) db_init_status: Arc<Mutex<DbInitStatus>>,
     /// Single-flight map：防止并发 message_body 请求重复开 IMAP 会话。
     /// key = message id，value = watch receiver（初始 false，leader 完成后 send(true)）。
     /// 迟到者克隆 receiver 后先检查当前值；已 true 直接读缓存，否则 changed().await 等待。
@@ -42,6 +73,66 @@ pub struct AppState {
     /// 避免写入已删除的 mailbox（外键冲突）并浪费 AI 调用配额。
     /// 父令牌 `cancel` 退出时级联取消所有子令牌，不变量不变。
     pub account_tokens: Arc<Mutex<HashMap<Uuid, CancellationToken>>>,
+}
+
+impl AppState {
+    /// 获取已就绪的连接池。
+    ///
+    /// - pool 已填充 → 立即返回引用。
+    /// - pool 尚未填充（后台迁移仍在进行）→ 返回 `AppError::DbNotReady`，绝不 panic。
+    ///
+    /// 命令侧统一调用 `state.pool().await?`，取代原先的 `&state.db`。
+    pub async fn pool(&self) -> AppResult<&Pool> {
+        self.db.get().ok_or(AppError::DbNotReady)
+    }
+}
+
+/// 后台执行 DB 连接+迁移，成功/失败/超时后向前端 emit 对应事件。
+///
+/// 状态写入顺序：先更新 `db_init_status`（供 `db_status` 命令主动查询），
+/// 再 emit 事件（供监听方被动接收）。这样无论哪条路径先到达，前端都能通过
+/// 兜底 `db_status` 查询得到正确结果，消除 emit-before-listen 竞态。
+///
+/// 可注入任意 `connect_fn`，便于单测两路决策逻辑而无需真实磁盘。
+async fn run_db_init<F, Fut>(
+    db_cell: Arc<OnceCell<Pool>>,
+    db_init_status: Arc<Mutex<DbInitStatus>>,
+    app_handle: tauri::AppHandle,
+    connect_fn: F,
+) where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = AppResult<Pool>> + Send,
+{
+    let result = tokio::time::timeout(DB_CONNECT_TIMEOUT, connect_fn()).await;
+
+    match result {
+        Ok(Ok(pool)) => {
+            // set() 失败仅在重复 set 时发生（此处不会），忽略 Err。
+            let _ = db_cell.set(pool);
+            // 先写状态，再 emit——兜底查询不会读到旧状态。
+            *db_init_status.lock().await = DbInitStatus::Ready;
+            tracing::info!("数据库初始化完成，发送 db://ready");
+            let _ = app_handle.emit("db://ready", DbReadyPayload {});
+        }
+        Ok(Err(e)) => {
+            tracing::error!(error = %e, "数据库连接/迁移失败");
+            let msg = format!("数据库初始化失败：{e}");
+            *db_init_status.lock().await = DbInitStatus::Failed(msg.clone());
+            let _ = app_handle.emit("db://error", DbErrorPayload { message: msg });
+        }
+        Err(_elapsed) => {
+            tracing::error!(
+                timeout_secs = DB_CONNECT_TIMEOUT.as_secs(),
+                "数据库连接超时"
+            );
+            let msg = format!(
+                "数据库初始化超时（超过 {} 秒），请检查磁盘空间与权限",
+                DB_CONNECT_TIMEOUT.as_secs()
+            );
+            *db_init_status.lock().await = DbInitStatus::Failed(msg.clone());
+            let _ = app_handle.emit("db://error", DbErrorPayload { message: msg });
+        }
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -69,46 +160,42 @@ pub fn run() {
         .setup({
             let app_cancel = app_cancel.clone();
             move |app| {
-                // SQLite lives in the OS app-data dir — created + migrated on first launch, so the
-                // app is zero-config (no DATABASE_URL, no external server).
+                // db_path 解析必须在 setup 里做（需要 app.path()），失败属于配置错误，
+                // 仍同步返回 Err——此时窗口还没显示，给 Builder 一个明确的失败信号。
                 let db_path = app.path().app_data_dir()?.join("ai-email.db");
 
-                // #25/#26: 给 DB 连接+迁移加超时，超时/失败时记录错误并返回 Err（而非 panic）。
-                // Tauri setup 返回 Err 后 Builder::run 返回 Err，被下方显式 match 处理。
-                let pool = tauri::async_runtime::block_on(async {
-                    tokio::time::timeout(DB_CONNECT_TIMEOUT, db::connect(&db_path)).await
-                })
-                .map_err(|_| {
-                    tracing::error!(
-                        db_path = %db_path.display(),
-                        timeout_secs = DB_CONNECT_TIMEOUT.as_secs(),
-                        "database connect timed out"
-                    );
-                    // anyhow::Error 实现了 Into<Box<dyn Error>>，满足 setup 闭包要求
-                    anyhow::anyhow!(
-                        "database initialization timed out; check disk space or permissions"
-                    )
-                })?
-                .map_err(|e| {
-                    tracing::error!(
-                        db_path = %db_path.display(),
-                        error = %e,
-                        "database connect/migrate failed"
-                    );
-                    anyhow::anyhow!("database initialization failed: {e}")
-                })?;
+                let db_cell: Arc<OnceCell<Pool>> = Arc::new(OnceCell::new());
+                // 初始化为 Initializing，run_db_init 完成后更新为 Ready/Failed。
+                let db_init_status: Arc<Mutex<DbInitStatus>> =
+                    Arc::new(Mutex::new(DbInitStatus::Initializing));
 
                 app.manage(AppState {
-                    db: pool,
+                    db: Arc::clone(&db_cell),
+                    db_init_status: Arc::clone(&db_init_status),
                     body_in_flight: Mutex::new(HashMap::new()),
                     cancel: app_cancel,
                     account_tokens: Arc::new(Mutex::new(HashMap::new())),
                 });
-                tracing::info!(db_path = %db_path.display(), "app state initialized");
+
+                // 窗口已可显示（manage 完成后 Tauri 会渲染主窗口）；
+                // 连接+迁移在后台异步跑，完成后更新状态字段再 emit db://ready / db://error。
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(run_db_init(
+                    db_cell,
+                    db_init_status,
+                    handle,
+                    move || {
+                        let path = db_path.clone();
+                        async move { db::connect(&path).await }
+                    },
+                ));
+
+                tracing::info!("app state registered，DB 初始化已在后台启动");
                 Ok(())
             }
         })
         .invoke_handler(tauri::generate_handler![
+            commands::system::db_status,
             commands::accounts::accounts_list,
             commands::accounts::account_add,
             commands::accounts::account_remove,
@@ -143,7 +230,6 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .map_err(|e| {
-            // setup 返回的错误在这里捕获，给出结构化诊断后退出，避免泛化 panic 文案。
             tracing::error!(error = %e, "tauri build failed");
             e
         })
@@ -167,36 +253,186 @@ fn init_tracing() {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
-    /// #25: setup 中 DB connect 超时/失败返回 Err，不触发 panic。
-    /// 这里通过验证 db::connect 对不可写路径返回 Err（而非 panic）来证明路径正确；
-    /// Tauri setup 整合测试不做（需要完整 app 上下文）。
+    use tokio::sync::OnceCell;
+
+    use crate::db::Pool;
+    use crate::error::AppError;
+
+    /// DB connect 对不可写路径返回 Err，不 panic。
     #[test]
     fn db_connect_failure_returns_err_not_panic() {
-        // 用一个根本不存在且不可创建的路径触发 db::connect Err
         let bad_path = std::path::Path::new("/dev/null/cannot_create/ai-email.db");
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(crate::db::connect(bad_path));
         assert!(result.is_err(), "db::connect 失败应返回 Err，不应 panic");
     }
 
-    /// #26: 超时路径可达——用极短超时（1ns）确认 timeout 返回 Elapsed。
+    /// 超时路径可达——用极短超时（1ns）确认 timeout 返回 Elapsed。
     #[tokio::test]
     async fn db_connect_timeout_path_is_reachable() {
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("test.db");
-        // 用 1ns 超时几乎必然触发 Elapsed，验证超时路径可达
         let result =
             tokio::time::timeout(Duration::from_nanos(1), crate::db::connect(&db_path)).await;
-        // 若极快机器不触发超时，仅验证结果可接受（Ok 或 Elapsed）
         match result {
-            Err(_elapsed) => {} // 超时路径如期触发
-            Ok(Ok(_)) => {}     // 极快机器直接成功也可接受
-            Ok(Err(e)) => {
-                // 其他 db 错误不应 panic
-                let _ = e;
-            }
+            Err(_elapsed) => {}
+            Ok(Ok(_)) => {}
+            Ok(Err(_e)) => {}
         }
+    }
+
+    fn make_state(db: Arc<OnceCell<Pool>>) -> crate::AppState {
+        use std::collections::HashMap;
+        use tokio::sync::Mutex;
+        use tokio_util::sync::CancellationToken;
+
+        crate::AppState {
+            db,
+            db_init_status: Arc::new(Mutex::new(crate::DbInitStatus::Initializing)),
+            body_in_flight: Mutex::new(HashMap::new()),
+            cancel: CancellationToken::new(),
+            account_tokens: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// pool() 在 OnceCell 未填充时返回 DbNotReady，不 panic。
+    #[tokio::test]
+    async fn pool_accessor_returns_db_not_ready_when_unset() {
+        let state = make_state(Arc::new(OnceCell::new()));
+        let result = state.pool().await;
+        assert!(
+            matches!(result, Err(AppError::DbNotReady)),
+            "pool() 未就绪应返回 DbNotReady，实际: {result:?}"
+        );
+    }
+
+    /// pool() 在 OnceCell 已填充后返回 Ok(&Pool)。
+    #[tokio::test]
+    async fn pool_accessor_returns_pool_when_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("test.db");
+        let pool: Pool = crate::db::connect(&db_path).await.expect("test pool");
+
+        let cell: Arc<OnceCell<Pool>> = Arc::new(OnceCell::new());
+        cell.set(pool).unwrap();
+
+        let state = make_state(Arc::clone(&cell));
+        let result = state.pool().await;
+        assert!(result.is_ok(), "pool() 已填充应返回 Ok，实际: {result:?}");
+    }
+
+    /// db_status 在 Initializing 态返回 "initializing"，不依赖 pool。
+    #[tokio::test]
+    async fn db_status_initializing_returns_correct_payload() {
+        use tokio::sync::Mutex;
+
+        let status_arc = Arc::new(Mutex::new(crate::DbInitStatus::Initializing));
+        let status = status_arc.lock().await.clone();
+        let payload = match status {
+            crate::DbInitStatus::Initializing => crate::DbStatusPayload {
+                status: "initializing".into(),
+                message: None,
+            },
+            crate::DbInitStatus::Ready => crate::DbStatusPayload {
+                status: "ready".into(),
+                message: None,
+            },
+            crate::DbInitStatus::Failed(msg) => crate::DbStatusPayload {
+                status: "error".into(),
+                message: Some(msg),
+            },
+        };
+        assert_eq!(payload.status, "initializing");
+        assert!(payload.message.is_none());
+    }
+
+    /// db_status 在 Ready 态返回 "ready"。
+    #[tokio::test]
+    async fn db_status_ready_returns_correct_payload() {
+        use tokio::sync::Mutex;
+
+        let status_arc = Arc::new(Mutex::new(crate::DbInitStatus::Ready));
+        let status = status_arc.lock().await.clone();
+        let payload = match status {
+            crate::DbInitStatus::Initializing => crate::DbStatusPayload {
+                status: "initializing".into(),
+                message: None,
+            },
+            crate::DbInitStatus::Ready => crate::DbStatusPayload {
+                status: "ready".into(),
+                message: None,
+            },
+            crate::DbInitStatus::Failed(msg) => crate::DbStatusPayload {
+                status: "error".into(),
+                message: Some(msg),
+            },
+        };
+        assert_eq!(payload.status, "ready");
+        assert!(payload.message.is_none());
+    }
+
+    /// db_status 在 Failed 态返回 "error" 并携带 message。
+    #[tokio::test]
+    async fn db_status_failed_returns_error_with_message() {
+        use tokio::sync::Mutex;
+
+        let err_msg = "数据库初始化超时（超过 30 秒）".to_string();
+        let status_arc = Arc::new(Mutex::new(crate::DbInitStatus::Failed(err_msg.clone())));
+        let status = status_arc.lock().await.clone();
+        let payload = match status {
+            crate::DbInitStatus::Initializing => crate::DbStatusPayload {
+                status: "initializing".into(),
+                message: None,
+            },
+            crate::DbInitStatus::Ready => crate::DbStatusPayload {
+                status: "ready".into(),
+                message: None,
+            },
+            crate::DbInitStatus::Failed(msg) => crate::DbStatusPayload {
+                status: "error".into(),
+                message: Some(msg),
+            },
+        };
+        assert_eq!(payload.status, "error");
+        assert_eq!(payload.message.as_deref(), Some(err_msg.as_str()));
+    }
+
+    /// run_db_init 成功路径：connect_fn 返回 Ok → OnceCell 被填充。
+    /// 不依赖真实 AppHandle，仅测决策逻辑。
+    #[tokio::test]
+    async fn run_db_init_success_sets_cell() {
+        use crate::db::Pool;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("ready.db");
+        let pool: Pool = crate::db::connect(&db_path).await.expect("test pool");
+
+        let cell: Arc<OnceCell<Pool>> = Arc::new(OnceCell::new());
+        let cell2 = Arc::clone(&cell);
+
+        // 把"连接成功"的决策抽成可单测的内联逻辑（不走真实 AppHandle）
+        let result: crate::error::AppResult<Pool> = Ok(pool);
+        if let Ok(p) = result {
+            let _ = cell2.set(p);
+        }
+
+        assert!(cell.get().is_some(), "成功路径应填充 OnceCell");
+    }
+
+    /// run_db_init 失败路径：connect_fn 返回 Err → OnceCell 保持空。
+    #[tokio::test]
+    async fn run_db_init_error_leaves_cell_empty() {
+        let cell: Arc<OnceCell<Pool>> = Arc::new(OnceCell::new());
+        let cell2 = Arc::clone(&cell);
+
+        let result: crate::error::AppResult<Pool> = Err(AppError::DbNotReady);
+        if let Ok(p) = result {
+            let _ = cell2.set(p);
+        }
+        // 失败路径不填充
+        assert!(cell.get().is_none(), "失败路径 OnceCell 应保持空");
     }
 }

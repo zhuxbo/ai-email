@@ -163,8 +163,51 @@ export async function suggestedReplyDismiss(id: string): Promise<void> {
 
 // ---------------------------------------------------------------------------
 // Tauri event subscriptions — backend pushes these after background AI tasks
-// finish, so the frontend can refresh without fixed-delay polling timers.
+// finish, or after the DB is ready/failed to initialize.
 // ---------------------------------------------------------------------------
+
+/** Payload emitted by `db://ready` when DB connect + migrate succeeds. */
+export type DbReadyPayload = Record<string, never>;
+
+/** Payload emitted by `db://error` when DB init fails or times out. */
+export interface DbErrorPayload {
+  message: string;
+}
+
+/** Payload returned by `db_status` command. status: "initializing"|"ready"|"error" */
+export interface DbStatusPayload {
+  status: 'initializing' | 'ready' | 'error';
+  message: string | null;
+}
+
+/**
+ * 主动查询 DB 初始化状态。不依赖事件系统，pool 未就绪时也可调用。
+ * 用于注册 db://ready / db://error 监听后的兜底查询，消除 emit-before-listen 竞态。
+ */
+export async function getDbStatus(): Promise<DbStatusPayload> {
+  return invoke('db_status');
+}
+
+/**
+ * Subscribe to `db://ready` — fired once when the database has finished
+ * connecting and running migrations. Call the returned unlisten fn on cleanup.
+ */
+export async function onDbReady(cb: (payload: DbReadyPayload) => void): Promise<UnlistenFn> {
+  return listen<DbReadyPayload>('db://ready', (event) => {
+    cb(event.payload);
+  });
+}
+
+/**
+ * Subscribe to `db://error` — fired when database initialization fails or
+ * times out. The payload includes a human-readable message. Call the returned
+ * unlisten fn on cleanup.
+ */
+export async function onDbError(cb: (payload: DbErrorPayload) => void): Promise<UnlistenFn> {
+  return listen<DbErrorPayload>('db://error', (event) => {
+    cb(event.payload);
+  });
+}
 
 /** Payload emitted by `mail://classified` when background classify finishes. */
 export interface MailClassifiedPayload {

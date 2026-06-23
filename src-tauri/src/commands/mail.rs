@@ -25,7 +25,8 @@ pub async fn inbox_sync(
     state: State<'_, AppState>,
     account_id: Uuid,
 ) -> AppResult<SyncReport> {
-    let account = db::accounts::get(&state.db, account_id)
+    let pool = state.pool().await?;
+    let account = db::accounts::get(pool, account_id)
         .await?
         .ok_or_else(|| AppError::Config(format!("account {account_id} not found")))?;
 
@@ -34,7 +35,7 @@ pub async fn inbox_sync(
         .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
 
     sync::sync_inbox(
-        &state.db,
+        pool,
         &account,
         &auth,
         state.cancel.clone(),
@@ -49,7 +50,7 @@ pub async fn mailboxes_list(
     state: State<'_, AppState>,
     account_id: Uuid,
 ) -> AppResult<Vec<Mailbox>> {
-    mailboxes::list(&state.db, account_id).await
+    mailboxes::list(state.pool().await?, account_id).await
 }
 
 /// Sync a specific mailbox on demand. Used when the user navigates to a non-INBOX folder
@@ -60,7 +61,8 @@ pub async fn mailbox_sync(
     account_id: Uuid,
     mailbox_name: String,
 ) -> AppResult<SyncReport> {
-    let account = db::accounts::get(&state.db, account_id)
+    let pool = state.pool().await?;
+    let account = db::accounts::get(pool, account_id)
         .await?
         .ok_or_else(|| AppError::Config(format!("account {account_id} not found")))?;
 
@@ -68,7 +70,7 @@ pub async fn mailbox_sync(
         .await
         .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
 
-    sync::sync_mailbox(&state.db, &account, &auth, &mailbox_name).await
+    sync::sync_mailbox(pool, &account, &auth, &mailbox_name).await
 }
 
 #[tauri::command]
@@ -78,12 +80,12 @@ pub async fn messages_list(
     limit: i64,
     offset: i64,
 ) -> AppResult<Vec<MessageHeader>> {
-    messages::list_in_mailbox(&state.db, mailbox_id, limit, offset).await
+    messages::list_in_mailbox(state.pool().await?, mailbox_id, limit, offset).await
 }
 
 #[tauri::command]
 pub async fn message_get(state: State<'_, AppState>, id: Uuid) -> AppResult<MessageHeader> {
-    messages::get(&state.db, id)
+    messages::get(state.pool().await?, id)
         .await?
         .ok_or_else(|| AppError::Config(format!("message {id} not found")))
 }
@@ -102,8 +104,9 @@ pub async fn message_get(state: State<'_, AppState>, id: Uuid) -> AppResult<Mess
 /// 克隆 receiver 后先读当前值，已为 `true` 则直接查缓存，否则调用 `changed().await` 等待。
 #[tauri::command]
 pub async fn message_body(state: State<'_, AppState>, id: Uuid) -> AppResult<MessageBody> {
+    let pool = state.pool().await?;
     // 快路径：缓存命中直接返回。
-    if let Some(body) = bodies::get(&state.db, id).await? {
+    if let Some(body) = bodies::get(pool, id).await? {
         return Ok(body);
     }
 
@@ -128,7 +131,7 @@ pub async fn message_body(state: State<'_, AppState>, id: Uuid) -> AppResult<Mes
                 tx,
             };
 
-            return fetch_and_cache_body(&state.db, id).await;
+            return fetch_and_cache_body(pool, id).await;
             // _guard 在此 drop：移除 map 条目 + send(true) 通知所有等待者。
         }
     };
@@ -140,7 +143,7 @@ pub async fn message_body(state: State<'_, AppState>, id: Uuid) -> AppResult<Mes
         let _ = rx.changed().await;
     }
 
-    bodies::get(&state.db, id)
+    bodies::get(pool, id)
         .await?
         .ok_or_else(|| AppError::Config(format!("body {id} not in cache after in-flight fetch")))
 }
@@ -211,7 +214,7 @@ async fn fetch_and_cache_body(db: &db::Pool, id: Uuid) -> AppResult<MessageBody>
 
 #[tauri::command]
 pub async fn smtp_send(state: State<'_, AppState>, draft: SendDraft) -> AppResult<SendReceipt> {
-    smtp::send_draft(&state.db, &draft).await
+    smtp::send_draft(state.pool().await?, &draft).await
 }
 
 /// `set_seen` / `set_flagged` 公共流程：解析 → connect → select → STORE → logout → 本地 flags 同步。
@@ -249,7 +252,7 @@ async fn set_flag_impl(db: &db::Pool, id: Uuid, flag: &str, add: bool) -> AppRes
 
 #[tauri::command]
 pub async fn message_set_seen(state: State<'_, AppState>, id: Uuid, seen: bool) -> AppResult<()> {
-    set_flag_impl(&state.db, id, "\\Seen", seen).await
+    set_flag_impl(state.pool().await?, id, "\\Seen", seen).await
 }
 
 #[tauri::command]
@@ -258,21 +261,21 @@ pub async fn message_set_flagged(
     id: Uuid,
     flagged: bool,
 ) -> AppResult<()> {
-    set_flag_impl(&state.db, id, "\\Flagged", flagged).await
+    set_flag_impl(state.pool().await?, id, "\\Flagged", flagged).await
 }
 
 /// 删除 = 移到废纸篓（可恢复）。move 成功即逻辑成功；本地 remove 失败仅 warn 返 Ok
 /// （服务端权威态已变，宁留极罕见幽灵行也不让用户看到删除回退）。
 #[tauri::command]
 pub async fn message_delete(state: State<'_, AppState>, id: Uuid) -> AppResult<()> {
-    let db = &state.db;
-    let msg = messages::get(db, id)
+    let pool = state.pool().await?;
+    let msg = messages::get(pool, id)
         .await?
         .ok_or_else(|| AppError::Config(format!("message {id} not found")))?;
-    let account = db::accounts::get(db, msg.account_id)
+    let account = db::accounts::get(pool, msg.account_id)
         .await?
         .ok_or_else(|| AppError::Config(format!("account {} not found", msg.account_id)))?;
-    let mailbox = mailboxes::get(db, msg.mailbox_id)
+    let mailbox = mailboxes::get(pool, msg.mailbox_id)
         .await?
         .ok_or_else(|| AppError::Config(format!("mailbox {} not found", msg.mailbox_id)))?;
     let uid = u32::try_from(msg.imap_uid)
@@ -295,7 +298,7 @@ pub async fn message_delete(state: State<'_, AppState>, id: Uuid) -> AppResult<(
         tracing::warn!(error = ?e, "imap logout failed (non-fatal)");
     }
 
-    if let Err(e) = messages::remove(db, id).await {
+    if let Err(e) = messages::remove(pool, id).await {
         tracing::warn!(message_id = %id, error = ?e, "local remove after trash-move failed (non-fatal)");
     }
     Ok(())

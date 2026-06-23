@@ -86,7 +86,7 @@ fn validate_port(port: i32, field: &str) -> AppResult<()> {
 
 #[tauri::command]
 pub async fn accounts_list(state: State<'_, AppState>) -> AppResult<Vec<Account>> {
-    accounts::list(&state.db).await
+    accounts::list(state.pool().await?).await
 }
 
 #[tauri::command]
@@ -102,6 +102,7 @@ pub async fn account_add(state: State<'_, AppState>, form: AddAccountForm) -> Ap
         )));
     }
 
+    let pool = state.pool().await?;
     let auth = SecretString::from(form.auth_code);
     let input = AccountInput {
         email: form.email,
@@ -113,7 +114,7 @@ pub async fn account_add(state: State<'_, AppState>, form: AddAccountForm) -> Ap
         smtp_port: form.smtp_port,
     };
 
-    let account = accounts::insert(&state.db, &input).await?;
+    let account = accounts::insert(pool, &input).await?;
     let id = account.id;
 
     let stored = tokio::task::spawn_blocking(move || keychain::store_auth_code(id, &auth))
@@ -122,7 +123,7 @@ pub async fn account_add(state: State<'_, AppState>, form: AddAccountForm) -> Ap
 
     if let Err(e) = stored {
         // Roll the DB back so the user isn't stuck with a row whose secret is missing.
-        if let Err(cleanup) = accounts::delete(&state.db, id).await {
+        if let Err(cleanup) = accounts::delete(pool, id).await {
             tracing::error!(error = ?cleanup, "failed to roll back account row after keychain failure");
         }
         return Err(e);
@@ -161,7 +162,7 @@ pub async fn account_remove(state: State<'_, AppState>, id: Uuid) -> AppResult<(
         }
     }
 
-    accounts::delete(&state.db, id).await?;
+    accounts::delete(state.pool().await?, id).await?;
     tracing::info!(account_id = %id, "account removed");
     Ok(())
 }

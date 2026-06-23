@@ -25,6 +25,11 @@ vi.mock('./lib/tauri', () => ({
     autoReplyHandler = cb;
     return Promise.resolve(mockUnlistenAutoReply);
   }),
+  // db init events — resolved immediately with a no-op unlisten in tests
+  onDbReady: vi.fn((): Promise<UnlistenFn> => Promise.resolve(vi.fn())),
+  onDbError: vi.fn((): Promise<UnlistenFn> => Promise.resolve(vi.fn())),
+  // 兜底查询：默认返回 initializing（不触发状态推进，让 db store mock 保持 ready）
+  getDbStatus: vi.fn().mockResolvedValue({ status: 'initializing' as const, message: null }),
   // commands used during app init / rendering
   accountsList: vi.fn().mockResolvedValue([]),
   unifiedInbox: vi.fn().mockResolvedValue({ messages: [], errors: {} }),
@@ -101,6 +106,17 @@ vi.mock('./lib/store/ui', () => ({
     (selector: (s: { theme: string }) => unknown) => selector({ theme: 'light' }),
     {
       getState: () => ({ theme: 'light' }),
+    },
+  ),
+}));
+
+// DB 状态在测试中固定为 ready，跳过 loading/error 界面，让主逻辑可测。
+vi.mock('./lib/store/db', () => ({
+  useDbStore: Object.assign(
+    (selector: (s: { status: string; errorMessage: null }) => unknown) =>
+      selector({ status: 'ready', errorMessage: null }),
+    {
+      getState: () => ({ setReady: vi.fn(), setError: vi.fn() }),
     },
   ),
 }));

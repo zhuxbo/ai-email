@@ -9,3 +9,4 @@ pub mod ai;
 pub mod ai_config;
 pub mod auto_reply;
 pub mod mail;
+pub mod system;

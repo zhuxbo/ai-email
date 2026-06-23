@@ -10,12 +10,22 @@ import { MessageList } from './components/message-list';
 import { useAiStore } from './lib/store/ai';
 import { useAutoReplyStore } from './lib/store/auto-reply';
 import { useComposeStore } from './lib/store/compose';
+import { useDbStore } from './lib/store/db';
 import { useMailStore } from './lib/store/mail';
 import { applyTheme, useUiStore } from './lib/store/ui';
-import { onAutoReplyUpdated, onMailClassified } from './lib/tauri';
+import {
+  getDbStatus,
+  onAutoReplyUpdated,
+  onDbError,
+  onDbReady,
+  onMailClassified,
+} from './lib/tauri';
 import './App.css';
 
 function App() {
+  const dbStatus = useDbStore((s) => s.status);
+  const dbErrorMessage = useDbStore((s) => s.errorMessage);
+
   const loadAccounts = useMailStore((s) => s.loadAccounts);
   const accounts = useMailStore((s) => s.accounts);
   const selectedAccountId = useMailStore((s) => s.selectedAccountId);
@@ -33,6 +43,7 @@ function App() {
   const aiError = useAiStore((s) => s.error);
   const composeError = useComposeStore((s) => s.error);
   const autoReplyError = useAutoReplyStore((s) => s.error);
+  const autoReplyCount = useAutoReplyStore((s) => s.queue.length);
 
   const [addOpen, setAddOpen] = useState(false);
   const [aiSettingsOpen, setAiSettingsOpen] = useState(false);
@@ -43,7 +54,64 @@ function App() {
     applyTheme(useUiStore.getState().theme);
   }, []);
 
+  // DB 就绪/失败事件订阅——在最外层 effect 里注册，与主逻辑解耦。
+  // mounted 守卫防止 StrictMode 双 mount 下孤儿监听器泄漏。
+  //
+  // 竞态兜底：Tauri emit 无重放，若 db::connect 在 listener 注册前完成则事件丢失。
+  // 解决方案：先 await 两个 listener 注册完成，再发一次 getDbStatus() 主动查询——
+  // 若查询返回 ready/error 则经状态机（只前进）直接进入终态；若返回 initializing，
+  // 则 listener 此刻必已就位、后续 emit 不会再丢。先注册后查询消除了"查询太早 + emit 丢失"
+  // 的残留窗口；事件与查询哪条先到都正确。
   useEffect(() => {
+    // 守卫用对象属性而非裸 let：对象属性跨 await 会被 CFA widen 回 boolean，
+    // 既保留卸载守卫语义，又不会被 no-unnecessary-condition 误判为恒 falsy。
+    const guard = { mounted: true };
+    let unlistenReady: (() => void) | null = null;
+    let unlistenError: (() => void) | null = null;
+
+    void (async () => {
+      const [readyFn, errorFn] = await Promise.all([
+        onDbReady(() => {
+          useDbStore.getState().setReady();
+        }),
+        onDbError(({ message }) => {
+          useDbStore.getState().setError(message);
+        }),
+      ]);
+
+      // 注册期间组件已卸载：立即清理，避免孤儿监听器。
+      if (!guard.mounted) {
+        readyFn();
+        errorFn();
+        return;
+      }
+      unlistenReady = readyFn;
+      unlistenError = errorFn;
+
+      // listener 已就位，再兜底查询一次当前状态（emit 可能在注册前已发生而丢失）。
+      // 此处无需 mounted 守卫：setReady/setError 操作的是全局 zustand store（非 React
+      // setState），卸载后调用安全且幂等（状态机只前进）；listener 清理已由上面的 guard
+      // 分支与 cleanup 覆盖。
+      const payload = await getDbStatus();
+      if (payload.status === 'ready') {
+        useDbStore.getState().setReady();
+      } else if (payload.status === 'error') {
+        useDbStore.getState().setError(payload.message ?? '未知错误');
+      }
+      // initializing：listener 已就位，等 emit 即可，不会丢。
+    })();
+
+    return () => {
+      guard.mounted = false;
+      unlistenReady?.();
+      unlistenError?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    // 仅在 DB 就绪后初始化依赖数据库的 store。
+    if (dbStatus !== 'ready') return;
+
     void loadAccounts();
     void useAiStore.getState().loadAiConfig();
     void useAutoReplyStore.getState().loadQueue();
@@ -75,7 +143,7 @@ function App() {
       unlistenClassified?.();
       unlistenAutoReply?.();
     };
-  }, [loadAccounts]);
+  }, [dbStatus, loadAccounts]);
 
   // mail / ai / compose / autoReply 四路错误各自成条，互不掩盖；各自独立关闭，不连带清掉对方未读的错误。
   const errorToasts: { key: string; text: string; clear: () => void }[] = [];
@@ -104,6 +172,28 @@ function App() {
         useAutoReplyStore.getState().clearError();
       },
     });
+
+  if (dbStatus === 'loading') {
+    return (
+      <div className="flex h-screen items-center justify-center bg-surface text-content-muted text-sm">
+        数据库初始化中…
+      </div>
+    );
+  }
+
+  if (dbStatus === 'error') {
+    return (
+      <div className="flex h-screen items-center justify-center bg-surface">
+        <div
+          role="alert"
+          className="max-w-sm rounded bg-danger px-6 py-5 text-sm text-white shadow-lg"
+        >
+          <p className="font-semibold mb-1">数据库启动失败</p>
+          <p className="break-words text-white/90">{dbErrorMessage ?? '未知错误'}</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <>
@@ -135,7 +225,7 @@ function App() {
           onOpenAutoReply: () => {
             setAutoReplyOpen(true);
           },
-          autoReplyCount: useAutoReplyStore((s) => s.queue.length),
+          autoReplyCount,
         }}
         onQueryChange={(q) => {
           setQuery(q);

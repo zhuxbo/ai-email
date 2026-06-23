@@ -18,6 +18,9 @@ pub enum AppError {
     #[error("数据库迁移错误")]
     Migrate(#[from] sqlx::migrate::MigrateError),
 
+    #[error("数据库初始化中，请稍后重试")]
+    DbNotReady,
+
     #[error("config error: {0}")]
     Config(String),
 

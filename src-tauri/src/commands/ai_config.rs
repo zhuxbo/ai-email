@@ -89,7 +89,7 @@ fn validate_base_url(raw: Option<String>) -> AppResult<Option<String>> {
 
 #[tauri::command]
 pub async fn models_list(state: State<'_, AppState>) -> AppResult<Vec<AiModel>> {
-    ai_models::list(&state.db).await
+    ai_models::list(state.pool().await?).await
 }
 
 #[tauri::command]
@@ -110,14 +110,15 @@ pub async fn model_add(state: State<'_, AppState>, form: AddModelForm) -> AppRes
         model_id: form.model_id,
         base_url,
     };
-    let model = ai_models::insert(&state.db, &input).await?;
+    let pool = state.pool().await?;
+    let model = ai_models::insert(pool, &input).await?;
     let id = model.id;
 
     let stored = tokio::task::spawn_blocking(move || keychain::store_ai_key(id, &key))
         .await
         .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?;
     if let Err(e) = stored {
-        if let Err(cleanup) = ai_models::delete(&state.db, id).await {
+        if let Err(cleanup) = ai_models::delete(pool, id).await {
             tracing::error!(error = ?cleanup, "failed to roll back ai_models row after keychain failure");
         }
         return Err(e);
@@ -165,14 +166,14 @@ pub async fn model_remove(state: State<'_, AppState>, id: Uuid) -> AppResult<()>
         }
     }
 
-    ai_models::delete(&state.db, id).await?;
+    ai_models::delete(state.pool().await?, id).await?;
     tracing::info!(model_id = %id, "ai model removed");
     Ok(())
 }
 
 #[tauri::command]
 pub async fn role_defaults_list(state: State<'_, AppState>) -> AppResult<Vec<RoleDefault>> {
-    ai_role_defaults::list(&state.db).await
+    ai_role_defaults::list(state.pool().await?).await
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -193,12 +194,12 @@ pub async fn role_default_set(
     ) {
         return Err(AppError::Config(format!("unknown role: {}", form.role)));
     }
-    ai_role_defaults::set(&state.db, &form.role, form.model_id).await
+    ai_role_defaults::set(state.pool().await?, &form.role, form.model_id).await
 }
 
 #[tauri::command]
 pub async fn role_default_clear(state: State<'_, AppState>, role: String) -> AppResult<()> {
-    ai_role_defaults::clear(&state.db, &role).await
+    ai_role_defaults::clear(state.pool().await?, &role).await
 }
 
 #[cfg(test)]

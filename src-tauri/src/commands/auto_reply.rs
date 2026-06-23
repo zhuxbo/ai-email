@@ -44,7 +44,7 @@ pub async fn auto_reply_rules_list(
     state: State<'_, AppState>,
     account_id: Uuid,
 ) -> AppResult<Vec<AutoReplyRule>> {
-    auto_reply_rules::list_by_account(&state.db, account_id).await
+    auto_reply_rules::list_by_account(state.pool().await?, account_id).await
 }
 
 #[tauri::command]
@@ -58,7 +58,7 @@ pub async fn auto_reply_rule_add(
         &input.match_category,
         input.match_priority_ceiling,
     )?;
-    auto_reply_rules::insert(&state.db, &input).await
+    auto_reply_rules::insert(state.pool().await?, &input).await
 }
 
 #[tauri::command]
@@ -72,12 +72,12 @@ pub async fn auto_reply_rule_update(
         &rule.match_category,
         rule.match_priority_ceiling,
     )?;
-    auto_reply_rules::update(&state.db, &rule).await
+    auto_reply_rules::update(state.pool().await?, &rule).await
 }
 
 #[tauri::command]
 pub async fn auto_reply_rule_remove(state: State<'_, AppState>, id: Uuid) -> AppResult<()> {
-    auto_reply_rules::delete(&state.db, id).await
+    auto_reply_rules::delete(state.pool().await?, id).await
 }
 
 #[tauri::command]
@@ -86,17 +86,17 @@ pub async fn auto_reply_rule_set_enabled(
     id: Uuid,
     enabled: bool,
 ) -> AppResult<()> {
-    auto_reply_rules::set_enabled(&state.db, id, enabled).await
+    auto_reply_rules::set_enabled(state.pool().await?, id, enabled).await
 }
 
 #[tauri::command]
 pub async fn suggested_replies_list(state: State<'_, AppState>) -> AppResult<Vec<SuggestedReply>> {
-    suggested_replies::list_pending(&state.db).await
+    suggested_replies::list_pending(state.pool().await?).await
 }
 
 #[tauri::command]
 pub async fn suggested_reply_dismiss(state: State<'_, AppState>, id: Uuid) -> AppResult<()> {
-    suggested_replies::dismiss(&state.db, id).await
+    suggested_replies::dismiss(state.pool().await?, id).await
 }
 
 #[cfg(test)]
