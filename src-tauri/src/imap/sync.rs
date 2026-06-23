@@ -1,9 +1,9 @@
-//! Orchestrates one full INBOX sync.
+//! Orchestrates IMAP mailbox sync.
 //!
-//! Flow:
+//! Flow (for any mailbox, parameterized via `sync_mailbox`):
 //!   1. IMAPS connect → login → ID
-//!   2. LIST every folder + upsert into `mailboxes` (UI will need this for non-INBOX later)
-//!   3. SELECT INBOX → grab `exists` / `uid_next` / `uid_validity`
+//!   2. LIST every folder + upsert into `mailboxes` (with special_use detection)
+//!   3. SELECT <mailbox> → grab `exists` / `uid_next` / `uid_validity`
 //!   4. FETCH range:
 //!      - First sync (no prior `uid_next`): seq range `(exists-49):*` — guarantees ≤50 rows.
 //!      - Incremental: `UID FETCH <prev_uid_next>:*` — gets everything new.
@@ -11,9 +11,12 @@
 //!   6. Bookkeeping: `mailboxes.uid_next` / `last_synced_at`, `accounts.last_synced_at`
 //!   7. LOGOUT (best-effort — already-committed sync isn't undone by logout failure)
 //!
-//! After returning the SyncReport, new messages are classified and auto-reply rules are
-//! evaluated in a detached tokio::spawn. On completion, Tauri events are emitted so the
-//! frontend can refresh without fixed-delay timers:
+//! `sync_inbox` is a convenience wrapper around `sync_mailbox("INBOX")`.
+//! Non-INBOX syncs (Sent, Drafts, Trash, etc.) are triggered on-demand when the user
+//! navigates to that mailbox — we do not bulk-sync all mailboxes automatically.
+//!
+//! After returning the SyncReport (INBOX only), new messages are classified and
+//! auto-reply rules are evaluated in a detached tokio::spawn:
 //!   - `mail://classified`    — background classify finished (payload: ClassifiedPayload)
 //!   - `autoreply://updated`  — evaluate_rules finished (payload: AutoReplyPayload)
 //!
@@ -93,17 +96,27 @@ pub fn decide_sync_mode(
     SyncMode::Incremental { prev_uid_next }
 }
 
-pub async fn sync_inbox(
+/// Sync a specific mailbox by name. Reusable core shared by `sync_inbox` and the
+/// on-demand `mailbox_sync` command.
+///
+/// - Lists all mailboxes and upserts them (with special_use) on every call.
+/// - Applies UIDVALIDITY change detection and incremental sync logic.
+/// - Returns `(SyncReport, new_message_ids)` so the caller can decide whether
+///   to kick off background AI tasks.
+async fn sync_mailbox_inner(
     pool: &Pool,
     account: &Account,
     auth_code: &SecretString,
-    cancel: CancellationToken,
-    app_handle: AppHandle,
-) -> AppResult<SyncReport> {
+    mailbox_name: &str,
+) -> AppResult<(SyncReport, Vec<uuid::Uuid>)> {
     let port = u16::try_from(account.imap_port)
         .map_err(|_| AppError::Imap(format!("invalid imap_port: {}", account.imap_port)))?;
 
-    tracing::info!(account_id = %account.id, host = %account.imap_host, "inbox sync starting");
+    tracing::info!(
+        account_id = %account.id,
+        mailbox = mailbox_name,
+        "mailbox sync starting"
+    );
     let mut client =
         ImapClient::connect(&account.imap_host, port, &account.email, auth_code).await?;
 
@@ -111,18 +124,18 @@ pub async fn sync_inbox(
         mailboxes::upsert(pool, account.id, &info).await?;
     }
 
-    let selected = client.select("INBOX").await?;
-    let inbox = mailboxes::get_by_name(pool, account.id, "INBOX")
+    let selected = client.select(mailbox_name).await?;
+    let mailbox = mailboxes::get_by_name(pool, account.id, mailbox_name)
         .await?
-        .ok_or_else(|| AppError::Imap("INBOX not found after upsert".into()))?;
+        .ok_or_else(|| AppError::Imap(format!("{mailbox_name} not found after upsert")))?;
 
     // Decide fetch strategy based on stored vs. server UIDVALIDITY (audit #2).
     let mode = decide_sync_mode(
-        inbox.uid_validity,
-        inbox.uid_next,
+        mailbox.uid_validity,
+        mailbox.uid_next,
         selected.uid_validity.map(i64::from),
     );
-    tracing::debug!(account_id = %account.id, ?mode, "sync mode decided");
+    tracing::debug!(account_id = %account.id, mailbox = mailbox_name, ?mode, "sync mode decided");
 
     // UIDVALIDITY mismatch: drop stale local rows and reset bookkeeping before re-fetching.
     if mode == SyncMode::ResetRefetch {
@@ -132,11 +145,12 @@ pub async fn sync_inbox(
             .ok_or_else(|| AppError::Imap("server reported no UIDVALIDITY on reset path".into()))?;
         tracing::warn!(
             account_id = %account.id,
-            old_validity = ?inbox.uid_validity,
+            mailbox = mailbox_name,
+            old_validity = ?mailbox.uid_validity,
             new_validity,
             "UIDVALIDITY changed — resetting local cache"
         );
-        mailboxes::reset_mailbox_for_uidvalidity_change(pool, inbox.id, new_validity).await?;
+        mailboxes::reset_mailbox_for_uidvalidity_change(pool, mailbox.id, new_validity).await?;
     }
 
     let fetched = if selected.exists == 0 {
@@ -178,7 +192,7 @@ pub async fn sync_inbox(
                 &mut *tx,
                 &MessageInsert {
                     account_id: account.id,
-                    mailbox_id: inbox.id,
+                    mailbox_id: mailbox.id,
                     imap_uid: i64::from(fh.uid),
                     rfc_message_id: h.rfc_message_id.clone(),
                     thread_id: h.thread_id.clone(),
@@ -211,12 +225,12 @@ pub async fn sync_inbox(
     for (uid, flags) in flag_updates {
         // Existing UID seen again in an incremental window: refresh its flags so
         // read/starred state stays in sync with the server (audit #64).
-        messages::update_flags_by_uid(pool, inbox.id, uid, flags).await?;
+        messages::update_flags_by_uid(pool, mailbox.id, uid, flags).await?;
     }
 
     mailboxes::update_after_sync(
         pool,
-        inbox.id,
+        mailbox.id,
         selected.uid_next.map(i64::from),
         selected.uid_validity.map(i64::from),
     )
@@ -229,10 +243,30 @@ pub async fn sync_inbox(
 
     tracing::info!(
         account_id = %account.id,
+        mailbox = mailbox_name,
         inserted,
         total_in_mailbox = selected.exists,
-        "inbox sync done"
+        "mailbox sync done"
     );
+
+    Ok((
+        SyncReport {
+            new_message_count: inserted,
+            total_in_mailbox: i64::from(selected.exists),
+        },
+        new_ids,
+    ))
+}
+
+/// Sync INBOX and kick off background AI classification + auto-reply evaluation.
+pub async fn sync_inbox(
+    pool: &Pool,
+    account: &Account,
+    auth_code: &SecretString,
+    cancel: CancellationToken,
+    app_handle: AppHandle,
+) -> AppResult<SyncReport> {
+    let (report, new_ids) = sync_mailbox_inner(pool, account, auth_code, "INBOX").await?;
 
     // Kick off background classification for the freshly-landed rows. We don't await — UI
     // gets the sync report immediately and is notified via Tauri events when background
@@ -328,10 +362,41 @@ pub async fn sync_inbox(
         });
     }
 
-    Ok(SyncReport {
-        new_message_count: inserted,
-        total_in_mailbox: i64::from(selected.exists),
-    })
+    Ok(report)
+}
+
+/// Sync a specific mailbox on demand (called when the user navigates to a non-INBOX folder).
+/// Does NOT kick off AI classification or auto-reply evaluation — those are INBOX-only.
+/// Emits `mail://synced` with the mailbox id so the frontend can refresh the message list.
+pub async fn sync_mailbox(
+    pool: &Pool,
+    account: &Account,
+    auth_code: &SecretString,
+    mailbox_name: &str,
+    app_handle: &AppHandle,
+) -> AppResult<SyncReport> {
+    let (report, _new_ids) = sync_mailbox_inner(pool, account, auth_code, mailbox_name).await?;
+
+    // Notify the frontend so it can refresh the current mailbox view.
+    if let Err(e) = app_handle.emit(
+        "mail://synced",
+        MailboxSyncedPayload {
+            account_id: account.id,
+            mailbox_name: mailbox_name.to_string(),
+        },
+    ) {
+        tracing::warn!(error = %e, "emit mail://synced failed (non-fatal)");
+    }
+
+    Ok(report)
+}
+
+/// Payload for the `mail://synced` event emitted after a non-INBOX mailbox sync completes.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MailboxSyncedPayload {
+    pub account_id: uuid::Uuid,
+    pub mailbox_name: String,
 }
 
 #[cfg(test)]

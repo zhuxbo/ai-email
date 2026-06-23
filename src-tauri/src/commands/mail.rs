@@ -42,6 +42,26 @@ pub async fn mailboxes_list(
     mailboxes::list(&state.db, account_id).await
 }
 
+/// Sync a specific mailbox on demand. Used when the user navigates to a non-INBOX folder
+/// (Sent, Drafts, Trash, etc.). Does not trigger AI classification or auto-reply evaluation.
+#[tauri::command]
+pub async fn mailbox_sync(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    account_id: Uuid,
+    mailbox_name: String,
+) -> AppResult<SyncReport> {
+    let account = db::accounts::get(&state.db, account_id)
+        .await?
+        .ok_or_else(|| AppError::Config(format!("account {account_id} not found")))?;
+
+    let auth = tokio::task::spawn_blocking(move || keychain::get_auth_code(account_id))
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
+
+    sync::sync_mailbox(&state.db, &account, &auth, &mailbox_name, &app).await
+}
+
 #[tauri::command]
 pub async fn messages_list(
     state: State<'_, AppState>,

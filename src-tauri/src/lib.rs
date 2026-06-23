@@ -106,6 +106,7 @@ pub fn run() {
             commands::accounts::account_add,
             commands::accounts::account_remove,
             commands::mail::inbox_sync,
+            commands::mail::mailbox_sync,
             commands::mail::mailboxes_list,
             commands::mail::messages_list,
             commands::mail::message_get,

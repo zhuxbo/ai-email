@@ -36,10 +36,35 @@ pub struct ImapClient {
     session: Session<TlsStream<TcpStream>>,
 }
 
+/// IMAP special-use role for a mailbox. Derived from RFC 6154 SPECIAL-USE attributes or
+/// heuristic name matching when the server does not advertise attributes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpecialUse {
+    Inbox,
+    Sent,
+    Drafts,
+    Trash,
+    Junk,
+}
+
+impl SpecialUse {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SpecialUse::Inbox => "inbox",
+            SpecialUse::Sent => "sent",
+            SpecialUse::Drafts => "drafts",
+            SpecialUse::Trash => "trash",
+            SpecialUse::Junk => "junk",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MailboxInfo {
     pub name: String,
     pub delimiter: Option<String>,
+    /// Detected special-use role; None means regular folder.
+    pub special_use: Option<SpecialUse>,
 }
 
 #[derive(Debug, Clone)]
@@ -112,8 +137,8 @@ impl ImapClient {
         Ok(Self { session })
     }
 
-    /// LIST every mailbox the account can see. Returns name + hierarchy delimiter; we throw
-    /// away the IMAP attributes (Marked / Noselect / …) at MVP — Sprint 1 only touches INBOX.
+    /// LIST every mailbox the account can see. Returns name + hierarchy delimiter + special-use
+    /// role (detected from RFC 6154 SPECIAL-USE attributes or heuristic name matching).
     pub async fn list_mailboxes(&mut self) -> AppResult<Vec<MailboxInfo>> {
         // Timeout covers both the command send AND the full response drain: a half-open
         // connection that accepts LIST but then stalls on the response frames would otherwise
@@ -127,9 +152,14 @@ impl ImapClient {
             let mut out = Vec::new();
             while let Some(item) = stream.next().await {
                 let name = item.map_err(|e| AppError::Imap(e.to_string()))?;
+                let mb_name = name.name().to_string();
+                let delimiter = name.delimiter().map(str::to_string);
+                let special_use =
+                    detect_special_use(&mb_name, &delimiter, name.attributes().iter().cloned());
                 out.push(MailboxInfo {
-                    name: name.name().to_string(),
-                    delimiter: name.delimiter().map(str::to_string),
+                    name: mb_name,
+                    delimiter,
+                    special_use,
                 });
             }
             Ok(out)
@@ -295,29 +325,81 @@ where
     Ok(out)
 }
 
-/// 从实时 LIST 结果里挑废纸篓：按 `delimiter` 切出末段，小写后精确等于某别名才命中。
+/// Detect the special-use role for a mailbox from SPECIAL-USE attributes (RFC 6154) first,
+/// then fall back to heuristic leaf-name matching. Both checks are case-insensitive.
+///
+/// Heuristic aliases are intentionally narrow (exact leaf-name match) to avoid misclassifying
+/// user-created folders like "To be deleted" or "My Drafts folder".
+fn detect_special_use<'a>(
+    name: &str,
+    delimiter: &Option<String>,
+    attributes: impl Iterator<Item = async_imap::types::NameAttribute<'a>>,
+) -> Option<SpecialUse> {
+    use async_imap::types::NameAttribute;
+
+    // RFC 6154 SPECIAL-USE attributes take precedence over heuristics.
+    for attr in attributes {
+        if let NameAttribute::Extension(cow) = attr {
+            match cow.to_lowercase().as_str() {
+                "\\inbox" => return Some(SpecialUse::Inbox),
+                "\\sent" => return Some(SpecialUse::Sent),
+                "\\drafts" => return Some(SpecialUse::Drafts),
+                "\\trash" => return Some(SpecialUse::Trash),
+                "\\junk" => return Some(SpecialUse::Junk),
+                _ => {}
+            }
+        }
+    }
+
+    // Heuristic: extract the leaf segment (after the last delimiter) and match aliases.
+    let delim = delimiter.as_deref().unwrap_or("/");
+    let leaf = name.rsplit(delim).next().unwrap_or(name).to_lowercase();
+
+    // INBOX is always the literal name by IMAP spec (RFC 3501 §5.1).
+    if leaf == "inbox" {
+        return Some(SpecialUse::Inbox);
+    }
+
+    const SENT_ALIASES: &[&str] = &["sent", "sent messages", "sent items", "已发送", "发件箱"];
+    const DRAFTS_ALIASES: &[&str] = &["drafts", "draft", "草稿箱", "草稿"];
+    const TRASH_ALIASES: &[&str] = &[
+        "trash",
+        "deleted",
+        "deleted messages",
+        "deleted items",
+        "已删除",
+        "废纸篓",
+    ];
+    const JUNK_ALIASES: &[&str] = &["junk", "spam", "junk e-mail", "垃圾邮件"];
+
+    if SENT_ALIASES.contains(&leaf.as_str()) {
+        return Some(SpecialUse::Sent);
+    }
+    if DRAFTS_ALIASES.contains(&leaf.as_str()) {
+        return Some(SpecialUse::Drafts);
+    }
+    if TRASH_ALIASES.contains(&leaf.as_str()) {
+        return Some(SpecialUse::Trash);
+    }
+    if JUNK_ALIASES.contains(&leaf.as_str()) {
+        return Some(SpecialUse::Junk);
+    }
+
+    None
+}
+
+/// 从实时 LIST 结果里挑废纸篓：优先使用 special_use 已检测到的 Trash 信箱，
+/// 回退到按叶名的启发式别名匹配（大小写不敏感，末段精确等于某别名）。
 /// 这样 `[QQ邮箱]/已删除`（末段「已删除」）命中，而用户自建 `To be deleted` 不会被误判。
 pub fn resolve_trash_mailbox(mailboxes: &[MailboxInfo]) -> Option<String> {
-    const ALIASES: [&str; 5] = [
-        "deleted messages",
-        "deleted",
-        "deleted items",
-        "trash",
-        "已删除",
-    ];
-    mailboxes
+    // First: prefer the mailbox already tagged as Trash by detect_special_use.
+    if let Some(mb) = mailboxes
         .iter()
-        .find(|m| {
-            let delim = m.delimiter.as_deref().unwrap_or("/");
-            let leaf = m
-                .name
-                .rsplit(delim)
-                .next()
-                .unwrap_or(&m.name)
-                .to_lowercase();
-            ALIASES.contains(&leaf.as_str())
-        })
-        .map(|m| m.name.clone())
+        .find(|m| m.special_use == Some(SpecialUse::Trash))
+    {
+        return Some(mb.name.clone());
+    }
+    None
 }
 
 /// `async_imap::types::Flag` doesn't implement `Display`, so spell out the canonical IMAP
@@ -345,19 +427,27 @@ mod tests {
         MailboxInfo {
             name: name.to_string(),
             delimiter: Some("/".to_string()),
+            special_use: None,
         }
     }
 
-    fn mb_flat(name: &str) -> MailboxInfo {
+    fn mb_with(name: &str, special_use: Option<SpecialUse>) -> MailboxInfo {
         MailboxInfo {
             name: name.to_string(),
-            delimiter: None,
+            delimiter: Some("/".to_string()),
+            special_use,
         }
     }
 
+    // resolve_trash_mailbox now works via the special_use field populated by detect_special_use.
+
     #[test]
-    fn resolve_trash_matches_known_leaf() {
-        let list = vec![mb("INBOX"), mb("Sent Messages"), mb("Deleted Messages")];
+    fn resolve_trash_finds_tagged_trash() {
+        let list = vec![
+            mb_with("INBOX", Some(SpecialUse::Inbox)),
+            mb_with("Sent Messages", Some(SpecialUse::Sent)),
+            mb_with("Deleted Messages", Some(SpecialUse::Trash)),
+        ];
         assert_eq!(
             resolve_trash_mailbox(&list),
             Some("Deleted Messages".to_string())
@@ -365,8 +455,11 @@ mod tests {
     }
 
     #[test]
-    fn resolve_trash_matches_hierarchical_chinese_leaf() {
-        let list = vec![mb("INBOX"), mb("[QQ邮箱]/已删除")];
+    fn resolve_trash_finds_chinese_trash() {
+        let list = vec![
+            mb_with("INBOX", Some(SpecialUse::Inbox)),
+            mb_with("[QQ邮箱]/已删除", Some(SpecialUse::Trash)),
+        ];
         assert_eq!(
             resolve_trash_mailbox(&list),
             Some("[QQ邮箱]/已删除".to_string())
@@ -374,23 +467,80 @@ mod tests {
     }
 
     #[test]
-    fn resolve_trash_uppercase_hits_lookalike_misses() {
-        // "To be deleted" 末段 "to be deleted" ∉ 别名（不误判）；"TRASH" 小写后 == "trash" → 命中。
-        let list = vec![mb("INBOX"), mb("To be deleted"), mb("TRASH")];
-        assert_eq!(resolve_trash_mailbox(&list), Some("TRASH".to_string()));
-    }
-
-    #[test]
-    fn resolve_trash_none_when_absent() {
-        let list = vec![mb("INBOX"), mb("Sent Messages")];
+    fn resolve_trash_none_when_no_trash_tagged() {
+        // 未标记 Trash 的 mailbox 不会被误判
+        let list = vec![mb("INBOX"), mb("To be deleted"), mb("Sent Messages")];
         assert_eq!(resolve_trash_mailbox(&list), None);
     }
 
     #[test]
-    fn resolve_trash_handles_flat_namespace() {
-        // delimiter=None → fallback 切分，整个 name 即末段；"Trash" 小写命中别名。
-        let list = vec![mb_flat("INBOX"), mb_flat("Trash")];
-        assert_eq!(resolve_trash_mailbox(&list), Some("Trash".to_string()));
+    fn resolve_trash_none_when_absent() {
+        let list = vec![
+            mb_with("INBOX", Some(SpecialUse::Inbox)),
+            mb_with("Sent", Some(SpecialUse::Sent)),
+        ];
+        assert_eq!(resolve_trash_mailbox(&list), None);
+    }
+
+    // --- detect_special_use heuristic tests ---
+
+    #[test]
+    fn detect_inbox_by_name() {
+        let result = detect_special_use("INBOX", &Some("/".to_string()), std::iter::empty());
+        assert_eq!(result, Some(SpecialUse::Inbox));
+    }
+
+    #[test]
+    fn detect_sent_aliases() {
+        for name in &["Sent Messages", "Sent", "sent items", "已发送", "发件箱"] {
+            let result = detect_special_use(name, &Some("/".to_string()), std::iter::empty());
+            assert_eq!(result, Some(SpecialUse::Sent), "expected Sent for {name}");
+        }
+    }
+
+    #[test]
+    fn detect_drafts_aliases() {
+        for name in &["Drafts", "Draft", "草稿箱", "草稿"] {
+            let result = detect_special_use(name, &Some("/".to_string()), std::iter::empty());
+            assert_eq!(
+                result,
+                Some(SpecialUse::Drafts),
+                "expected Drafts for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn detect_trash_aliases() {
+        for name in &["Trash", "Deleted", "Deleted Messages", "已删除", "废纸篓"] {
+            let result = detect_special_use(name, &Some("/".to_string()), std::iter::empty());
+            assert_eq!(result, Some(SpecialUse::Trash), "expected Trash for {name}");
+        }
+    }
+
+    #[test]
+    fn detect_hierarchical_leaf() {
+        // QQ Mail style: "[QQ邮箱]/已删除" → leaf is "已删除" → Trash
+        let result = detect_special_use(
+            "[QQ邮箱]/已删除",
+            &Some("/".to_string()),
+            std::iter::empty(),
+        );
+        assert_eq!(result, Some(SpecialUse::Trash));
+    }
+
+    #[test]
+    fn detect_none_for_custom_folder() {
+        let result = detect_special_use("My Archive", &Some("/".to_string()), std::iter::empty());
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn detect_none_for_lookalike_name() {
+        // "To be deleted" should NOT match Trash
+        let result =
+            detect_special_use("To be deleted", &Some("/".to_string()), std::iter::empty());
+        assert_eq!(result, None);
     }
 
     // --- #6: 超时常量合理性 ---
