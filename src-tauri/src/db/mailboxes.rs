@@ -132,6 +132,10 @@ pub async fn update_after_sync(
                                 WHEN ?2 > uid_next THEN ?2
                                 ELSE uid_next
                             END,
+            -- COALESCE 仅兜服务端返回 NULL 的情况（保留本地旧值）；
+            -- validity 实际变更时已由 decide_sync_mode → ResetRefetch →
+            -- reset_mailbox_for_uidvalidity_change 在更早的阶段前置处理，
+            -- 此处不会静默丢弃 validity 变更。
             uid_validity  = COALESCE(?3, uid_validity),
             last_synced_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
         WHERE id = ?1

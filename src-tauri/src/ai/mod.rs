@@ -366,4 +366,27 @@ mod tests {
         let v = parse(raw);
         assert_eq!(v["a"], 1);
     }
+
+    #[test]
+    fn fence_beats_brace_slice_when_lang_tag_contains_brace() {
+        // 对抗用例：lang tag 本身含有花括号，brace-slice 会误把 lang tag 当 JSON 起点，
+        // 只有围栏剥离才能正确跳过 lang tag 取到真正的 JSON。
+        //
+        // 输入：```{lang}\n{"category":"工作"}\n```
+        //
+        // brace-slice 行为（禁用围栏路径时）：
+        //   start = trimmed.find('{') → 指向 lang tag 里的第一个 `{`（即 "{lang}" 的开头）
+        //   end   = trimmed.rfind('}') + 1 → 指向 {"category":"工作"} 的 `}` 末尾
+        //   截出："{lang}\n{\"category\":\"工作\"}" —— `{lang}` 的值无引号，非法 JSON，
+        //   serde_json 解析失败。
+        //
+        // 围栏剥离路径：
+        //   strip_prefix("```") → rest = "{lang}\n{\"category\":\"工作\"}\n```"
+        //   rest.find('\n') → after_lang = "{\"category\":\"工作\"}\n```"
+        //   trim_end().strip_suffix("```") → inner = "{\"category\":\"工作\"}"
+        //   → 合法 JSON，解析成功。
+        let raw = "```{lang}\n{\"category\":\"工作\"}\n```";
+        let v = parse(raw);
+        assert_eq!(v["category"], "工作");
+    }
 }
