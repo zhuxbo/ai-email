@@ -158,7 +158,7 @@ pub fn parse_body(raw: &[u8]) -> ParsedBody {
 
     // Find first inline text/plain part (PartType::Text only — no cross-type fallback).
     let text_plain = msg.text_body.iter().find_map(|&idx| {
-        let part = &msg.parts[idx];
+        let part = &msg.parts[idx as usize];
         if matches!(part.body, PartType::Text(_)) {
             part.text_contents().map(str::to_string)
         } else {
@@ -168,7 +168,7 @@ pub fn parse_body(raw: &[u8]) -> ParsedBody {
 
     // Find first inline text/html part (PartType::Html only — no cross-type fallback).
     let html = msg.html_body.iter().find_map(|&idx| {
-        let part = &msg.parts[idx];
+        let part = &msg.parts[idx as usize];
         if matches!(part.body, PartType::Html(_)) {
             part.text_contents().map(str::to_string)
         } else {
