@@ -418,6 +418,88 @@ describe('#16 selectMessage 切换邮件重置 compose 上下文', () => {
 
 const INBOX_BOX = { id: 'box-inbox', name: 'INBOX', specialUse: 'inbox', accountId: 'a1' };
 const SENT_BOX = { id: 'box-sent', name: 'Sent', specialUse: 'sent', accountId: 'a1' };
+const DRAFTS_BOX = { id: 'box-drafts', name: 'Drafts', specialUse: 'drafts', accountId: 'a1' };
+const TRASH_BOX = { id: 'box-trash', name: 'Trash', specialUse: 'trash', accountId: 'a1' };
+
+// ────────────────────────────────────────────────────────────────────────────
+// classifiedAffectsCurrentView 单元测试（Phase 15 扩展）
+// ────────────────────────────────────────────────────────────────────────────
+describe('classifiedAffectsCurrentView', () => {
+  const allBoxes = [INBOX_BOX, SENT_BOX, DRAFTS_BOX, TRASH_BOX];
+
+  it('聚合 INBOX（selectedMailboxId=null, selectedAccountId=null）→ true', () => {
+    useMailStore.setState({
+      selectedAccountId: null,
+      selectedMailboxId: null,
+      mailboxes: allBoxes,
+    } as never);
+    expect(useMailStore.getState().classifiedAffectsCurrentView()).toBe(true);
+  });
+
+  it('单账户默认 INBOX（selectedMailboxId=null）→ true', () => {
+    useMailStore.setState({
+      selectedAccountId: 'a1',
+      selectedMailboxId: null,
+      mailboxes: allBoxes,
+    } as never);
+    expect(useMailStore.getState().classifiedAffectsCurrentView()).toBe(true);
+  });
+
+  it('选中 INBOX 信箱（specialUse=inbox）→ true', () => {
+    useMailStore.setState({
+      selectedAccountId: 'a1',
+      selectedMailboxId: INBOX_BOX.id,
+      mailboxes: allBoxes,
+    } as never);
+    expect(useMailStore.getState().classifiedAffectsCurrentView()).toBe(true);
+  });
+
+  it('选中 Sent 信箱（specialUse=sent）→ false', () => {
+    useMailStore.setState({
+      selectedAccountId: 'a1',
+      selectedMailboxId: SENT_BOX.id,
+      mailboxes: allBoxes,
+    } as never);
+    expect(useMailStore.getState().classifiedAffectsCurrentView()).toBe(false);
+  });
+
+  it('选中 Drafts 信箱（specialUse=drafts）→ false', () => {
+    useMailStore.setState({
+      selectedAccountId: 'a1',
+      selectedMailboxId: DRAFTS_BOX.id,
+      mailboxes: allBoxes,
+    } as never);
+    expect(useMailStore.getState().classifiedAffectsCurrentView()).toBe(false);
+  });
+
+  it('选中 Trash 信箱（specialUse=trash）→ false', () => {
+    useMailStore.setState({
+      selectedAccountId: 'a1',
+      selectedMailboxId: TRASH_BOX.id,
+      mailboxes: allBoxes,
+    } as never);
+    expect(useMailStore.getState().classifiedAffectsCurrentView()).toBe(false);
+  });
+
+  it('选中未知 id（mailboxes 中找不到）→ false（box 不存在视为非 INBOX）', () => {
+    useMailStore.setState({
+      selectedAccountId: 'a1',
+      selectedMailboxId: 'box-unknown',
+      mailboxes: allBoxes,
+    } as never);
+    expect(useMailStore.getState().classifiedAffectsCurrentView()).toBe(false);
+  });
+
+  it('specialUse=null 的普通文件夹 → false', () => {
+    const customBox = { id: 'box-custom', name: 'Archive', specialUse: null, accountId: 'a1' };
+    useMailStore.setState({
+      selectedAccountId: 'a1',
+      selectedMailboxId: customBox.id,
+      mailboxes: [...allBoxes, customBox],
+    } as never);
+    expect(useMailStore.getState().classifiedAffectsCurrentView()).toBe(false);
+  });
+});
 
 describe('mail store 多信箱路径 (Phase 15)', () => {
   beforeEach(() => {

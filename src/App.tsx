@@ -125,7 +125,10 @@ function App() {
     let unlistenAutoReply: (() => void) | null = null;
 
     void onMailClassified(() => {
-      void useMailStore.getState().reloadMessages();
+      const store = useMailStore.getState();
+      if (store.classifiedAffectsCurrentView()) {
+        void store.reloadMessages();
+      }
     }).then((fn) => {
       if (!mounted) fn();
       else unlistenClassified = fn;

@@ -107,6 +107,15 @@ interface MailState {
   setFlagged: (id: string, flagged: boolean) => Promise<void>;
   deleteMessage: (id: string) => Promise<void>;
 
+  /**
+   * 当前视图是否受 mail://classified 事件影响。
+   * classified 只更新 INBOX 邮件的 category/priority，因此仅当视图在看 INBOX 时才需要重拉：
+   * - selectedMailboxId 为 null → 聚合 INBOX（跨账户），受影响。
+   * - selectedMailboxId 非 null 且对应信箱 specialUse 为 'inbox' → 受影响。
+   * - 其它信箱（sent/drafts/trash/junk/普通文件夹）→ 不受影响，跳过重拉。
+   */
+  classifiedAffectsCurrentView: () => boolean;
+
   clearError: () => void;
 }
 
@@ -377,6 +386,15 @@ export const useMailStore = create<MailState>((set, get) => ({
       set({ error: errMsg(e) });
       await get().reloadMessages();
     }
+  },
+
+  classifiedAffectsCurrentView: () => {
+    const { selectedMailboxId, mailboxes } = get();
+    // selectedMailboxId 为 null → 聚合 INBOX 或单账户默认 INBOX，受影响。
+    if (selectedMailboxId === null) return true;
+    // 选中具体信箱：按 specialUse 判断是否为 inbox。
+    const box = mailboxes.find((m) => m.id === selectedMailboxId);
+    return box?.specialUse === 'inbox';
   },
 
   clearError: () => {

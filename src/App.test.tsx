@@ -3,6 +3,7 @@
 //   1. onMailClassified and onAutoReplyUpdated are subscribed on mount
 //   2. callbacks trigger the correct store refreshes
 //   3. unlisten is called on unmount (no subscription leak)
+//   4. (Phase-15) classified 仅在 INBOX 视图触发 reloadMessages，非 INBOX 跳过
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, act } from '@testing-library/react';
@@ -43,6 +44,8 @@ vi.mock('./lib/tauri', () => ({
 // Spy on store methods called inside event callbacks.
 const reloadMessagesSpy = vi.fn().mockResolvedValue(undefined);
 const loadQueueSpy = vi.fn().mockResolvedValue(undefined);
+// classifiedAffectsCurrentView 默认返回 true（聚合 INBOX），测试可按需覆盖。
+const classifiedAffectsCurrentViewSpy = vi.fn(() => true);
 
 const mailState = {
   reloadMessages: reloadMessagesSpy,
@@ -57,6 +60,7 @@ const mailState = {
   setFilter: vi.fn().mockResolvedValue(undefined),
   setQuery: vi.fn(),
   clearError: vi.fn(),
+  classifiedAffectsCurrentView: classifiedAffectsCurrentViewSpy,
 };
 
 vi.mock('./lib/store/mail', () => ({
@@ -155,6 +159,8 @@ describe('App — event-driven subscription wiring', () => {
     vi.clearAllMocks();
     classifiedHandler = null;
     autoReplyHandler = null;
+    // 每个测试前把 classifiedAffectsCurrentView 恢复为默认（聚合 INBOX → true）
+    classifiedAffectsCurrentViewSpy.mockReturnValue(true);
   });
 
   it('subscribes to mail://classified and autoreply://updated on mount', () => {
@@ -251,5 +257,94 @@ describe('App — event-driven subscription wiring', () => {
     // mounted 守卫应在 resolve 时发现组件已卸载，立即调用 unlisten fn
     expect(mockUnlistenClassified).toHaveBeenCalledTimes(1);
     expect(mockUnlistenAutoReply).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─── Phase-15：classified 视图过滤 ────────────────────────────────────────────
+// 验证 App.tsx 的 onMailClassified 回调在非 INBOX 视图时跳过 reloadMessages。
+// classifiedAffectsCurrentView 的单元逻辑在 mail store 测试中验证；
+// 此处仅验证 App.tsx 正确地调用它并据此决策。
+describe('App — classified 视图过滤（Phase-15）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    classifiedHandler = null;
+    autoReplyHandler = null;
+    classifiedAffectsCurrentViewSpy.mockReturnValue(true);
+  });
+
+  it('聚合 INBOX 视图（classifiedAffectsCurrentView=true）收到 classified → 触发 reloadMessages', () => {
+    classifiedAffectsCurrentViewSpy.mockReturnValue(true);
+    act(() => {
+      render(<App />);
+    });
+
+    act(() => {
+      classifiedHandler?.({ accountId: 'acc-1', count: 3 });
+    });
+
+    expect(reloadMessagesSpy).toHaveBeenCalled();
+  });
+
+  it('非 INBOX 信箱（classifiedAffectsCurrentView=false）收到 classified → 不触发 reloadMessages', () => {
+    classifiedAffectsCurrentViewSpy.mockReturnValue(false);
+    act(() => {
+      render(<App />);
+    });
+
+    act(() => {
+      classifiedHandler?.({ accountId: 'acc-1', count: 3 });
+    });
+
+    expect(reloadMessagesSpy).not.toHaveBeenCalled();
+  });
+
+  it('INBOX 信箱（classifiedAffectsCurrentView=true）收到 classified → 触发 reloadMessages', () => {
+    classifiedAffectsCurrentViewSpy.mockReturnValue(true);
+    act(() => {
+      render(<App />);
+    });
+
+    act(() => {
+      classifiedHandler?.({ accountId: 'acc-1', count: 1 });
+    });
+
+    expect(reloadMessagesSpy).toHaveBeenCalled();
+  });
+
+  it('同一非 INBOX 信箱连续多次 classified 事件 → 始终跳过（不误触发）', () => {
+    classifiedAffectsCurrentViewSpy.mockReturnValue(false);
+    act(() => {
+      render(<App />);
+    });
+
+    act(() => {
+      classifiedHandler?.({ accountId: 'acc-1', count: 1 });
+      classifiedHandler?.({ accountId: 'acc-1', count: 2 });
+      classifiedHandler?.({ accountId: 'acc-1', count: 3 });
+    });
+
+    expect(reloadMessagesSpy).not.toHaveBeenCalled();
+  });
+
+  it('视图切换：非 INBOX 时事件跳过，切换后视图变 INBOX 时再来事件则触发', () => {
+    // 第一阶段：非 INBOX
+    classifiedAffectsCurrentViewSpy.mockReturnValue(false);
+    act(() => {
+      render(<App />);
+    });
+
+    act(() => {
+      classifiedHandler?.({ accountId: 'acc-1', count: 1 });
+    });
+    expect(reloadMessagesSpy).not.toHaveBeenCalled();
+
+    // 模拟用户切换到 INBOX（classifiedAffectsCurrentView 现在返回 true）
+    classifiedAffectsCurrentViewSpy.mockReturnValue(true);
+
+    act(() => {
+      classifiedHandler?.({ accountId: 'acc-1', count: 2 });
+    });
+    // 此次应触发
+    expect(reloadMessagesSpy).toHaveBeenCalledTimes(1);
   });
 });
