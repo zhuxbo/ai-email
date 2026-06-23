@@ -118,3 +118,12 @@ pub async fn delete(pool: &Pool, id: Uuid) -> AppResult<()> {
         .await?;
     Ok(())
 }
+
+/// 轻量存活检查：账户是否仍存在于 DB。用于后台任务在执行付费 AI 调用前确认账户未被删除。
+pub async fn account_exists(pool: &Pool, id: Uuid) -> AppResult<bool> {
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM accounts WHERE id = ?1)")
+        .bind(id)
+        .fetch_one(pool)
+        .await?;
+    Ok(exists)
+}

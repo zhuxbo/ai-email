@@ -298,9 +298,25 @@ pub async fn sync_inbox(
         let tokens_clone = Arc::clone(&account_tokens);
 
         tokio::spawn(async move {
-            // 在任何 AI 调用前检查取消：若应用已退出或账户已删除则跳过整批任务。
+            // 层 1：取消令牌早检——覆盖 cancel 在 insert 之后执行的正常路径。
             if child_token.is_cancelled() {
                 tracing::debug!(account_id = %account_id, "classify cancelled before start");
+                tokens_clone.lock().await.remove(&account_id);
+                return;
+            }
+
+            // 层 2：账户存活检查——覆盖 cancel 在 insert 之前执行（竞态漏网）的路径。
+            // 若账户已被删除，跳过 classify + eval，避免浪费 AI 调用；
+            // 外键约束（层 3）兜底残留极窄 TOCTOU（此处查到存在、随后才删除），
+            // 该窗口由 sqlx 外键错误捕获，无数据损坏风险。
+            if !crate::db::accounts::account_exists(&pool_clone, account_id)
+                .await
+                .unwrap_or(false)
+            {
+                tracing::info!(
+                    account_id = %account_id,
+                    "account removed before classify, skipping background task"
+                );
                 tokens_clone.lock().await.remove(&account_id);
                 return;
             }
@@ -523,5 +539,45 @@ mod tests {
             0,
             "已取消的 token 应跳过后台工作"
         );
+    }
+
+    /// M2 竞态防护：account_exists 对不存在账户返回 false，存在账户返回 true。
+    /// 验证存活检查函数本身的正确性——后台任务依赖它决定是否跳过 classify。
+    #[tokio::test]
+    async fn account_exists_returns_correct_result() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("test.db");
+        let pool = crate::db::connect(&db_path).await.expect("test pool");
+
+        let nonexistent_id = uuid::Uuid::new_v4();
+        let exists = crate::db::accounts::account_exists(&pool, nonexistent_id)
+            .await
+            .unwrap();
+        assert!(!exists, "不存在的账户 account_exists 应返回 false");
+
+        // 插入一条账户后检查
+        let input = crate::db::accounts::AccountInput {
+            email: "test@example.com".into(),
+            display_name: None,
+            provider: "qq".into(),
+            imap_host: "imap.qq.com".into(),
+            imap_port: 993,
+            smtp_host: "smtp.qq.com".into(),
+            smtp_port: 465,
+        };
+        let account = crate::db::accounts::insert(&pool, &input).await.unwrap();
+        let exists = crate::db::accounts::account_exists(&pool, account.id)
+            .await
+            .unwrap();
+        assert!(exists, "已插入的账户 account_exists 应返回 true");
+
+        // 删除后再检查
+        crate::db::accounts::delete(&pool, account.id)
+            .await
+            .unwrap();
+        let exists = crate::db::accounts::account_exists(&pool, account.id)
+            .await
+            .unwrap();
+        assert!(!exists, "删除后 account_exists 应返回 false");
     }
 }

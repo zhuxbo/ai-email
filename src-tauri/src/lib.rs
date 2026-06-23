@@ -47,6 +47,27 @@ pub struct DbStatusPayload {
     pub message: Option<String>,
 }
 
+/// 将 `DbInitStatus` 转换为前端友好的 payload。
+///
+/// 提取为独立函数，使 `commands::system::db_status` 和测试共用同一份 match 逻辑——
+/// 任何 match arm 字符串变更都会同时破坏生产路径与测试，消除"测试自写 match"的伪绿问题。
+pub(crate) fn db_init_status_to_payload(status: DbInitStatus) -> DbStatusPayload {
+    match status {
+        DbInitStatus::Initializing => DbStatusPayload {
+            status: "initializing".into(),
+            message: None,
+        },
+        DbInitStatus::Ready => DbStatusPayload {
+            status: "ready".into(),
+            message: None,
+        },
+        DbInitStatus::Failed(msg) => DbStatusPayload {
+            status: "error".into(),
+            message: Some(msg),
+        },
+    }
+}
+
 /// DB 初始化三态。由 `AppState.db_init_status` 持有，通过 Mutex 保护并发写。
 #[derive(Clone)]
 pub(crate) enum DbInitStatus {
@@ -104,21 +125,40 @@ async fn run_db_init<F, Fut>(
     Fut: std::future::Future<Output = AppResult<Pool>> + Send,
 {
     let result = tokio::time::timeout(DB_CONNECT_TIMEOUT, connect_fn()).await;
+    let (event_name, event_payload) = apply_db_init_result(result, &db_cell, &db_init_status).await;
+    match (event_name, event_payload) {
+        ("db://ready", _) => {
+            tracing::info!("数据库初始化完成，发送 db://ready");
+            let _ = app_handle.emit("db://ready", DbReadyPayload {});
+        }
+        (_, Some(msg)) => {
+            let _ = app_handle.emit("db://error", DbErrorPayload { message: msg });
+        }
+        _ => {}
+    }
+}
 
+/// 将 timeout 结果写入 cell + status，返回应 emit 的事件名和可选消息。
+///
+/// 与 `run_db_init` 分离，使单测可在无 `AppHandle` 的情况下验证 cell 和 status 的决策逻辑。
+pub(crate) async fn apply_db_init_result(
+    result: Result<AppResult<Pool>, tokio::time::error::Elapsed>,
+    db_cell: &Arc<OnceCell<Pool>>,
+    db_init_status: &Arc<Mutex<DbInitStatus>>,
+) -> (&'static str, Option<String>) {
     match result {
         Ok(Ok(pool)) => {
             // set() 失败仅在重复 set 时发生（此处不会），忽略 Err。
             let _ = db_cell.set(pool);
             // 先写状态，再 emit——兜底查询不会读到旧状态。
             *db_init_status.lock().await = DbInitStatus::Ready;
-            tracing::info!("数据库初始化完成，发送 db://ready");
-            let _ = app_handle.emit("db://ready", DbReadyPayload {});
+            ("db://ready", None)
         }
         Ok(Err(e)) => {
             tracing::error!(error = %e, "数据库连接/迁移失败");
             let msg = format!("数据库初始化失败：{e}");
             *db_init_status.lock().await = DbInitStatus::Failed(msg.clone());
-            let _ = app_handle.emit("db://error", DbErrorPayload { message: msg });
+            ("db://error", Some(msg))
         }
         Err(_elapsed) => {
             tracing::error!(
@@ -130,7 +170,7 @@ async fn run_db_init<F, Fut>(
                 DB_CONNECT_TIMEOUT.as_secs()
             );
             *db_init_status.lock().await = DbInitStatus::Failed(msg.clone());
-            let _ = app_handle.emit("db://error", DbErrorPayload { message: msg });
+            ("db://error", Some(msg))
         }
     }
 }
@@ -324,115 +364,77 @@ mod tests {
         assert!(result.is_ok(), "pool() 已填充应返回 Ok，实际: {result:?}");
     }
 
-    /// db_status 在 Initializing 态返回 "initializing"，不依赖 pool。
-    #[tokio::test]
-    async fn db_status_initializing_returns_correct_payload() {
-        use tokio::sync::Mutex;
-
-        let status_arc = Arc::new(Mutex::new(crate::DbInitStatus::Initializing));
-        let status = status_arc.lock().await.clone();
-        let payload = match status {
-            crate::DbInitStatus::Initializing => crate::DbStatusPayload {
-                status: "initializing".into(),
-                message: None,
-            },
-            crate::DbInitStatus::Ready => crate::DbStatusPayload {
-                status: "ready".into(),
-                message: None,
-            },
-            crate::DbInitStatus::Failed(msg) => crate::DbStatusPayload {
-                status: "error".into(),
-                message: Some(msg),
-            },
-        };
+    /// db_status 在 Initializing 态返回 "initializing"。
+    /// 调用生产函数 `db_init_status_to_payload`——改 match arm 字符串必然 FAIL。
+    #[test]
+    fn db_status_initializing_returns_correct_payload() {
+        let payload = crate::db_init_status_to_payload(crate::DbInitStatus::Initializing);
         assert_eq!(payload.status, "initializing");
         assert!(payload.message.is_none());
     }
 
     /// db_status 在 Ready 态返回 "ready"。
-    #[tokio::test]
-    async fn db_status_ready_returns_correct_payload() {
-        use tokio::sync::Mutex;
-
-        let status_arc = Arc::new(Mutex::new(crate::DbInitStatus::Ready));
-        let status = status_arc.lock().await.clone();
-        let payload = match status {
-            crate::DbInitStatus::Initializing => crate::DbStatusPayload {
-                status: "initializing".into(),
-                message: None,
-            },
-            crate::DbInitStatus::Ready => crate::DbStatusPayload {
-                status: "ready".into(),
-                message: None,
-            },
-            crate::DbInitStatus::Failed(msg) => crate::DbStatusPayload {
-                status: "error".into(),
-                message: Some(msg),
-            },
-        };
+    #[test]
+    fn db_status_ready_returns_correct_payload() {
+        let payload = crate::db_init_status_to_payload(crate::DbInitStatus::Ready);
         assert_eq!(payload.status, "ready");
         assert!(payload.message.is_none());
     }
 
     /// db_status 在 Failed 态返回 "error" 并携带 message。
-    #[tokio::test]
-    async fn db_status_failed_returns_error_with_message() {
-        use tokio::sync::Mutex;
-
+    #[test]
+    fn db_status_failed_returns_error_with_message() {
         let err_msg = "数据库初始化超时（超过 30 秒）".to_string();
-        let status_arc = Arc::new(Mutex::new(crate::DbInitStatus::Failed(err_msg.clone())));
-        let status = status_arc.lock().await.clone();
-        let payload = match status {
-            crate::DbInitStatus::Initializing => crate::DbStatusPayload {
-                status: "initializing".into(),
-                message: None,
-            },
-            crate::DbInitStatus::Ready => crate::DbStatusPayload {
-                status: "ready".into(),
-                message: None,
-            },
-            crate::DbInitStatus::Failed(msg) => crate::DbStatusPayload {
-                status: "error".into(),
-                message: Some(msg),
-            },
-        };
+        let payload =
+            crate::db_init_status_to_payload(crate::DbInitStatus::Failed(err_msg.clone()));
         assert_eq!(payload.status, "error");
         assert_eq!(payload.message.as_deref(), Some(err_msg.as_str()));
     }
 
-    /// run_db_init 成功路径：connect_fn 返回 Ok → OnceCell 被填充。
-    /// 不依赖真实 AppHandle，仅测决策逻辑。
+    /// run_db_init 成功路径：apply_db_init_result 填充 OnceCell 并将状态置为 Ready。
+    /// 调用生产函数 `apply_db_init_result`——不走 AppHandle，但覆盖真实决策逻辑。
     #[tokio::test]
     async fn run_db_init_success_sets_cell() {
-        use crate::db::Pool;
+        use tokio::sync::Mutex;
 
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("ready.db");
         let pool: Pool = crate::db::connect(&db_path).await.expect("test pool");
 
         let cell: Arc<OnceCell<Pool>> = Arc::new(OnceCell::new());
-        let cell2 = Arc::clone(&cell);
+        let status = Arc::new(Mutex::new(crate::DbInitStatus::Initializing));
 
-        // 把"连接成功"的决策抽成可单测的内联逻辑（不走真实 AppHandle）
-        let result: crate::error::AppResult<Pool> = Ok(pool);
-        if let Ok(p) = result {
-            let _ = cell2.set(p);
-        }
+        let result: Result<crate::error::AppResult<Pool>, tokio::time::error::Elapsed> =
+            Ok(Ok(pool));
+        let (event, msg) = crate::apply_db_init_result(result, &cell, &status).await;
 
         assert!(cell.get().is_some(), "成功路径应填充 OnceCell");
+        assert!(
+            matches!(*status.lock().await, crate::DbInitStatus::Ready),
+            "成功路径状态应为 Ready"
+        );
+        assert_eq!(event, "db://ready");
+        assert!(msg.is_none());
     }
 
-    /// run_db_init 失败路径：connect_fn 返回 Err → OnceCell 保持空。
+    /// run_db_init 失败路径：apply_db_init_result 不填充 OnceCell，状态置为 Failed。
     #[tokio::test]
     async fn run_db_init_error_leaves_cell_empty() {
-        let cell: Arc<OnceCell<Pool>> = Arc::new(OnceCell::new());
-        let cell2 = Arc::clone(&cell);
+        use tokio::sync::Mutex;
 
-        let result: crate::error::AppResult<Pool> = Err(AppError::DbNotReady);
-        if let Ok(p) = result {
-            let _ = cell2.set(p);
-        }
-        // 失败路径不填充
+        let cell: Arc<OnceCell<Pool>> = Arc::new(OnceCell::new());
+        let status = Arc::new(Mutex::new(crate::DbInitStatus::Initializing));
+
+        let result: Result<crate::error::AppResult<Pool>, tokio::time::error::Elapsed> =
+            Ok(Err(AppError::DbNotReady));
+        let (event, msg) = crate::apply_db_init_result(result, &cell, &status).await;
+
         assert!(cell.get().is_none(), "失败路径 OnceCell 应保持空");
+        assert!(
+            matches!(*status.lock().await, crate::DbInitStatus::Failed(_)),
+            "失败路径状态应为 Failed"
+        );
+        assert_eq!(event, "db://error");
+        assert!(msg.is_some());
     }
 }
