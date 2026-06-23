@@ -632,61 +632,53 @@ mod tests {
 
     // --- #6: drain 阶段也被超时覆盖 ---
     //
-    // 真实的 half-open 场景无法在单元测试里还原（async-imap Session 绑定 TcpStream），
-    // 但可以通过构造"命令成功、响应流永不产出"的场景验证：把命令+drain 整体放进
-    // timeout 后，drain 卡住时能被截断并映射为 AppError::Imap。
+    // (b) 全链路假 IMAP server 方向：async-imap Session 类型绑定 TlsStream<TcpStream>，
+    //     无法在单元测试里不做 TLS 就构造；OP_TIMEOUT 是编译期常量，无法从外部注入缩短。
+    //     因此 fetch_headers/uid_fetch_headers 级别的端到端 op-timeout 测试在当前架构下
+    //     无法干净落地，详见 CLAUDE.md § IMAP integration 说明。
+    //
+    // (a) 直接喂生产泛型函数：drain_fetch_stream 是 S: Stream 泛型，可以在测试里直接调用，
+    //     以 pending stream 验证"流挂起时 drain 会卡住"，以 empty stream 验证正常完成路径。
 
+    /// 外层 timeout 截断 drain_fetch_stream：pending stream 使 drain 永不返回，
+    /// timeout 到期后 drain_fetch_stream 被截断——真正调用了生产函数。
+    ///
+    /// 判别力验证：若把 drain_fetch_stream 换成立即返回的桩（如 `async { Ok(vec![]) }`），
+    /// 该 future 会在 timeout 到期前完成，r 变成 Ok(Ok([])) 而非 Err(Elapsed)，断言失败。
+    /// 故本测试确实依赖"生产 drain_fetch_stream 遇到 pending stream 会挂起"这一事实。
     #[tokio::test]
-    async fn drain_stall_is_caught_by_op_timeout() {
+    async fn drain_fetch_stream_stalls_on_pending_stream() {
         use std::time::Duration;
         use tokio::time::timeout;
 
-        // 模拟"命令已发出（Ok）、但响应流永远挂起"的 async block。
-        // 这正是修复后每个方法内部的结构：命令 + drain 都在同一个 timeout block 里。
-        // timeout 返回 Result<AppResult<_>, Elapsed>；map_err 把 Elapsed 转为 AppError::Imap，
-        // 再用 flatten 把 Result<Result<_,E>,E> 展开为 Result<_,E>。
-        let result: AppResult<Vec<i32>> = timeout(Duration::from_millis(10), async {
-            // 命令阶段：瞬间成功
-            let _cmd_ok: AppResult<()> = Ok(());
-            // drain 阶段：永远挂起，模拟 half-open 连接
-            let pending: futures::future::Pending<Option<i32>> = futures::future::pending();
-            let _item = pending.await; // 永不返回
-            Ok::<Vec<i32>, AppError>(vec![])
-        })
-        .await
-        .map_err(|_| AppError::Imap("IMAP 操作超时（30s）".into()))
-        .and_then(|inner| inner);
+        // pending::<Result<Fetch, _>>() 永远不产出 item —— 模拟 half-open 连接的 drain 挂起。
+        let stalled =
+            futures::stream::pending::<async_imap::error::Result<async_imap::types::Fetch>>();
+        let r = timeout(Duration::from_millis(10), drain_fetch_stream(stalled)).await;
 
-        match result {
-            Err(AppError::Imap(msg)) => assert!(
-                msg.contains("超时") || msg.contains("timed out"),
-                "错误信息应含超时说明，实际: {msg}"
-            ),
-            other => panic!("drain 卡住时应超时，实际得到: {other:?}"),
-        }
+        assert!(
+            r.is_err(),
+            "drain_fetch_stream 在 pending stream 上应被 timeout 截断"
+        );
     }
 
+    /// drain_fetch_stream 在空 stream 上快速完成，返回空 Vec。
+    ///
+    /// 对照测试：确认正常路径不受 timeout 影响，同时验证生产函数对空流返回 Ok([])。
     #[tokio::test]
-    async fn drain_completes_fast_returns_ok() -> AppResult<()> {
-        use futures::StreamExt;
+    async fn drain_fetch_stream_returns_empty_on_empty_stream() -> AppResult<()> {
         use std::time::Duration;
         use tokio::time::timeout;
 
-        // 模拟"命令成功、drain 快速完成"的正常路径，验证超时结构不影响正常返回。
-        let items: Vec<i32> = timeout(Duration::from_millis(100), async {
-            let stream = futures::stream::iter(vec![Ok::<i32, AppError>(1), Ok(2), Ok(3)]);
-            futures::pin_mut!(stream);
-            let mut out = Vec::new();
-            while let Some(item) = stream.next().await {
-                out.push(item?);
-            }
-            Ok::<Vec<i32>, AppError>(out)
-        })
-        .await
-        .map_err(|_| AppError::Imap("IMAP 操作超时（30s）".into()))
-        .and_then(|inner| inner)?;
+        // iter([]) 立即结束，drain 应快速返回 Ok(vec![])。
+        let empty = futures::stream::iter(
+            Vec::<async_imap::error::Result<async_imap::types::Fetch>>::new(),
+        );
+        let r = timeout(Duration::from_millis(100), drain_fetch_stream(empty))
+            .await
+            .map_err(|_| AppError::Imap("不应超时".into()))??;
 
-        assert_eq!(items, vec![1, 2, 3]);
+        assert!(r.is_empty(), "空 stream 应返回空 Vec，实际: {r:?}");
         Ok(())
     }
 }
