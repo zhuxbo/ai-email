@@ -263,6 +263,29 @@ async fn sync_mailbox_inner(
     ))
 }
 
+/// 后台 classify/eval 任务的前置守卫：是否应继续执行。
+///
+/// - 取消令牌已触发（应用退出/账户删除）→ false。
+/// - 账户已不存在（cancel-insert 竞态漏网）→ false。
+/// - 账户存活检查查询失败 → 保守返回 false（不在不确定状态下跑 AI / 写库）。
+async fn should_run_classify(token: &CancellationToken, pool: &Pool, account_id: Uuid) -> bool {
+    if token.is_cancelled() {
+        tracing::debug!(account_id = %account_id, "classify 取消，跳过");
+        return false;
+    }
+    match accounts::account_exists(pool, account_id).await {
+        Ok(true) => true,
+        Ok(false) => {
+            tracing::info!(account_id = %account_id, "账户已删除，跳过 classify");
+            false
+        }
+        Err(e) => {
+            tracing::warn!(account_id = %account_id, error = %e, "账户存活检查失败，保守跳过");
+            false
+        }
+    }
+}
+
 /// Sync INBOX and kick off background AI classification + auto-reply evaluation.
 ///
 /// `account_tokens`：账户级子令牌注册表（来自 AppState）。spawn 前为该账户注册子令牌，
@@ -298,25 +321,9 @@ pub async fn sync_inbox(
         let tokens_clone = Arc::clone(&account_tokens);
 
         tokio::spawn(async move {
-            // 层 1：取消令牌早检——覆盖 cancel 在 insert 之后执行的正常路径。
-            if child_token.is_cancelled() {
-                tracing::debug!(account_id = %account_id, "classify cancelled before start");
-                tokens_clone.lock().await.remove(&account_id);
-                return;
-            }
-
-            // 层 2：账户存活检查——覆盖 cancel 在 insert 之前执行（竞态漏网）的路径。
-            // 若账户已被删除，跳过 classify + eval，避免浪费 AI 调用；
-            // 外键约束（层 3）兜底残留极窄 TOCTOU（此处查到存在、随后才删除），
-            // 该窗口由 sqlx 外键错误捕获，无数据损坏风险。
-            if !crate::db::accounts::account_exists(&pool_clone, account_id)
-                .await
-                .unwrap_or(false)
-            {
-                tracing::info!(
-                    account_id = %account_id,
-                    "account removed before classify, skipping background task"
-                );
+            // 前置守卫：取消或账户已删除则跳过，避免浪费 AI 调用；
+            // 外键约束（层 3）兜底残留极窄 TOCTOU 窗口，无数据损坏风险。
+            if !should_run_classify(&child_token, &pool_clone, account_id).await {
                 tokens_clone.lock().await.remove(&account_id);
                 return;
             }
@@ -423,7 +430,9 @@ pub async fn sync_mailbox(
 
 #[cfg(test)]
 mod tests {
-    use super::{decide_sync_mode, AutoReplyPayload, ClassifiedPayload, SyncMode};
+    use super::{
+        decide_sync_mode, should_run_classify, AutoReplyPayload, ClassifiedPayload, SyncMode,
+    };
 
     #[test]
     fn first_sync_when_no_local_uid_next() {
@@ -579,5 +588,55 @@ mod tests {
             .await
             .unwrap();
         assert!(!exists, "删除后 account_exists 应返回 false");
+    }
+
+    /// 覆盖 should_run_classify 决策分支，确保反向变异（Ok(true)↔Ok(false) 对调）能 FAIL。
+    ///
+    /// 变异验证结论（记录预期；下次 review 怀疑判别力时仍应亲自跑变异确认，勿凭此注释跳过）：
+    ///   - 若将 `Ok(true) => true` 改为 `Ok(true) => false`，则 "账户存在→true" 用例 FAIL。
+    ///   - 若将 `Ok(false) => false` 改为 `Ok(false) => true`，则 "账户不存在→false" 用例 FAIL。
+    ///   - 恢复原始实现后，三个用例全部 PASS。
+    ///   → 决策分支已被测试锁定，伪绿盲区消除。
+    #[tokio::test]
+    async fn should_run_classify_covers_decision_branches() {
+        use tokio_util::sync::CancellationToken;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("guard_test.db");
+        let pool = crate::db::connect(&db_path).await.expect("test pool");
+
+        // 分支 1：令牌已取消 → false（无论账户是否存在）
+        let token = CancellationToken::new();
+        token.cancel();
+        let phantom_id = uuid::Uuid::new_v4();
+        assert!(
+            !should_run_classify(&token, &pool, phantom_id).await,
+            "已取消的 token 应返回 false"
+        );
+
+        // 分支 2：令牌未取消 + 账户不存在（pool 中未插入该 id）→ false
+        let token = CancellationToken::new();
+        let nonexistent_id = uuid::Uuid::new_v4();
+        assert!(
+            !should_run_classify(&token, &pool, nonexistent_id).await,
+            "账户不存在时应返回 false"
+        );
+
+        // 分支 3：令牌未取消 + 账户存在 → true
+        let input = crate::db::accounts::AccountInput {
+            email: "guard@example.com".into(),
+            display_name: None,
+            provider: "qq".into(),
+            imap_host: "imap.qq.com".into(),
+            imap_port: 993,
+            smtp_host: "smtp.qq.com".into(),
+            smtp_port: 465,
+        };
+        let account = crate::db::accounts::insert(&pool, &input).await.unwrap();
+        let token = CancellationToken::new();
+        assert!(
+            should_run_classify(&token, &pool, account.id).await,
+            "账户存在且未取消时应返回 true"
+        );
     }
 }
