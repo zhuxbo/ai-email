@@ -32,5 +32,7 @@ describe('MessageList 空态', () => {
     } as never);
     render(<MessageList />);
     expect(screen.getByText(/1 个账户加载失败：amy@qq.com/)).toBeInTheDocument();
+    // 失败原因（boom）也应显示出来，而非仅邮箱地址
+    expect(screen.getByText(/boom/)).toBeInTheDocument();
   });
 });

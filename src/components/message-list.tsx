@@ -47,7 +47,11 @@ export function MessageList() {
 
   // 聚合层把部分账户的加载/同步失败汇到 accountErrors；这里映射成邮箱地址做提示。
   const failedAccounts = useMemo(
-    () => Object.keys(accountErrors).map((id) => accounts.find((a) => a.id === id)?.email ?? id),
+    () =>
+      Object.entries(accountErrors).map(([id, message]) => {
+        const email = accounts.find((a) => a.id === id)?.email ?? id;
+        return `${email}（${message}）`;
+      }),
     [accountErrors, accounts],
   );
 
