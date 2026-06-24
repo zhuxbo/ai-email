@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:android": "bash ./scripts/build-android.sh",
     "preview": "vite preview",
     "tauri": "tauri",
     "format": "prettier --write .",

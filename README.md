@@ -35,7 +35,7 @@ pnpm tauri dev      # 开发模式(桌面)
 
 ```bash
 pnpm tauri build                                   # macOS 桌面 .app / .dmg
-pnpm tauri android build --apk --target aarch64    # Android arm64 APK
+pnpm build:android    # Android arm64 APK
 ```
 
 ## 平台
