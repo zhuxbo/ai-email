@@ -104,6 +104,8 @@ interface MailState {
   setSortByPriority: (on: boolean) => void;
 
   setSeen: (id: string, seen: boolean) => Promise<void>;
+  /** 自动已读：打开邮件时本地乐观标 \Seen，IMAP 尽力同步、失败静默不回滚（区别于 setSeen）。 */
+  markSeenSilent: (id: string) => Promise<void>;
   setFlagged: (id: string, flagged: boolean) => Promise<void>;
   deleteMessage: (id: string) => Promise<void>;
 
@@ -221,15 +223,17 @@ export const useMailStore = create<MailState>((set, get) => ({
     if (prevId !== id) {
       useComposeStore.getState().reset();
     }
+    // 打开即标已读：不依赖正文取成功（正文走 IMAP 常失败，旧逻辑把已读绑在正文成功后导致漏标）。
+    // 静默——本地乐观标 + IMAP 尽力，失败不回滚不报错（用户已查看；下次 sync 按服务端纠正）。
+    const m = get().messages.find((x) => x.id === id);
+    if (m !== undefined && !m.flags.includes('\\Seen')) {
+      void get().markSeenSilent(id);
+    }
+
     try {
       const body = await tauri.messageBody(id);
       if (get().selectedMessageId === id) {
         set({ body });
-        // 打开即标记已读（仅未读时发请求，避免每次打开都打 IMAP）。
-        const m = get().messages.find((x) => x.id === id);
-        if (m !== undefined && !m.flags.includes('\\Seen')) {
-          void get().setSeen(id, true);
-        }
       }
     } catch (e) {
       set({ error: errMsg(e) });
@@ -358,6 +362,18 @@ export const useMailStore = create<MailState>((set, get) => ({
 
   setSeen: async (id, seen) => {
     await setFlagOptimistic(set, get, id, '\\Seen', seen, tauri.messageSetSeen);
+  },
+
+  markSeenSilent: async (id) => {
+    // 自动已读：本地乐观标 \Seen（不清 error，避免干扰其它操作的错误显示）。
+    set({
+      messages: get().messages.map((m) =>
+        m.id === id ? { ...m, flags: toggleFlag(m.flags, '\\Seen', true) } : m,
+      ),
+    });
+    // IMAP 尽力同步；失败保持本地已读、不回滚不报错（用户已查看；下次 sync 按服务端纠正）。
+    // 有意吞掉 rejection：无数据丢失（邮件与本地状态都在），区别于手动 setSeen 的回滚语义。
+    await tauri.messageSetSeen(id, true).catch(() => undefined);
   },
 
   setFlagged: async (id, flagged) => {
