@@ -272,6 +272,108 @@ Content-Type: text/html\r\n\
         assert!(!p.has_attachment);
     }
 
+    // 仅 text/html、无 text/plain：parse_body 应提取 html（否则前端 fallback 到纯文本，丢失渲染）。
+    #[test]
+    fn parses_html_only() {
+        const MAIL: &[u8] = b"\
+From: a@x\r\n\
+Subject: m\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: text/html\r\n\
+\r\n\
+<p>only html</p>\r\n";
+        let p = parse_body(MAIL);
+        assert!(
+            p.html.as_deref().unwrap_or("").contains("only html"),
+            "html-only 邮件应提取 html，实际 html={:?}",
+            p.html
+        );
+    }
+
+    // 真实 HTML 邮件的 html part 几乎都带 CTE（quoted-printable / base64）。验证 parse_body
+    // 解码后提取，而非把 =XX 原文当 html（后者会丢失渲染/显示乱码）。=68=65=6C=6C=6F = "hello"。
+    #[test]
+    fn parses_quoted_printable_html() {
+        const MAIL: &[u8] = b"\
+From: a@x\r\n\
+Subject: m\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: text/html; charset=utf-8\r\n\
+Content-Transfer-Encoding: quoted-printable\r\n\
+\r\n\
+<p>qp =68=65=6C=6C=6F</p>\r\n";
+        let p = parse_body(MAIL);
+        let html = p.html.as_deref().unwrap_or("");
+        assert!(
+            html.contains("qp hello"),
+            "QP 的 html 应解码后提取，实际 html={html:?}"
+        );
+    }
+
+    // 带内联图的 HTML 邮件：multipart/related { text/html, image(cid) }。营销/账单常见此结构。
+    #[test]
+    fn parses_multipart_related_html() {
+        const MAIL: &[u8] = b"\
+From: a@x\r\n\
+Subject: m\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: multipart/related; boundary=\"R\"\r\n\
+\r\n\
+--R\r\n\
+Content-Type: text/html\r\n\
+\r\n\
+<p>related html</p>\r\n\
+--R\r\n\
+Content-Type: image/png\r\n\
+Content-ID: <logo>\r\n\
+Content-Transfer-Encoding: base64\r\n\
+\r\n\
+iVBORw0KGgo=\r\n\
+--R--\r\n";
+        let p = parse_body(MAIL);
+        assert!(
+            p.html.as_deref().unwrap_or("").contains("related html"),
+            "multipart/related 应提取 html，实际 html={:?}",
+            p.html
+        );
+    }
+
+    // 带附件的 HTML 邮件：multipart/mixed { multipart/alternative { text, html }, attachment }。
+    #[test]
+    fn parses_mixed_alternative_with_attachment() {
+        const MAIL: &[u8] = b"\
+From: a@x\r\n\
+Subject: m\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: multipart/mixed; boundary=\"M\"\r\n\
+\r\n\
+--M\r\n\
+Content-Type: multipart/alternative; boundary=\"A\"\r\n\
+\r\n\
+--A\r\n\
+Content-Type: text/plain\r\n\
+\r\n\
+plain part\r\n\
+--A\r\n\
+Content-Type: text/html\r\n\
+\r\n\
+<p>mixed html</p>\r\n\
+--A--\r\n\
+--M\r\n\
+Content-Type: application/pdf\r\n\
+Content-Disposition: attachment; filename=\"doc.pdf\"\r\n\
+\r\n\
+PDFDATA\r\n\
+--M--\r\n";
+        let p = parse_body(MAIL);
+        assert!(
+            p.html.as_deref().unwrap_or("").contains("mixed html"),
+            "mixed/alternative 应提取 html，实际 html={:?}",
+            p.html
+        );
+        assert!(p.has_attachment, "应检测到附件");
+    }
+
     // 中国邮件（银行账单、运营商等）常用 GB2312/GBK 编码。mail-parser 解码非 UTF-8
     // 字符集依赖 `full_encoding` feature（→ encoding_rs）；缺它中文会变成 U+FFFD 乱码。
     // 样本：subject 为 RFC 2047 GB2312 encoded-word，body 为裸 GB2312 字节。
