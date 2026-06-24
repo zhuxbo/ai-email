@@ -182,4 +182,51 @@ describe('NavRail', () => {
     );
     expect(hasMailboxBtn).toBe(false);
   });
+
+  // ── 自定义文件夹折叠（标准信箱直显 + 更多展开） ───────────────────────────
+
+  it('自定义文件夹默认折叠，仅标准信箱直接可见', () => {
+    const p = {
+      ...baseProps(),
+      selectedAccountId: 'a',
+      mailboxes: [mbox('m1', 'INBOX', 'inbox'), mbox('m2', '订阅邮件'), mbox('m3', '广告邮件')],
+    };
+    render(<NavRail {...p} />);
+    expect(screen.getByRole('button', { name: '收件箱' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '订阅邮件' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '广告邮件' })).toBeNull();
+  });
+
+  it('点击"更多"展开自定义文件夹', async () => {
+    const p = {
+      ...baseProps(),
+      selectedAccountId: 'a',
+      mailboxes: [mbox('m1', 'INBOX', 'inbox'), mbox('m2', '订阅邮件')],
+    };
+    render(<NavRail {...p} />);
+    await userEvent.click(screen.getByRole('button', { name: /更多/ }));
+    expect(screen.getByRole('button', { name: '订阅邮件' })).toBeInTheDocument();
+  });
+
+  it('无自定义文件夹时不显示"更多"按钮', () => {
+    const p = {
+      ...baseProps(),
+      selectedAccountId: 'a',
+      mailboxes: [mbox('m1', 'INBOX', 'inbox'), mbox('m2', 'Sent', 'sent')],
+    };
+    render(<NavRail {...p} />);
+    expect(screen.queryByRole('button', { name: /更多/ })).toBeNull();
+  });
+
+  it('自定义文件夹名解码 modified UTF-7（展开后显示中文）', async () => {
+    const p = {
+      ...baseProps(),
+      selectedAccountId: 'a',
+      // '&UXZO1mWHTvZZOQ-' 是 "其他文件夹" 的 IMAP modified UTF-7 编码
+      mailboxes: [mbox('m1', 'INBOX', 'inbox'), mbox('m2', '&UXZO1mWHTvZZOQ-')],
+    };
+    render(<NavRail {...p} />);
+    await userEvent.click(screen.getByRole('button', { name: /更多/ }));
+    expect(screen.getByRole('button', { name: '其他文件夹' })).toBeInTheDocument();
+  });
 });

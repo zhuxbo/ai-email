@@ -1,5 +1,7 @@
+import { useState } from 'react';
 import { Avatar } from './ui/avatar';
 import { IconButton } from './ui/icon-button';
+import { decodeModifiedUtf7 } from '../lib/utils';
 import type { Account, Mailbox, SpecialUse } from '../lib/types';
 
 /** specialUse → 图标 + 中文标签 */
@@ -11,12 +13,19 @@ const SPECIAL_USE_META: Record<SpecialUse, { icon: string; label: string }> = {
   junk: { icon: '🚫', label: '垃圾邮件' },
 };
 
+/** 是否被识别为标准信箱（有有效 specialUse）。对 null / undefined 均返回 false。 */
+function hasSpecialUse(box: Mailbox): boolean {
+  return box.specialUse !== null && box.specialUse in SPECIAL_USE_META;
+}
+
 function mailboxLabel(box: Mailbox): string {
   if (box.specialUse !== null && box.specialUse in SPECIAL_USE_META) {
     return SPECIAL_USE_META[box.specialUse].label;
   }
-  // 截断过长的自定义信箱名
-  return box.name.length > 6 ? `${box.name.slice(0, 6)}…` : box.name;
+  // 自定义文件夹：解码 modified UTF-7（中文名）后取叶子名、截断过长
+  const decoded = decodeModifiedUtf7(box.name);
+  const leaf = decoded.split('/').pop() ?? decoded;
+  return leaf.length > 6 ? `${leaf.slice(0, 6)}…` : leaf;
 }
 
 function mailboxIcon(box: Mailbox): string {
@@ -24,6 +33,33 @@ function mailboxIcon(box: Mailbox): string {
     return SPECIAL_USE_META[box.specialUse].icon;
   }
   return '📁';
+}
+
+function MailboxButton({
+  box,
+  selected,
+  onSelect,
+}: {
+  box: Mailbox;
+  selected: boolean;
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={mailboxLabel(box)}
+      aria-pressed={selected}
+      title={decodeModifiedUtf7(box.name)}
+      onClick={() => {
+        onSelect(box.id);
+      }}
+      className={`flex h-8 w-8 flex-col items-center justify-center rounded text-[10px] leading-none transition-colors hover:bg-slate-700 ${
+        selected ? 'bg-slate-600 text-white' : 'text-slate-400'
+      }`}
+    >
+      <span className="text-sm leading-none">{mailboxIcon(box)}</span>
+    </button>
+  );
 }
 
 interface Props {
@@ -57,6 +93,12 @@ export function NavRail({
   onOpenAutoReply,
   autoReplyCount,
 }: Props) {
+  const [foldersExpanded, setFoldersExpanded] = useState(false);
+  // 标准信箱（收件箱/已发送/草稿/废纸篓/垃圾）始终直显；其余自定义文件夹折叠进"更多"，
+  // 避免 QQ 等账户的一堆订阅/广告/标签文件夹挤满 54px 窄栏。
+  const specialBoxes = mailboxes.filter(hasSpecialUse);
+  const customBoxes = mailboxes.filter((b) => !hasSpecialUse(b));
+
   return (
     <nav className="flex w-[54px] shrink-0 flex-col items-center gap-3 bg-ink py-3">
       <button
@@ -102,27 +144,45 @@ export function NavRail({
         ＋
       </IconButton>
 
-      {/* 信箱列表：仅在选中单个账户时显示 */}
+      {/* 信箱列表：仅在选中单个账户时显示。标准信箱直显，自定义文件夹折叠进"更多"。 */}
       {selectedAccountId !== null && mailboxes.length > 0 && (
         <>
           <div className="h-px w-6 bg-slate-700" />
-          {mailboxes.map((box) => (
-            <button
+          {specialBoxes.map((box) => (
+            <MailboxButton
               key={box.id}
-              type="button"
-              aria-label={mailboxLabel(box)}
-              aria-pressed={box.id === selectedMailboxId}
-              title={box.name}
-              onClick={() => {
-                onSelectMailbox(box.id);
-              }}
-              className={`flex h-8 w-8 flex-col items-center justify-center rounded text-[10px] leading-none transition-colors hover:bg-slate-700 ${
-                box.id === selectedMailboxId ? 'bg-slate-600 text-white' : 'text-slate-400'
-              }`}
-            >
-              <span className="text-sm leading-none">{mailboxIcon(box)}</span>
-            </button>
+              box={box}
+              selected={box.id === selectedMailboxId}
+              onSelect={onSelectMailbox}
+            />
           ))}
+          {customBoxes.length > 0 && (
+            <>
+              <button
+                type="button"
+                aria-label={
+                  foldersExpanded ? '收起文件夹' : `更多文件夹（${String(customBoxes.length)}）`
+                }
+                aria-expanded={foldersExpanded}
+                title={foldersExpanded ? '收起文件夹' : '更多文件夹'}
+                onClick={() => {
+                  setFoldersExpanded((v) => !v);
+                }}
+                className="flex h-8 w-8 items-center justify-center rounded text-sm leading-none text-slate-400 transition-colors hover:bg-slate-700"
+              >
+                {foldersExpanded ? '▴' : '⋯'}
+              </button>
+              {foldersExpanded &&
+                customBoxes.map((box) => (
+                  <MailboxButton
+                    key={box.id}
+                    box={box}
+                    selected={box.id === selectedMailboxId}
+                    onSelect={onSelectMailbox}
+                  />
+                ))}
+            </>
+          )}
         </>
       )}
 

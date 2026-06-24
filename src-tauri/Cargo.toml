@@ -81,8 +81,9 @@ webpki-roots = "0.26"
 futures = "0.3"
 
 # ── Mail parsing ──────────────────────────────────────────
-# Header parsing now; body parsing (multipart, encoding, charset) in Sprint 1.4.
-mail-parser = "0.11"
+# full_encoding 拉入 encoding_rs，解码非 UTF-8 字符集（GB2312/GBK/Big5 等中日韩邮件）。
+# 缺它则只认 UTF-8，中文银行账单等会变成 U+FFFD 乱码。
+mail-parser = { version = "0.11", features = ["full_encoding"] }
 
 # ── HTTP client for Anthropic API ─────────────────────────
 # rustls everywhere (matches sqlx + tokio-rustls). No default-features so we don't drag in

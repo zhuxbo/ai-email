@@ -272,6 +272,29 @@ Content-Type: text/html\r\n\
         assert!(!p.has_attachment);
     }
 
+    // 中国邮件（银行账单、运营商等）常用 GB2312/GBK 编码。mail-parser 解码非 UTF-8
+    // 字符集依赖 `full_encoding` feature（→ encoding_rs）；缺它中文会变成 U+FFFD 乱码。
+    // 样本：subject 为 RFC 2047 GB2312 encoded-word，body 为裸 GB2312 字节。
+    const GB2312_MSG: &[u8] = b"\
+From: master@creditcard.cmbc.com.cn\r\n\
+Subject: =?GB2312?B?0MXTw7+o1cu1pQ==?=\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: text/plain; charset=GB2312\r\n\
+\r\n\
+\xc4\xfa\xb5\xc4\xd5\xcb\xb5\xa5\xd2\xd1\xb3\xf6\xa3\xac\xc7\xeb\xbc\xb0\xca\xb1\xbb\xb9\xbf\xee\xa1\xa3\r\n";
+
+    #[test]
+    fn decodes_gb2312_subject_and_body() {
+        let h = parse_headers(GB2312_MSG);
+        assert_eq!(h.subject.as_deref(), Some("信用卡账单"));
+
+        let b = parse_body(GB2312_MSG);
+        assert_eq!(
+            b.text_plain.as_deref().map(str::trim),
+            Some("您的账单已出，请及时还款。"),
+        );
+    }
+
     #[test]
     fn snippet_truncates_with_ellipsis() {
         let s = "hello   world\n\nthis is a long line of text we will truncate";

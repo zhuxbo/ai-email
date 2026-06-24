@@ -47,7 +47,7 @@ export function ComposeTab() {
           发送账户
         </label>
         {isReply ? (
-          <p className="mt-1 rounded border border-border-1 bg-surface-2 px-2 py-1 text-text-1">
+          <p className="mt-1 rounded border border-[var(--color-border)] bg-app px-2 py-1 text-text-1">
             {fromLabel}
           </p>
         ) : (
@@ -57,7 +57,7 @@ export function ComposeTab() {
             onChange={(e) => {
               setField({ fromAccountId: e.currentTarget.value });
             }}
-            className="mt-1 w-full rounded border border-border-1 bg-surface-1 px-2 py-1 text-text-1"
+            className="mt-1 w-full rounded border border-[var(--color-border)] bg-panel px-2 py-1 text-text-1"
           >
             {accounts.map((a) => (
               <option key={a.id} value={a.id}>
@@ -78,7 +78,7 @@ export function ComposeTab() {
           onChange={(e) => {
             setField({ to: e.currentTarget.value });
           }}
-          className="mt-1 w-full rounded border border-border-1 bg-surface-1 px-2 py-1 text-text-1"
+          className="mt-1 w-full rounded border border-[var(--color-border)] bg-panel px-2 py-1 text-text-1"
         />
       </label>
 
@@ -91,7 +91,7 @@ export function ComposeTab() {
           onChange={(e) => {
             setField({ cc: e.currentTarget.value });
           }}
-          className="mt-1 w-full rounded border border-border-1 bg-surface-1 px-2 py-1 text-text-1"
+          className="mt-1 w-full rounded border border-[var(--color-border)] bg-panel px-2 py-1 text-text-1"
         />
       </label>
 
@@ -105,7 +105,7 @@ export function ComposeTab() {
           onChange={(e) => {
             setField({ subject: e.currentTarget.value });
           }}
-          className="mt-1 w-full rounded border border-border-1 bg-surface-1 px-2 py-1 text-text-1"
+          className="mt-1 w-full rounded border border-[var(--color-border)] bg-panel px-2 py-1 text-text-1"
         />
       </label>
 
@@ -122,7 +122,7 @@ export function ComposeTab() {
                   setField({ intentZh: e.currentTarget.value });
                 }}
                 placeholder='例如"婉拒"、"确认约下周一"'
-                className="flex-1 rounded border border-border-1 bg-surface-1 px-2 py-1 text-text-1"
+                className="flex-1 rounded border border-[var(--color-border)] bg-panel px-2 py-1 text-text-1"
               />
               <button
                 type="button"
@@ -130,7 +130,7 @@ export function ComposeTab() {
                 onClick={() => {
                   void runDraft();
                 }}
-                className="rounded bg-surface-2 px-3 py-1 font-medium text-text-1 hover:bg-surface-3 disabled:cursor-not-allowed disabled:opacity-50"
+                className="rounded bg-app px-3 py-1 font-medium text-text-1 hover:bg-slate-200 dark:hover:bg-slate-600 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {drafting ? '起草中…' : 'AI 起草'}
               </button>
@@ -142,7 +142,7 @@ export function ComposeTab() {
                   onClick={() => {
                     void runDraft(true);
                   }}
-                  className="rounded bg-surface-2 px-2 py-1 text-[10px] font-medium text-text-2 hover:bg-surface-3 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="rounded bg-app px-2 py-1 text-[10px] font-medium text-text-2 hover:bg-slate-200 dark:hover:bg-slate-600 disabled:cursor-not-allowed disabled:opacity-50"
                   title="强制重新生成，忽略缓存"
                 >
                   {drafting ? '…' : '重新生成'}
@@ -163,7 +163,7 @@ export function ComposeTab() {
             setField({ bodyForeign: e.currentTarget.value });
           }}
           rows={10}
-          className="mt-1 w-full rounded border border-border-1 bg-surface-1 px-2 py-1 font-mono text-text-1"
+          className="mt-1 w-full rounded border border-[var(--color-border)] bg-panel px-2 py-1 font-mono text-text-1"
         />
       </label>
 
@@ -178,12 +178,12 @@ export function ComposeTab() {
               onClick={() => {
                 void refreshBackTranslation();
               }}
-              className="rounded bg-surface-2 px-2 py-0.5 text-[10px] font-medium text-text-2 hover:bg-surface-3 disabled:cursor-not-allowed disabled:opacity-50"
+              className="rounded bg-app px-2 py-0.5 text-[10px] font-medium text-text-2 hover:bg-slate-200 dark:hover:bg-slate-600 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {backTranslating ? '翻译中…' : '刷新对照'}
             </button>
           </div>
-          <p className="mt-1 rounded border border-border-1 bg-surface-2 px-2 py-1 text-text-1 whitespace-pre-wrap">
+          <p className="mt-1 rounded border border-[var(--color-border)] bg-app px-2 py-1 text-text-1 whitespace-pre-wrap">
             {bodyZhBack}
           </p>
         </div>
