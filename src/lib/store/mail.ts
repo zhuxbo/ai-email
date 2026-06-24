@@ -106,6 +106,8 @@ interface MailState {
   setSeen: (id: string, seen: boolean) => Promise<void>;
   /** 自动已读：打开邮件时本地乐观标 \Seen，IMAP 尽力同步、失败静默不回滚（区别于 setSeen）。 */
   markSeenSilent: (id: string) => Promise<void>;
+  /** 全部已读：把当前视图所有未读批量标 \Seen（乐观 + 失败 reload 恢复）。 */
+  markAllSeen: () => Promise<void>;
   setFlagged: (id: string, flagged: boolean) => Promise<void>;
   deleteMessage: (id: string) => Promise<void>;
 
@@ -374,6 +376,27 @@ export const useMailStore = create<MailState>((set, get) => ({
     // IMAP 尽力同步；失败保持本地已读、不回滚不报错（用户已查看；下次 sync 按服务端纠正）。
     // 有意吞掉 rejection：无数据丢失（邮件与本地状态都在），区别于手动 setSeen 的回滚语义。
     await tauri.messageSetSeen(id, true).catch(() => undefined);
+  },
+
+  markAllSeen: async () => {
+    const ids = get()
+      .messages.filter((m) => !m.flags.includes('\\Seen'))
+      .map((m) => m.id);
+    if (ids.length === 0) return;
+    // 乐观批量标 \Seen（只动未读，已读保持），并清旧 error。
+    set({
+      messages: get().messages.map((m) =>
+        m.flags.includes('\\Seen') ? m : { ...m, flags: toggleFlag(m.flags, '\\Seen', true) },
+      ),
+      error: null,
+    });
+    try {
+      await tauri.messagesMarkSeenBulk(ids);
+    } catch (e) {
+      // 批量 IMAP 失败：记 error 并从后端重拉，反映真实状态（部分分组可能已成功）。
+      set({ error: errMsg(e) });
+      await get().reloadMessages();
+    }
   },
 
   setFlagged: async (id, flagged) => {

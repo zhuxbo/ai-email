@@ -280,6 +280,60 @@ pub async fn message_set_flagged(
     set_flag_impl(state.pool().await?, id, "\\Flagged", flagged).await
 }
 
+/// 批量标 `\Seen`（「全部已读」）。`ids` 可跨账户/信箱：按 (account, mailbox) 分组，每组一次
+/// IMAP `UID STORE +FLAGS \Seen`，成功后本地批量标。某组失败即返回错误（已成功组的本地 flags
+/// 已更新，前端 reload 会反映真实状态）。空 `ids` 直接返回。
+#[tauri::command]
+pub async fn messages_mark_seen_bulk(state: State<'_, AppState>, ids: Vec<Uuid>) -> AppResult<()> {
+    use std::collections::HashMap;
+
+    let pool = state.pool().await?;
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    // 按 (account_id, mailbox_id) 分组收集 uid + id（跳过查不到的 id）。
+    let mut groups: HashMap<(Uuid, Uuid), (Vec<u32>, Vec<Uuid>)> = HashMap::new();
+    for id in ids {
+        let Some(msg) = messages::get(pool, id).await? else {
+            continue;
+        };
+        let uid = u32::try_from(msg.imap_uid)
+            .map_err(|_| AppError::Imap(format!("invalid imap_uid: {}", msg.imap_uid)))?;
+        let entry = groups.entry((msg.account_id, msg.mailbox_id)).or_default();
+        entry.0.push(uid);
+        entry.1.push(id);
+    }
+
+    for ((account_id, mailbox_id), (uids, msg_ids)) in groups {
+        let account = db::accounts::get(pool, account_id)
+            .await?
+            .ok_or_else(|| AppError::Config(format!("account {account_id} not found")))?;
+        let mailbox = mailboxes::get(pool, mailbox_id)
+            .await?
+            .ok_or_else(|| AppError::Config(format!("mailbox {mailbox_id} not found")))?;
+        let auth = tokio::task::spawn_blocking(move || keychain::get_auth_code(account_id))
+            .await
+            .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
+        let port = u16::try_from(account.imap_port)
+            .map_err(|_| AppError::Imap(format!("invalid imap_port: {}", account.imap_port)))?;
+
+        let mut client =
+            ImapClient::connect(&account.imap_host, port, &account.email, &auth).await?;
+        client.select(&mailbox.name).await?;
+        client.uid_set_flag_bulk(&uids, "\\Seen", true).await?;
+        if let Err(e) = client.logout().await {
+            tracing::warn!(error = ?e, "imap logout failed (non-fatal)");
+        }
+
+        // IMAP 成功 → 本地批量标 \Seen（持久化）。
+        for id in msg_ids {
+            messages::update_flag_atomic(pool, id, "\\Seen", true).await?;
+        }
+    }
+    Ok(())
+}
+
 /// 删除 = 移到废纸篓（可恢复）。move 成功即逻辑成功；本地 remove 失败仅 warn 返 Ok
 /// （服务端权威态已变，宁留极罕见幽灵行也不让用户看到删除回退）。
 #[tauri::command]

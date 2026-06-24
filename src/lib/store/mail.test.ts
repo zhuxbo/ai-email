@@ -21,6 +21,7 @@ vi.mock('../tauri', () => ({
   messageSetSeen: vi.fn().mockResolvedValue(undefined),
   messageSetFlagged: vi.fn().mockResolvedValue(undefined),
   messageDelete: vi.fn().mockResolvedValue(undefined),
+  messagesMarkSeenBulk: vi.fn().mockResolvedValue(undefined),
 }));
 import * as tauri from '../tauri';
 describe('mail store 聚合新成员', () => {
@@ -244,6 +245,54 @@ describe('mail store 打开自动标记已读', () => {
     const s = useMailStore.getState();
     expect(s.messages.find((m) => m.id === 'm1')?.flags).toContain('\\Seen');
     expect(s.error).toBeNull();
+  });
+});
+
+describe('mail store 全部已读', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('把当前视图未读批量标已读（乐观）并只对未读发命令', async () => {
+    useMailStore.setState({
+      messages: [
+        { id: 'm1', accountId: 'a1', flags: [] },
+        { id: 'm2', accountId: 'a1', flags: ['\\Seen'] },
+        { id: 'm3', accountId: 'a1', flags: ['\\Flagged'] },
+      ] as never,
+      selectedAccountId: null,
+      selectedMailboxId: null,
+      error: null,
+    } as never);
+    await useMailStore.getState().markAllSeen();
+    const s = useMailStore.getState();
+    expect(s.messages.find((m) => m.id === 'm1')?.flags).toContain('\\Seen');
+    expect(s.messages.find((m) => m.id === 'm3')?.flags).toContain('\\Seen');
+    expect(s.messages.find((m) => m.id === 'm2')?.flags).toContain('\\Seen');
+    // 只对未读 m1、m3 发命令（已读 m2 不在内）
+    expect(tauri.messagesMarkSeenBulk).toHaveBeenCalledWith(['m1', 'm3']);
+  });
+
+  it('无未读时不发命令', async () => {
+    useMailStore.setState({
+      messages: [{ id: 'm1', accountId: 'a1', flags: ['\\Seen'] }] as never,
+      error: null,
+    } as never);
+    await useMailStore.getState().markAllSeen();
+    expect(tauri.messagesMarkSeenBulk).not.toHaveBeenCalled();
+  });
+
+  it('失败时记 error 并 reload 重拉恢复', async () => {
+    vi.mocked(tauri.messagesMarkSeenBulk).mockRejectedValueOnce(new Error('STORE boom'));
+    useMailStore.setState({
+      messages: [{ id: 'm1', accountId: 'a1', flags: [] }] as never,
+      selectedAccountId: null,
+      selectedMailboxId: null,
+      error: null,
+    } as never);
+    await useMailStore.getState().markAllSeen();
+    expect(useMailStore.getState().error).toContain('STORE boom');
+    expect(tauri.unifiedInbox).toHaveBeenCalled();
   });
 });
 

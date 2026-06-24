@@ -256,6 +256,7 @@ pub fn run() {
             commands::mail::smtp_send,
             commands::mail::message_set_seen,
             commands::mail::message_set_flagged,
+            commands::mail::messages_mark_seen_bulk,
             commands::mail::message_delete,
             commands::ai_config::models_list,
             commands::ai_config::model_add,

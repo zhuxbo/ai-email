@@ -270,6 +270,40 @@ impl ImapClient {
         .map_err(|_| AppError::Imap("IMAP UID STORE 操作超时（30s）".into()))?
     }
 
+    /// `UID STORE <set> ±FLAGS (<flag>)` 批量版：`uids` 拼成逗号分隔 sequence-set，一次往返
+    /// 标记多封（用于「全部已读」）。空 `uids` 直接返回、不发往返。语义/安全同 [`Self::uid_set_flag`]。
+    pub async fn uid_set_flag_bulk(
+        &mut self,
+        uids: &[u32],
+        flag: &str,
+        add: bool,
+    ) -> AppResult<()> {
+        if uids.is_empty() {
+            return Ok(());
+        }
+        let set = uids
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let sign = if add { "+" } else { "-" };
+        let query = format!("{sign}FLAGS ({flag})");
+        // Timeout covers both command send and the full FLAGS response stream drain.
+        timeout(OP_TIMEOUT, async {
+            let mut stream = self
+                .session
+                .uid_store(set, query)
+                .await
+                .map_err(|e| AppError::Imap(e.to_string()))?;
+            while let Some(item) = stream.next().await {
+                item.map_err(|e| AppError::Imap(e.to_string()))?;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| AppError::Imap("IMAP UID STORE（批量）操作超时（30s）".into()))?
+    }
+
     /// `UID MOVE <uid> <dest>`。需先 `select` 源文件夹。
     pub async fn uid_move(&mut self, uid: u32, dest: &str) -> AppResult<()> {
         timeout(OP_TIMEOUT, self.session.uid_mv(uid.to_string(), dest))

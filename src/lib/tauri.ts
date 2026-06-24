@@ -101,6 +101,10 @@ export async function messageSetSeen(id: string, seen: boolean): Promise<void> {
   await invoke('message_set_seen', { id, seen });
 }
 
+export async function messagesMarkSeenBulk(ids: string[]): Promise<void> {
+  await invoke('messages_mark_seen_bulk', { ids });
+}
+
 export async function messageSetFlagged(id: string, flagged: boolean): Promise<void> {
   await invoke('message_set_flagged', { id, flagged });
 }
