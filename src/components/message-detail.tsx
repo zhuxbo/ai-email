@@ -1,9 +1,10 @@
 // Right pane: header + body (text or html with sandbox) + actions bar.
 //
 // HTML rendering uses an iframe with `srcDoc` + a `sandbox` attribute (no allow-same-origin,
-// no allow-scripts) plus an injected Content-Security-Policy meta tag that blocks all remote
-// resources by default. This prevents tracking pixels and external image beacons from loading
-// automatically when a message is opened.
+// no allow-scripts) plus an injected Content-Security-Policy meta tag. Remote images load by
+// default (img-src allows http/https) so email images show without a click; scripts/fonts/
+// frames stay blocked by default-src 'none' + the no-scripts sandbox. Trade-off: remote images
+// include tracking pixels, which will load when a message is opened.
 // Plain-text fallback if the message has no HTML. Reply moved into the actions bar.
 // AI 摘要/翻译/写信通过操作条触发右侧抽屉展示。
 
@@ -91,13 +92,15 @@ export function MessageDetail() {
 }
 
 // CSP injected into every HTML email srcdoc:
-// - default-src 'none' blocks all remote fetches by default (tracking pixels, fonts, scripts)
+// - default-src 'none' 兜底屏蔽脚本 / 字体 / frame / XHR 等远程资源
 // - style-src 'unsafe-inline' allows inline CSS (needed for most HTML email layouts)
-// - img-src data: allows data-URI embedded images only (no remote http/https)
+// - img-src data: https: http: 默认下载远程图片（含 data 内嵌图）。取舍：放开图片即允许
+//   tracking pixel 加载（暴露已读 + IP）；脚本仍由 sandbox(无 allow-scripts) + default-src
+//   'none' 双重屏蔽，放开图片不影响 XSS 防护。
 // Links to external sites are handled by allow-popups on the sandbox (Tauri intercepts them).
 const EMAIL_CSP =
   `<meta http-equiv="Content-Security-Policy" ` +
-  `content="default-src 'none'; style-src 'unsafe-inline'; img-src data:;">`;
+  `content="default-src 'none'; style-src 'unsafe-inline'; img-src data: https: http:;">`;
 
 function buildSrcdoc(html: string): string {
   return `${EMAIL_CSP}${html}`;
