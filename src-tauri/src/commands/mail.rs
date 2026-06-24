@@ -104,7 +104,18 @@ pub async fn message_get(state: State<'_, AppState>, id: Uuid) -> AppResult<Mess
 /// 克隆 receiver 后先读当前值，已为 `true` 则直接查缓存，否则调用 `changed().await` 等待。
 #[tauri::command]
 pub async fn message_body(state: State<'_, AppState>, id: Uuid) -> AppResult<MessageBody> {
-    let pool = state.pool().await?;
+    message_body_impl(state.pool().await?, &state.body_in_flight, id).await
+}
+
+/// `message_body` 的可测内核：把 `State` 依赖拆成显式参数（pool + single-flight map），
+/// 便于在单元测试里注入并复现「迟到者」分支，无需构造完整 `AppState`。
+async fn message_body_impl(
+    pool: &db::Pool,
+    body_in_flight: &tokio::sync::Mutex<
+        std::collections::HashMap<Uuid, tokio::sync::watch::Receiver<bool>>,
+    >,
+    id: Uuid,
+) -> AppResult<MessageBody> {
     // 快路径：缓存命中直接返回。
     if let Some(body) = bodies::get(pool, id).await? {
         return Ok(body);
@@ -112,7 +123,7 @@ pub async fn message_body(state: State<'_, AppState>, id: Uuid) -> AppResult<Mes
 
     // 检查是否已有并发请求在取此 id 的 body。
     let mut rx = {
-        let mut map = state.body_in_flight.lock().await;
+        let mut map = body_in_flight.lock().await;
         if let Some(existing) = map.get(&id) {
             // 其他请求已在 in-flight：克隆 receiver 后释放锁，等待 leader 完成。
             existing.clone()
@@ -124,10 +135,9 @@ pub async fn message_body(state: State<'_, AppState>, id: Uuid) -> AppResult<Mes
 
             // RAII guard：无论 fetch 成功/失败/panic，均自动移除 map 条目并将 watch 设为 true，
             // 确保等待者不会永久阻塞（M3：消除 leader panic 时的条目泄漏）。
-            let state_ref = &*state;
             let _guard = BodyInFlightGuard {
                 id,
-                body_in_flight: &state_ref.body_in_flight,
+                body_in_flight,
                 tx,
             };
 
@@ -143,9 +153,15 @@ pub async fn message_body(state: State<'_, AppState>, id: Uuid) -> AppResult<Mes
         let _ = rx.changed().await;
     }
 
-    bodies::get(pool, id)
-        .await?
-        .ok_or_else(|| AppError::Config(format!("body {id} not in cache after in-flight fetch")))
+    // leader 完成后查缓存：命中即返回。
+    if let Some(body) = bodies::get(pool, id).await? {
+        return Ok(body);
+    }
+
+    // 缓存仍空 = leader 取正文失败（如 IMAP 超时 / 网络错误）且未写缓存。迟到者回退自取一次：
+    // 成功则返回正文，失败则透传真实的 IMAP/网络错误，而非误导性的 "not in cache"。多个迟到者
+    // 各自重取属罕见的错误恢复路径，可接受（不重新竞选 leader，避免逻辑复杂化）。
+    fetch_and_cache_body(pool, id).await
 }
 
 /// RAII guard：在 drop 时从 single-flight map 移除条目，并通过 watch sender 通知所有等待者。
@@ -312,6 +328,20 @@ mod tests {
     use tokio::sync::{watch, Mutex};
     use uuid::Uuid;
 
+    /// 测试专用内存 SQLite pool（单连接、迁移已跑、外键启用）。
+    async fn test_pool() -> crate::db::Pool {
+        let opts = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(":memory:")
+            .foreign_keys(true);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        crate::db::MIGRATOR.run(&pool).await.unwrap();
+        pool
+    }
+
     /// #41 专项：精确复现"leader 先完成、迟到者后等待"的竞态窗口。
     ///
     /// 场景：迟到者在锁内克隆了 receiver（map 中的 rx），但释放锁到调用 borrow()/changed()
@@ -415,5 +445,38 @@ mod tests {
 
         // rx 的值应已为 true
         assert!(*rx.borrow(), "drop guard 应 send(true) 通知等待者");
+    }
+
+    /// 迟到者修复：leader 取正文失败（未写缓存）后，迟到者不应再返回误导性的
+    /// "not in cache after in-flight fetch"，而应回退自取、透传真实失败原因。
+    ///
+    /// 判别力：旧实现迟到者直接 `bodies::get → None → Config("... not in cache ...")`，
+    /// 下方第一个断言失败；新实现回退 `fetch_and_cache_body`，对不存在的 message 返回
+    /// "message {id} not found"（真实原因），两个断言都通过。
+    #[tokio::test]
+    async fn latecomer_falls_back_and_surfaces_real_error_not_not_in_cache() {
+        let pool = test_pool().await;
+        // 该 message 不存在 → 回退自取会在 messages::get 处得到 "message not found"。
+        let id = Uuid::new_v4();
+
+        // 预置 single-flight 条目并标记 leader 已完成（watch=true），复现「迟到者」分支。
+        let body_in_flight: Mutex<HashMap<Uuid, watch::Receiver<bool>>> =
+            Mutex::new(HashMap::new());
+        let (_tx, rx) = watch::channel(true);
+        body_in_flight.lock().await.insert(id, rx);
+
+        let err = super::message_body_impl(&pool, &body_in_flight, id)
+            .await
+            .expect_err("不存在的 message 应返回错误");
+        let msg = err.to_string();
+
+        assert!(
+            !msg.contains("not in cache"),
+            "迟到者应透传真实原因而非误导性 not-in-cache，实际：{msg}"
+        );
+        assert!(
+            msg.contains("not found"),
+            "应透传回退自取的真实失败原因（message not found），实际：{msg}"
+        );
     }
 }
