@@ -8,10 +8,12 @@
 // Plain-text fallback if the message has no HTML. Reply moved into the actions bar.
 // AI 摘要/翻译/写信通过操作条触发右侧抽屉展示。
 
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { save } from '@tauri-apps/plugin-dialog';
 
+import * as tauri from '../lib/tauri';
 import { useMailStore } from '../lib/store/mail';
-import type { MessageHeader } from '../lib/types';
+import type { AttachmentMeta, MessageHeader } from '../lib/types';
 import { MessageActions } from './message-actions';
 
 function selectedMessage(messages: MessageHeader[], id: string | null): MessageHeader | null {
@@ -32,6 +34,12 @@ function formatDateTime(iso: string | null): string {
   });
 }
 
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${String(bytes)} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 export function MessageDetail() {
   const messages = useMailStore((s) => s.messages);
   const selectedMessageId = useMailStore((s) => s.selectedMessageId);
@@ -43,12 +51,43 @@ export function MessageDetail() {
     [messages, selectedMessageId],
   );
 
+  const [attachments, setAttachments] = useState<AttachmentMeta[]>([]);
+  // 打开有附件的邮件时按需取附件列表（不入库）。active 守卫防切换邮件时迟到结果覆盖。
+  useEffect(() => {
+    if (!msg?.hasAttachment) {
+      setAttachments([]);
+      return;
+    }
+    let active = true;
+    const id = msg.id;
+    void tauri
+      .messageAttachments(id)
+      .then((atts) => {
+        if (active) setAttachments(atts);
+      })
+      .catch(() => {
+        if (active) setAttachments([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [msg?.id, msg?.hasAttachment]);
+
   if (!msg) {
     return (
       <section className="flex h-full flex-1 items-center justify-center text-sm text-slate-400 dark:text-slate-500">
         在左侧选择一封邮件查看内容
       </section>
     );
+  }
+
+  const selected = msg;
+  async function downloadAttachment(index: number, att: AttachmentMeta) {
+    // 用户「另存为」选定路径后由后端写盘（dialog 已授权写出 app 数据目录外）。
+    const path = await save({ defaultPath: att.filename });
+    if (typeof path === 'string') {
+      await tauri.messageAttachmentSave(selected.id, index, path);
+    }
   }
 
   return (
@@ -80,6 +119,27 @@ export function MessageDetail() {
       </header>
 
       <div className="flex-1 overflow-auto p-6">
+        {attachments.length > 0 && (
+          <div className="mb-4 rounded border border-slate-200 bg-white p-3 dark:border-slate-700 dark:bg-slate-900">
+            <div className="mb-2 text-xs font-medium text-slate-600 dark:text-slate-300">
+              附件 ({attachments.length})
+            </div>
+            <ul className="flex flex-wrap gap-2">
+              {attachments.map((a, i) => (
+                <li key={`${a.filename}-${String(i)}`}>
+                  <button
+                    type="button"
+                    onClick={() => void downloadAttachment(i, a)}
+                    className="flex items-center gap-1 rounded border border-slate-200 px-2 py-1 text-xs text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                    title="下载附件"
+                  >
+                    📎 {a.filename} · {formatSize(a.size)}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         {loadingBody && <div className="text-sm text-slate-500">正在加载正文…</div>}
         {!loadingBody && body && <BodyView body={body} />}
         {!loadingBody && !body && (

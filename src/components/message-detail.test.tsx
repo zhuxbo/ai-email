@@ -1,8 +1,22 @@
-import { describe, it, expect, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { render, screen, fireEvent } from '@testing-library/react';
+import { save } from '@tauri-apps/plugin-dialog';
 
 import { MessageDetail } from './message-detail';
 import { useMailStore } from '../lib/store/mail';
+import * as tauri from '../lib/tauri';
+
+vi.mock('@tauri-apps/plugin-dialog', () => ({
+  save: vi.fn().mockResolvedValue(null),
+}));
+vi.mock('../lib/tauri', async (importOriginal) => {
+  const actual = await importOriginal<typeof tauri>();
+  return {
+    ...actual,
+    messageAttachments: vi.fn().mockResolvedValue([]),
+    messageAttachmentSave: vi.fn().mockResolvedValue(undefined),
+  };
+});
 
 const BASE_MSG = {
   id: 'm1',
@@ -92,5 +106,38 @@ describe('BodyView HTML iframe — 默认下载图片 + 脚本仍屏蔽', () => 
     const iframe = document.querySelector('iframe');
     const srcdoc = iframe?.getAttribute('srcdoc') ?? '';
     expect(srcdoc).toContain('<p>Hello');
+  });
+});
+
+describe('MessageDetail 附件', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useMailStore.setState({
+      messages: [{ ...BASE_MSG, id: 'm1', hasAttachment: true }],
+      selectedMessageId: 'm1',
+      body: { messageId: 'm1', textPlain: 'B', html: null, fetchedAt: '' },
+      loadingBody: false,
+    } as never);
+  });
+
+  it('有附件邮件渲染附件名与下载按钮', async () => {
+    vi.mocked(tauri.messageAttachments).mockResolvedValueOnce([
+      { filename: 'doc.pdf', contentType: 'application/pdf', size: 2048 },
+    ]);
+    render(<MessageDetail />);
+    expect(await screen.findByText(/doc\.pdf/)).toBeInTheDocument();
+  });
+
+  it('点击附件触发 save + messageAttachmentSave', async () => {
+    vi.mocked(tauri.messageAttachments).mockResolvedValueOnce([
+      { filename: 'doc.pdf', contentType: 'application/pdf', size: 2048 },
+    ]);
+    vi.mocked(save).mockResolvedValueOnce('/tmp/doc.pdf');
+    render(<MessageDetail />);
+    const btn = await screen.findByRole('button', { name: /doc\.pdf/ });
+    fireEvent.click(btn);
+    await vi.waitFor(() => {
+      expect(tauri.messageAttachmentSave).toHaveBeenCalledWith('m1', 0, '/tmp/doc.pdf');
+    });
   });
 });

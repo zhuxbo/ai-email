@@ -200,6 +200,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup({
             let app_cancel = app_cancel.clone();
             move |app| {
@@ -248,6 +249,8 @@ pub fn run() {
             commands::mail::messages_list,
             commands::mail::message_get,
             commands::mail::message_body,
+            commands::mail::message_attachments,
+            commands::mail::message_attachment_save,
             commands::ai::ai_summarize,
             commands::ai::ai_classify,
             commands::ai::ai_translate,

@@ -8,6 +8,7 @@ import type { UnlistenFn } from '@tauri-apps/api/event';
 
 import type {
   Account,
+  AttachmentMeta,
   AddAccountForm,
   AddModelForm,
   AiModel,
@@ -111,6 +112,18 @@ export async function messageSetFlagged(id: string, flagged: boolean): Promise<v
 
 export async function messageDelete(id: string): Promise<void> {
   await invoke('message_delete', { id });
+}
+
+export async function messageAttachments(id: string): Promise<AttachmentMeta[]> {
+  return invoke('message_attachments', { id });
+}
+
+export async function messageAttachmentSave(
+  id: string,
+  index: number,
+  dest: string,
+): Promise<void> {
+  await invoke('message_attachment_save', { id, index, dest });
 }
 
 export async function modelsList(): Promise<AiModel[]> {

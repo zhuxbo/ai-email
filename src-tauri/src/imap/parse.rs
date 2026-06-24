@@ -3,7 +3,7 @@
 //! Body parsing (text/plain extraction, snippet, attachments) is Sprint 1.4 — this module
 //! only touches the metadata we persist on first sync.
 
-use mail_parser::{Address, HeaderValue, MessageParser, PartType};
+use mail_parser::{Address, HeaderValue, MessageParser, MimeHeaders, PartType};
 use time::OffsetDateTime;
 
 #[derive(Debug, Default)]
@@ -183,6 +183,52 @@ pub fn parse_body(raw: &[u8]) -> ParsedBody {
     }
 }
 
+/// 附件元信息（不含内容）。`size` 为解码后字节数。供前端「附件列表」展示与下载。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentMeta {
+    pub filename: String,
+    pub content_type: String,
+    pub size: i64,
+}
+
+/// 从完整 RFC822 原文提取所有附件的元信息（不含内容）。无文件名时回退占位名。
+pub fn parse_attachments(raw: &[u8]) -> Vec<AttachmentMeta> {
+    let Some(msg) = MessageParser::default().parse(raw) else {
+        return Vec::new();
+    };
+    msg.attachments()
+        .enumerate()
+        .map(|(i, part)| {
+            let filename = part
+                .attachment_name()
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("附件-{}", i + 1));
+            let content_type = part
+                .content_type()
+                .map(|ct| match ct.subtype() {
+                    Some(sub) => format!("{}/{}", ct.ctype(), sub),
+                    None => ct.ctype().to_string(),
+                })
+                .unwrap_or_else(|| "application/octet-stream".to_string());
+            let size = i64::try_from(part.contents().len()).unwrap_or(i64::MAX);
+            AttachmentMeta {
+                filename,
+                content_type,
+                size,
+            }
+        })
+        .collect()
+}
+
+/// 提取第 `index` 个附件的解码后字节用于下载。越界返回 `None`。
+pub fn extract_attachment_bytes(raw: &[u8], index: usize) -> Option<Vec<u8>> {
+    let msg = MessageParser::default().parse(raw)?;
+    // 将迭代器绑定到 local，避免「借用 msg 的迭代器临时」作为块尾表达式时晚于 msg 析构（E0597）。
+    let mut atts = msg.attachments();
+    atts.nth(index).map(|part| part.contents().to_vec())
+}
+
 /// Collapse whitespace and trim to `char_limit` characters (NOT bytes — multi-byte safe).
 /// Returns `None` if the input is empty after trimming. Appends `…` only when truncated.
 pub fn snippet(text: &str, char_limit: usize) -> Option<String> {
@@ -307,6 +353,61 @@ Content-Transfer-Encoding: quoted-printable\r\n\
         assert!(
             html.contains("qp hello"),
             "QP 的 html 应解码后提取，实际 html={html:?}"
+        );
+    }
+
+    // ① 附件：parse_attachments 提取元信息（不含内联正文），extract_attachment_bytes 取内容。
+    #[test]
+    fn parse_attachments_extracts_meta_excluding_inline_body() {
+        const MAIL: &[u8] = b"\
+From: a@x\r\n\
+Subject: m\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: multipart/mixed; boundary=\"M\"\r\n\
+\r\n\
+--M\r\n\
+Content-Type: text/plain\r\n\
+\r\n\
+real body\r\n\
+--M\r\n\
+Content-Type: application/pdf; name=\"doc.pdf\"\r\n\
+Content-Disposition: attachment; filename=\"doc.pdf\"\r\n\
+\r\n\
+PDFDATA\r\n\
+--M--\r\n";
+        let atts = parse_attachments(MAIL);
+        assert_eq!(atts.len(), 1, "只应提取附件、不含内联正文，实际={atts:?}");
+        assert_eq!(atts[0].filename, "doc.pdf");
+        assert_eq!(atts[0].content_type, "application/pdf");
+        assert!(atts[0].size > 0, "size 应 > 0");
+    }
+
+    #[test]
+    fn extract_attachment_bytes_returns_content_and_none_oob() {
+        const MAIL: &[u8] = b"\
+From: a@x\r\n\
+Subject: m\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: multipart/mixed; boundary=\"M\"\r\n\
+\r\n\
+--M\r\n\
+Content-Type: text/plain\r\n\
+\r\n\
+body\r\n\
+--M\r\n\
+Content-Type: application/octet-stream\r\n\
+Content-Disposition: attachment; filename=\"a.bin\"\r\n\
+\r\n\
+HELLO\r\n\
+--M--\r\n";
+        let bytes = extract_attachment_bytes(MAIL, 0).expect("附件 0 应存在");
+        assert!(
+            bytes.starts_with(b"HELLO"),
+            "应取到附件内容，实际={bytes:?}"
+        );
+        assert!(
+            extract_attachment_bytes(MAIL, 9).is_none(),
+            "越界 index 应返回 None"
         );
     }
 

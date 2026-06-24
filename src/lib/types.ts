@@ -55,6 +55,12 @@ export interface MessageHeader {
   bodyFetchedAt: string | null;
 }
 
+export interface AttachmentMeta {
+  filename: string;
+  contentType: string;
+  size: number;
+}
+
 export interface Classification {
   category: Category;
   priority: number;

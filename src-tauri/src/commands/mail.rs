@@ -187,8 +187,9 @@ impl Drop for BodyInFlightGuard<'_> {
     }
 }
 
-/// IMAP 取 body 并持久化到 DB，供 `message_body` 调用。
-async fn fetch_and_cache_body(db: &db::Pool, id: Uuid) -> AppResult<MessageBody> {
+/// IMAP 连接 → select → `UID FETCH BODY[]`，返回该消息的完整 RFC822 原文。
+/// 供 `fetch_and_cache_body`（正文）与附件命令（列附件 / 取附件字节）复用。
+async fn fetch_raw_body(db: &db::Pool, id: Uuid) -> AppResult<Vec<u8>> {
     let msg = messages::get(db, id)
         .await?
         .ok_or_else(|| AppError::Config(format!("message {id} not found")))?;
@@ -215,7 +216,12 @@ async fn fetch_and_cache_body(db: &db::Pool, id: Uuid) -> AppResult<MessageBody>
     if let Err(e) = client.logout().await {
         tracing::warn!(error = ?e, "imap logout failed (non-fatal)");
     }
+    Ok(raw)
+}
 
+/// IMAP 取 body 并持久化到 DB，供 `message_body` 调用。
+async fn fetch_and_cache_body(db: &db::Pool, id: Uuid) -> AppResult<MessageBody> {
+    let raw = fetch_raw_body(db, id).await?;
     let parsed = parse::parse_body(&raw);
     let snippet = parsed
         .text_plain
@@ -226,6 +232,35 @@ async fn fetch_and_cache_body(db: &db::Pool, id: Uuid) -> AppResult<MessageBody>
     messages::mark_body_fetched(db, id, parsed.has_attachment, snippet).await?;
     tracing::info!(message_id = %id, "message body fetched and cached");
     Ok(body)
+}
+
+/// 列出某邮件的附件元信息（IMAP 取原文 → 解析，不入库）。供详情页附件区展示。
+#[tauri::command]
+pub async fn message_attachments(
+    state: State<'_, AppState>,
+    id: Uuid,
+) -> AppResult<Vec<parse::AttachmentMeta>> {
+    let raw = fetch_raw_body(state.pool().await?, id).await?;
+    Ok(parse::parse_attachments(&raw))
+}
+
+/// 把某邮件第 `index` 个附件写入用户「另存为」选定的 `dest` 路径。用户主动下载到自选位置
+/// （dialog 已授权），故允许写出 app 数据目录之外。越界返回错误。
+#[tauri::command]
+pub async fn message_attachment_save(
+    state: State<'_, AppState>,
+    id: Uuid,
+    index: usize,
+    dest: String,
+) -> AppResult<()> {
+    let raw = fetch_raw_body(state.pool().await?, id).await?;
+    let bytes = parse::extract_attachment_bytes(&raw, index)
+        .ok_or_else(|| AppError::Config(format!("attachment {index} not found")))?;
+    tokio::task::spawn_blocking(move || std::fs::write(&dest, bytes))
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?
+        .map_err(|e| AppError::Config(format!("写入附件失败：{e}")))?;
+    Ok(())
 }
 
 #[tauri::command]
