@@ -84,9 +84,14 @@ export function MessageDetail() {
   const selected = msg;
   async function downloadAttachment(index: number, att: AttachmentMeta) {
     // 用户「另存为」选定路径后由后端写盘（dialog 已授权写出 app 数据目录外）。
-    const path = await save({ defaultPath: att.filename });
-    if (typeof path === 'string') {
-      await tauri.messageAttachmentSave(selected.id, index, path);
+    // 写盘失败 surface 到全局错误条，避免静默 + unhandled rejection。
+    try {
+      const path = await save({ defaultPath: att.filename });
+      if (typeof path === 'string') {
+        await tauri.messageAttachmentSave(selected.id, index, path);
+      }
+    } catch (e) {
+      useMailStore.setState({ error: e instanceof Error ? e.message : '下载附件失败' });
     }
   }
 

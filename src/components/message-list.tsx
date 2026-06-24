@@ -80,7 +80,7 @@ export function MessageList() {
                 type="button"
                 onClick={() => void markAllSeen()}
                 className="rounded px-2 py-0.5 text-[10px] font-medium text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
-                title="把当前收件箱的未读全部标为已读"
+                title="把已加载的未读全部标为已读"
               >
                 全部已读
               </button>
