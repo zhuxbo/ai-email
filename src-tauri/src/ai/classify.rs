@@ -22,7 +22,7 @@
 //! `tokio::spawn` after `sync_inbox` returns. Errors are logged and surfaced via the
 //! returned Vec — callers (UI) decide how to display.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,7 @@ use uuid::Uuid;
 use crate::ai::{extract_json, prompts, AiClient, CompletionRequest, SystemBlock, UserMessage};
 use crate::db::ai_results::{self, AiResultInsert};
 use crate::db::messages::{self, ClassifyInput};
+use crate::db::sender_filters::{self, SenderFilter, Verdict};
 use crate::db::{ai_role_defaults, is_fk_violation, message_tags, Pool};
 use crate::error::{AppError, AppResult};
 use crate::keychain;
@@ -79,29 +80,122 @@ pub async fn classify_message_ids(
     if message_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let model = ai_role_defaults::resolve_model(pool, ROLE)
-        .await?
-        .ok_or_else(|| {
-            AppError::Config("请先在 AI 设置中配置默认分类模型 (role = classify)".into())
-        })?;
-    let model_uuid = model.id;
-    let api_key: SecretString =
-        tokio::task::spawn_blocking(move || keychain::get_ai_key(model_uuid))
-            .await
-            .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
+    let filters = sender_filters::load_all(pool).await?;
+    classify_with_filters(pool, message_ids, &filters).await
+}
 
+/// 可测核心：名单注入。黑名单不依赖 model 配置；仅 `rest` 非空时才 `resolve_model` + 调 AI。
+async fn classify_with_filters(
+    pool: &Pool,
+    message_ids: &[Uuid],
+    filters: &[SenderFilter],
+) -> AppResult<Vec<ClassifyResult>> {
     let inputs = messages::fetch_for_classify(pool, message_ids).await?;
-    let mut results: Vec<ClassifyResult> = Vec::with_capacity(inputs.len());
 
-    let client = AiClient::build(&model, api_key)?;
+    // 空名单短路：与未引入本功能逐字节等价（全量进 rest，无分区开销）。
+    let (mut results, rest, whitelist_ids) = if filters.is_empty() {
+        (Vec::new(), inputs, HashSet::new())
+    } else {
+        partition_and_apply_blacklist(pool, inputs, filters).await?
+    };
 
-    for chunk in inputs.chunks(BATCH_SIZE) {
-        let chunk_results = classify_chunk(pool, &client, chunk).await?;
-        results.extend(chunk_results);
+    // 仅当有消息需 AI 分类时才解析 model + 取 key + 调 AI（纯黑名单批次跳过、不依赖 AI 配置）。
+    if !rest.is_empty() {
+        let model = ai_role_defaults::resolve_model(pool, ROLE)
+            .await?
+            .ok_or_else(|| {
+                AppError::Config("请先在 AI 设置中配置默认分类模型 (role = classify)".into())
+            })?;
+        let model_uuid = model.id;
+        let api_key: SecretString =
+            tokio::task::spawn_blocking(move || keychain::get_ai_key(model_uuid))
+                .await
+                .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
+        let client = AiClient::build(&model, api_key)?;
+        for chunk in rest.chunks(BATCH_SIZE) {
+            results.extend(classify_chunk(pool, &client, chunk).await?);
+        }
     }
 
+    // 白名单豁免：对所有结果（fresh + cached）统一后处理。黑名单结果 category=spam 但
+    // id 不在 whitelist_ids（verdict 互斥），不受影响。
+    apply_whitelist_exemption(pool, &mut results, &whitelist_ids).await?;
     tracing::info!(count = results.len(), "classify batch done");
     Ok(results)
+}
+
+/// 三元分区 + 黑名单直写。黑名单消息直接落库 spam（不进 AI）；白名单消息记入 `whitelist_ids`
+/// 后随 None 一并进 `rest`（仍需 AI 判类，再由 `apply_whitelist_exemption` 后处理）。
+async fn partition_and_apply_blacklist(
+    pool: &Pool,
+    inputs: Vec<ClassifyInput>,
+    filters: &[SenderFilter],
+) -> AppResult<(Vec<ClassifyResult>, Vec<ClassifyInput>, HashSet<Uuid>)> {
+    let mut blacklisted = Vec::new();
+    let mut rest = Vec::new();
+    let mut whitelist_ids = HashSet::new();
+    for input in inputs {
+        match sender_filters::verdict(input.from_addr.as_deref(), filters) {
+            Verdict::Blacklist => blacklisted.push(input),
+            Verdict::Whitelist => {
+                whitelist_ids.insert(input.id);
+                rest.push(input);
+            }
+            Verdict::None => rest.push(input),
+        }
+    }
+
+    let mut results = Vec::with_capacity(blacklisted.len());
+    for input in &blacklisted {
+        // update_classification 是纯 UPDATE，对已删消息是 0-row no-op（不报 FK）。
+        // 用 affected_rows 判断：rows==0 → 消息已被并发删除 → 跳过（对称 fresh 路径"已删不 push"）。
+        // 非 FK 的真实 DB 错误由 `?` 传播。
+        let rows = messages::update_classification(pool, input.id, 3, "spam").await?;
+        if rows == 0 {
+            tracing::warn!(message_id = %input.id, "黑名单目标消息已删（update 0 行），跳过");
+            continue;
+        }
+        // 消息确实存在才清 AI tags（replace_ai_tags(&[]) 即便目标已删也只是 no-op DELETE、无副作用）。
+        message_tags::replace_ai_tags(pool, input.id, &[]).await?;
+        results.push(ClassifyResult {
+            message_id: input.id,
+            classification: Classification {
+                category: "spam".into(),
+                priority: 3,
+                tags: vec![],
+            },
+            source: "blacklist",
+        });
+    }
+    Ok((results, rest, whitelist_ids))
+}
+
+/// 白名单豁免：对 spam 且在白集合的结果改判 notification 并落库（覆盖 fresh + cached）。
+/// 只改 category、source 不动。update_classification 是纯 UPDATE：rows>0（命中、消息存在）才改
+/// 内存 → 保证「返回值==落库值」；rows==0（消息已被并发删除）保持原 spam 不改内存（不误报已删行
+/// 豁免成功）。非 FK 真实 DB 错误由 `?` 传播。
+async fn apply_whitelist_exemption(
+    pool: &Pool,
+    results: &mut [ClassifyResult],
+    whitelist_ids: &HashSet<Uuid>,
+) -> AppResult<()> {
+    for r in results.iter_mut() {
+        if r.classification.category == "spam" && whitelist_ids.contains(&r.message_id) {
+            let rows = messages::update_classification(
+                pool,
+                r.message_id,
+                r.classification.priority,
+                "notification",
+            )
+            .await?;
+            if rows > 0 {
+                r.classification.category = "notification".into();
+            } else {
+                tracing::warn!(message_id = %r.message_id, "白名单豁免目标已删（update 0 行），保持原值");
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn classify_chunk(
@@ -342,6 +436,10 @@ fn truncate_for_log(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
+    use crate::db::sender_filters::SenderFilter;
+
     use super::*;
 
     #[test]
@@ -440,5 +538,211 @@ mod tests {
             prompt.contains("<subject>") || prompt.contains("<主题>"),
             "prompt 应用结构化标签包裹 subject 字段，当前 prompt:\n{prompt}"
         );
+    }
+
+    // ── Task 7: 黑白名单集成（三元分区 + 黑名单直写 + 白名单豁免）──────────────
+
+    fn sf(list: &str, mt: &str, pat: &str) -> SenderFilter {
+        SenderFilter {
+            id: Uuid::new_v4(),
+            list_type: list.into(),
+            match_type: mt.into(),
+            pattern: pat.into(),
+            note: None,
+            created_at: time::OffsetDateTime::UNIX_EPOCH,
+        }
+    }
+
+    /// 建合法父行（accounts + mailboxes）再插 message，仿 db/messages.rs::insert_minimal。
+    async fn seed_message(pool: &Pool, from: &str) -> Uuid {
+        let account_id = Uuid::new_v4();
+        let mailbox_id = Uuid::new_v4();
+        let msg_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO accounts (id, email, provider, imap_host, smtp_host) \
+             VALUES (?1, ?2, 'imap', 'imap.test', 'smtp.test')",
+        )
+        .bind(account_id)
+        .bind(format!("test-{account_id}@test.invalid"))
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO mailboxes (id, account_id, name) VALUES (?1, ?2, 'INBOX')")
+            .bind(mailbox_id)
+            .bind(account_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO messages (id, account_id, mailbox_id, imap_uid, flags, from_addr) \
+             VALUES (?1, ?2, ?3, 1, '[]', ?4)",
+        )
+        .bind(msg_id)
+        .bind(account_id)
+        .bind(mailbox_id)
+        .bind(from)
+        .execute(pool)
+        .await
+        .unwrap();
+        msg_id
+    }
+
+    #[tokio::test]
+    async fn blacklist_writes_spam_and_partitions() {
+        let pool = crate::db::test_pool().await;
+        let black_id = seed_message(&pool, "a@evil.com").await;
+        let none_id = seed_message(&pool, "ok@good.com").await;
+        let filters = vec![sf("black", "domain", "evil.com")];
+        let inputs = messages::fetch_for_classify(&pool, &[black_id, none_id])
+            .await
+            .unwrap();
+        let (black, rest, white) = partition_and_apply_blacklist(&pool, inputs, &filters)
+            .await
+            .unwrap();
+        assert_eq!(black.len(), 1);
+        assert_eq!(black[0].classification.category, "spam");
+        assert_eq!(black[0].source, "blacklist");
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].id, none_id); // None 进 rest
+        assert!(white.is_empty());
+        assert_eq!(
+            messages::category_of(&pool, black_id)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("spam")
+        );
+    }
+
+    #[tokio::test]
+    async fn whitelist_exempts_cached_and_fresh_spam() {
+        let pool = crate::db::test_pool().await;
+        let id = seed_message(&pool, "vip@x.com").await;
+        let mut white = HashSet::new();
+        white.insert(id);
+        // 构造一条 cached 的 spam 结果（模拟 cache-hit 返回旧 spam）
+        let mut results = vec![ClassifyResult {
+            message_id: id,
+            classification: Classification {
+                category: "spam".into(),
+                priority: 3,
+                tags: vec![],
+            },
+            source: "cached",
+        }];
+        apply_whitelist_exemption(&pool, &mut results, &white)
+            .await
+            .unwrap();
+        assert_eq!(results[0].classification.category, "notification");
+        assert_eq!(results[0].source, "cached"); // source 不动
+        assert_eq!(
+            messages::category_of(&pool, id).await.unwrap().as_deref(),
+            Some("notification")
+        );
+    }
+
+    #[tokio::test]
+    async fn whitelist_leaves_non_spam_and_unlisted_alone() {
+        let pool = crate::db::test_pool().await;
+        let vip = seed_message(&pool, "vip@x.com").await;
+        let other = seed_message(&pool, "x@y.com").await;
+        let mut white = HashSet::new();
+        white.insert(vip);
+        let mut results = vec![
+            ClassifyResult {
+                message_id: vip,
+                classification: Classification {
+                    category: "work".into(),
+                    priority: 2,
+                    tags: vec![],
+                },
+                source: "fresh",
+            },
+            ClassifyResult {
+                message_id: other,
+                classification: Classification {
+                    category: "spam".into(),
+                    priority: 3,
+                    tags: vec![],
+                },
+                source: "fresh",
+            },
+        ];
+        apply_whitelist_exemption(&pool, &mut results, &white)
+            .await
+            .unwrap();
+        assert_eq!(results[0].classification.category, "work"); // 非 spam 不动
+        assert_eq!(results[1].classification.category, "spam"); // 不在白集合不动
+    }
+
+    #[tokio::test]
+    async fn blacklist_deleted_message_skipped() {
+        let pool = crate::db::test_pool().await;
+        let id = seed_message(&pool, "a@evil.com").await;
+        let filters = vec![sf("black", "domain", "evil.com")];
+        let inputs = messages::fetch_for_classify(&pool, &[id]).await.unwrap();
+        // fetch 后、落库前删除消息 → update_classification 为 0-row no-op（不报 FK）
+        sqlx::query("DELETE FROM messages WHERE id = ?1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let (black, rest, _w) = partition_and_apply_blacklist(&pool, inputs, &filters)
+            .await
+            .unwrap();
+        assert!(black.is_empty()); // rows==0 → 跳过、不 push、不中断
+        assert!(rest.is_empty());
+        assert_eq!(messages::category_of(&pool, id).await.unwrap(), None); // 行已删、未落库
+    }
+
+    #[tokio::test]
+    async fn whitelist_exemption_deleted_message_keeps_spam() {
+        let pool = crate::db::test_pool().await;
+        let id = seed_message(&pool, "vip@x.com").await;
+        let mut white = HashSet::new();
+        white.insert(id);
+        let mut results = vec![ClassifyResult {
+            message_id: id,
+            classification: Classification {
+                category: "spam".into(),
+                priority: 3,
+                tags: vec![],
+            },
+            source: "fresh",
+        }];
+        // 豁免前删除 → update_classification 为 0-row no-op
+        sqlx::query("DELETE FROM messages WHERE id = ?1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        apply_whitelist_exemption(&pool, &mut results, &white)
+            .await
+            .unwrap(); // 不中断
+                       // rows==0 → 不改内存：返回值保持原 spam（不误报已删行豁免成功）
+        assert_eq!(results[0].classification.category, "spam");
+    }
+
+    #[tokio::test]
+    async fn deleted_input_id_drops_from_fetch() {
+        let pool = crate::db::test_pool().await;
+        let keep = seed_message(&pool, "a@x.com").await;
+        let gone = seed_message(&pool, "b@y.com").await;
+        // gone 在 fetch 前删除 → fetch_for_classify 的 IN 查询静默丢它
+        sqlx::query("DELETE FROM messages WHERE id = ?1")
+            .bind(gone)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let inputs = messages::fetch_for_classify(&pool, &[keep, gone])
+            .await
+            .unwrap();
+        assert_eq!(inputs.len(), 1); // 2 个输入 id，已删的 fetch 不到
+        let filters = vec![sf("black", "domain", "nomatch.invalid")]; // 不命中 → 全进 rest
+        let (black, rest, _w) = partition_and_apply_blacklist(&pool, inputs, &filters)
+            .await
+            .unwrap();
+        assert!(black.is_empty());
+        assert_eq!(rest.len(), 1); // 返回规模 ≤ fetch 后 inputs.len()
     }
 }

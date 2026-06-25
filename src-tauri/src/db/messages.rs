@@ -188,8 +188,8 @@ pub async fn update_classification(
     id: Uuid,
     priority: i32,
     category: &str,
-) -> AppResult<()> {
-    sqlx::query(
+) -> AppResult<u64> {
+    let result = sqlx::query(
         r#"
         UPDATE messages
         SET priority = ?2,
@@ -202,7 +202,7 @@ pub async fn update_classification(
     .bind(category)
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(result.rows_affected())
 }
 
 /// 覆盖式更新本地 flags（JSON TEXT 列）。IMAP 写成功后调用，保持本地与服务端一致。
@@ -322,6 +322,17 @@ pub async fn fetch_for_classify(pool: &Pool, ids: &[Uuid]) -> AppResult<Vec<Clas
         out.extend(query.fetch_all(pool).await?);
     }
     Ok(out)
+}
+
+/// 测试专用：读取单条消息的 `category`（外层 Option = 行是否存在，内层 = 列是否为 NULL）。
+#[cfg(test)]
+pub(crate) async fn category_of(pool: &Pool, id: Uuid) -> AppResult<Option<String>> {
+    let row: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT category FROM messages WHERE id = ?1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.and_then(|r| r.0))
 }
 
 /// List by mailbox, most recent first. SQLite sorts NULLs last under `DESC` by default, so
