@@ -21,6 +21,7 @@ pub mod mailboxes;
 pub mod message_tags;
 pub mod messages;
 pub mod send_log;
+pub mod sender_filters;
 pub mod suggested_replies;
 
 use std::path::Path;
@@ -68,4 +69,22 @@ pub async fn connect(db_path: &Path) -> AppResult<Pool> {
 /// 并发删除父行时可触发此错误；调用方应 warn 后跳过，而非传播。
 pub(crate) fn is_fk_violation(e: &sqlx::Error) -> bool {
     matches!(e, sqlx::Error::Database(db) if db.is_foreign_key_violation())
+}
+
+pub(crate) fn is_unique_violation(e: &sqlx::Error) -> bool {
+    matches!(e, sqlx::Error::Database(db) if db.is_unique_violation())
+}
+
+#[cfg(test)]
+pub(crate) async fn test_pool() -> Pool {
+    let opts = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(":memory:")
+        .foreign_keys(true);
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(opts)
+        .await
+        .unwrap();
+    MIGRATOR.run(&pool).await.unwrap();
+    pool
 }
