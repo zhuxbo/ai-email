@@ -5,6 +5,7 @@ import { useState } from 'react';
 
 import { AccountsPanel } from './account-settings-dialog';
 import { AiModelsPanel } from './ai-settings-dialog';
+import { SenderFiltersPanel } from './sender-filters-dialog';
 
 interface Props {
   open: boolean;
@@ -14,6 +15,7 @@ interface Props {
 const TABS = [
   { key: 'accounts', label: '账户' },
   { key: 'ai', label: 'AI 模型' },
+  { key: 'filters', label: '黑白名单' },
 ] as const;
 type TabKey = (typeof TABS)[number]['key'];
 
@@ -70,6 +72,7 @@ export function SettingsDialog({ open, onClose }: Props) {
         <div className="flex-1 overflow-auto px-6 py-4">
           {tab === 'accounts' && <AccountsPanel />}
           {tab === 'ai' && <AiModelsPanel />}
+          {tab === 'filters' && <SenderFiltersPanel />}
         </div>
       </div>
     </div>
