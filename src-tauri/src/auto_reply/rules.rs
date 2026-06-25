@@ -16,30 +16,16 @@ pub struct MatchCandidate {
     pub priority: Option<i32>,
 }
 
-/// 从发件地址中提取 domain 部分（`@` 后的内容，小写）。
-///
-/// 支持 "Name <user@example.com>"、"user@example.com" 两种格式：
-/// 先找最后一个 `<`，若存在则在其之后查找 `@`；否则直接查找第一个 `@`。
-fn extract_domain(addr: &str) -> Option<&str> {
-    let start = addr.rfind('<').map(|i| i + 1).unwrap_or(0);
-    let slice = &addr[start..];
-    let at_pos = slice.find('@')?;
-    let domain_with_suffix = slice[at_pos + 1..].trim_end_matches('>');
-    Some(domain_with_suffix)
-}
-
-/// 大小写不敏感的域名匹配：精确相等 或 subdomain 后缀（`*.rule`）。
-fn domain_matches(addr_domain: &str, rule_domain: &str) -> bool {
-    let addr = addr_domain.to_lowercase();
-    let rule = rule_domain.to_lowercase();
-    addr == rule || addr.ends_with(&format!(".{rule}"))
-}
-
 pub fn rule_matches(c: &MatchCandidate, rule: &AutoReplyRule) -> bool {
     if let Some(dom) = &rule.match_domain {
-        match c.from_addr.as_deref().and_then(extract_domain) {
-            Some(addr_domain) if domain_matches(addr_domain, dom) => {}
-            _ => return false,
+        let Some(email) = crate::addr::extract_email(c.from_addr.as_deref()) else {
+            return false;
+        };
+        let Some(addr_domain) = crate::addr::domain_of(&email) else {
+            return false;
+        };
+        if !crate::addr::domain_matches(addr_domain, dom) {
+            return false;
         }
     }
     if let Some(cat) = &rule.match_category {
