@@ -72,7 +72,16 @@ export interface ClassifyResult {
   category: Category;
   priority: number;
   tags: string[];
-  source: 'fresh' | 'cached';
+  source: 'fresh' | 'cached' | 'blacklist';
+}
+
+export interface SenderFilter {
+  id: string;
+  listType: 'black' | 'white';
+  matchType: 'address' | 'domain' | 'domain_glob';
+  pattern: string;
+  note: string | null;
+  createdAt: string;
 }
 
 export interface MessageBody {
