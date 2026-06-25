@@ -25,6 +25,7 @@ import type {
   RoleDefault,
   SendDraft,
   SendReceipt,
+  SenderFilter,
   SuggestedReply,
   SummaryResult,
   SyncReport,
@@ -186,6 +187,22 @@ export async function suggestedRepliesList(): Promise<SuggestedReply[]> {
 
 export async function suggestedReplyDismiss(id: string): Promise<void> {
   await invoke('suggested_reply_dismiss', { id });
+}
+
+export async function senderFiltersList(): Promise<SenderFilter[]> {
+  return invoke<SenderFilter[]>('sender_filters_list');
+}
+
+export async function senderFiltersAdd(
+  listType: 'black' | 'white',
+  value: string,
+  note?: string,
+): Promise<SenderFilter> {
+  return invoke<SenderFilter>('sender_filters_add', { listType, value, note: note ?? null });
+}
+
+export async function senderFiltersRemove(id: string): Promise<void> {
+  await invoke('sender_filters_remove', { id });
 }
 
 // ---------------------------------------------------------------------------
