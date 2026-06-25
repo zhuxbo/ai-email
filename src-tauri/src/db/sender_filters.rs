@@ -75,6 +75,63 @@ pub async fn delete(pool: &Pool, id: Uuid) -> AppResult<()> {
     Ok(())
 }
 
+/// §2.1 录入规范化 + 判型 + 校验。返回 (match_type, pattern)。纯函数可单测。
+pub fn normalize_entry(value: &str) -> AppResult<(String, String)> {
+    let v = value.trim().to_ascii_lowercase();
+    if v.is_empty() {
+        return Err(AppError::Config("名单条目不能为空".into()));
+    }
+    // 1. glob：去前导 '@' 后以 "*." 开头
+    let no_at = v.strip_prefix('@').unwrap_or(v.as_str());
+    if let Some(base) = no_at.strip_prefix("*.") {
+        validate_domain(base)?;
+        return Ok(("domain_glob".into(), base.to_string()));
+    }
+    // 2. domain：'@' 开头
+    if let Some(domain) = v.strip_prefix('@') {
+        validate_domain(domain)?;
+        return Ok(("domain".into(), domain.to_string()));
+    }
+    // 3. address：含 '@'
+    if v.contains('@') {
+        validate_address(&v)?;
+        return Ok(("address".into(), v));
+    }
+    // 4. 裸域名
+    validate_domain(&v)?;
+    Ok(("domain".into(), v))
+}
+
+fn validate_domain(d: &str) -> AppResult<()> {
+    if !d.is_ascii() {
+        return Err(AppError::Config(
+            "域名须为 ASCII（IDN 请用 punycode xn-- 形式）".into(),
+        ));
+    }
+    if d.contains(' ') || d.contains('@') || d.contains('*') {
+        return Err(AppError::Config("域名含非法字符".into()));
+    }
+    if !d.contains('.') || d.starts_with('.') || d.ends_with('.') || d.contains("..") {
+        return Err(AppError::Config(
+            "域名格式非法（需形如 example.com）".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_address(v: &str) -> AppResult<()> {
+    if v.contains(' ') || v.contains('*') {
+        return Err(AppError::Config("地址含非法字符".into()));
+    }
+    let parts: Vec<&str> = v.split('@').collect();
+    if parts.len() != 2 || parts[0].is_empty() {
+        return Err(AppError::Config(
+            "地址格式非法（需形如 user@example.com）".into(),
+        ));
+    }
+    validate_domain(parts[1])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,6 +162,55 @@ mod tests {
         match err {
             AppError::Config(msg) => assert!(msg.contains("已在黑名单中")),
             other => panic!("期望 Config，得到 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn normalize_classifies_three_types() {
+        assert_eq!(
+            normalize_entry("a@x.com").unwrap(),
+            ("address".into(), "a@x.com".into())
+        );
+        assert_eq!(
+            normalize_entry("A@X.COM").unwrap(),
+            ("address".into(), "a@x.com".into())
+        );
+        assert_eq!(
+            normalize_entry("@x.com").unwrap(),
+            ("domain".into(), "x.com".into())
+        );
+        assert_eq!(
+            normalize_entry("x.com").unwrap(),
+            ("domain".into(), "x.com".into())
+        );
+        assert_eq!(
+            normalize_entry("*.x.com").unwrap(),
+            ("domain_glob".into(), "x.com".into())
+        );
+        assert_eq!(
+            normalize_entry("@*.x.com").unwrap(),
+            ("domain_glob".into(), "x.com".into())
+        );
+    }
+
+    #[test]
+    fn normalize_rejects_dead_entries() {
+        for bad in [
+            "",
+            "   ",
+            "*.com",
+            "x*.com",
+            "a@b@x.com",
+            "a @x.com",
+            "@x.com.",
+            "*",
+            "x.com.",
+            ".x.com",
+            "x..com",
+            "*.例え.jp",
+            "中文.com",
+        ] {
+            assert!(normalize_entry(bad).is_err(), "应拒: {bad:?}");
         }
     }
 }
