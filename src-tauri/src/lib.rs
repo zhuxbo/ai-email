@@ -277,6 +277,9 @@ pub fn run() {
             commands::auto_reply::auto_reply_rule_set_enabled,
             commands::auto_reply::suggested_replies_list,
             commands::auto_reply::suggested_reply_dismiss,
+            commands::sender_filters::sender_filters_list,
+            commands::sender_filters::sender_filters_add,
+            commands::sender_filters::sender_filters_remove,
         ])
         .build(tauri::generate_context!())
         .map_err(|e| {
