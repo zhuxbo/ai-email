@@ -104,11 +104,13 @@ export function MessageRow({
       >
         <div className="flex items-baseline justify-between gap-2">
           <span className="flex min-w-0 items-center gap-1.5">
-            <span
-              data-testid="unread-dot"
-              aria-label={unread ? '未读' : undefined}
-              className={`h-2 w-2 shrink-0 rounded-full ${unread ? 'bg-blue-500' : 'bg-transparent'}`}
-            />
+            {unread && (
+              <span
+                data-testid="unread-dot"
+                aria-label="未读"
+                className="h-2 w-2 shrink-0 rounded-full bg-blue-500"
+              />
+            )}
             <span
               className={`truncate text-xs ${
                 unread

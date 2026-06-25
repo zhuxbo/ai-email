@@ -38,7 +38,7 @@ describe('MessageRow', () => {
     expect(container.querySelector('button')?.style.borderLeftColor).toBeTruthy();
   });
 
-  it('未读时未读点为蓝色，已读时透明', () => {
+  it('未读时显示蓝点，已读时不渲染占位（发件人左对齐）', () => {
     useMailStore.setState({ accounts: [{ id: 'a1', email: 'acc@x.com' }] as never } as never);
     const unread = render(<MessageRow m={{ ...m, flags: [] }} active={false} onClick={vi.fn()} />);
     expect(unread.container.querySelector('[data-testid="unread-dot"]')?.className).toContain(
@@ -48,9 +48,8 @@ describe('MessageRow', () => {
     const read = render(
       <MessageRow m={{ ...m, flags: ['\\Seen'] }} active={false} onClick={vi.fn()} />,
     );
-    expect(read.container.querySelector('[data-testid="unread-dot"]')?.className).not.toContain(
-      'bg-blue-500',
-    );
+    // 已读后未读点整体不渲染（不再保留透明占位），发件人因此左对齐。
+    expect(read.container.querySelector('[data-testid="unread-dot"]')).toBeNull();
   });
 });
 

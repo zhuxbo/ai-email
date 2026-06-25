@@ -196,7 +196,7 @@ export function MessageList() {
           </li>
         ) : messages.length === 0 ? (
           <li className="px-3 py-6 text-center text-xs text-slate-500 dark:text-slate-400">
-            收件箱为空，点左侧 🔄 同步。
+            {title}为空，点左侧 🔄 同步。
           </li>
         ) : filtered.length === 0 ? (
           <li className="px-3 py-6 text-center text-xs text-slate-500 dark:text-slate-400">
