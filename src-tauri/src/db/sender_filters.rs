@@ -44,6 +44,9 @@ pub async fn insert(
     pattern: &str,
     note: Option<&str>,
 ) -> AppResult<SenderFilter> {
+    if list_type != "black" && list_type != "white" {
+        return Err(AppError::Config("名单类型非法".into()));
+    }
     let id = Uuid::new_v4();
     let list_label = if list_type == "black" { "黑" } else { "白" };
     let result = sqlx::query_as::<_, SenderFilter>(
@@ -169,6 +172,15 @@ fn validate_address(v: &str) -> AppResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn insert_rejects_invalid_list_type() {
+        let pool = crate::db::test_pool().await;
+        let err = insert(&pool, "gray", "domain", "x.com", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::Config(_)));
+    }
 
     #[tokio::test]
     async fn insert_list_delete_roundtrip() {

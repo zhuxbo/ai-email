@@ -32,4 +32,23 @@ describe('SenderFiltersPanel', () => {
     render(<SenderFiltersPanel />);
     expect(screen.getByText(/域名格式非法/)).toBeInTheDocument();
   });
+
+  it('添加成功后清空输入', async () => {
+    const add = vi.fn().mockImplementation((lt: 'black' | 'white', v: string) => {
+      useSenderFilters.setState({
+        filters: [
+          { id: '1', listType: lt, matchType: 'domain', pattern: v, note: null, createdAt: 't' },
+        ],
+      });
+      return Promise.resolve();
+    });
+    useSenderFilters.setState({ filters: [], error: null, add } as never);
+    render(<SenderFiltersPanel />);
+    const input = screen.getByPlaceholderText(/黑名单/);
+    fireEvent.change(input, { target: { value: '@spam.com' } });
+    fireEvent.click(screen.getByRole('button', { name: /加入黑名单/ }));
+    await waitFor(() => {
+      expect((input as HTMLInputElement).value).toBe('');
+    });
+  });
 });

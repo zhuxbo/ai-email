@@ -60,7 +60,7 @@ pub struct ClassifyResult {
     pub message_id: Uuid,
     #[serde(flatten)]
     pub classification: Classification,
-    pub source: &'static str, // "fresh" | "cached"
+    pub source: &'static str, // "fresh" | "cached" | "blacklist"
 }
 
 /// What the model returns per input. Deserialised from the JSON array element.
