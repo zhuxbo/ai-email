@@ -13,12 +13,7 @@ import { useEffect, useState } from 'react';
 
 import { PRESETS, presetById, type AiPreset } from '../lib/ai-presets';
 import { useAiStore } from '../lib/store/ai';
-import type { AiModel, AiRole } from '../lib/types';
-
-interface Props {
-  open: boolean;
-  onClose: () => void;
-}
+import type { AiModel, AiRole, UpdateModelForm } from '../lib/types';
 
 const ROLE_LABELS: { role: AiRole; label: string; description: string }[] = [
   { role: 'summary', label: '摘要', description: '提炼邮件要点 (Sonnet 量级)' },
@@ -27,50 +22,21 @@ const ROLE_LABELS: { role: AiRole; label: string; description: string }[] = [
   { role: 'draft', label: '起草回复', description: '生成回信草稿 (Sonnet 量级)' },
 ];
 
-export function AiSettingsDialog({ open, onClose }: Props) {
+export function AiModelsPanel() {
   const models = useAiStore((s) => s.models);
   const roleDefaults = useAiStore((s) => s.roleDefaults);
   const loadAiConfig = useAiStore((s) => s.loadAiConfig);
 
+  // 面板挂载（设置中心切到「AI 模型」tab）时拉取最新配置。
   useEffect(() => {
-    if (open) {
-      void loadAiConfig();
-    }
-  }, [open, loadAiConfig]);
-
-  if (!open) return null;
+    void loadAiConfig();
+  }, [loadAiConfig]);
 
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"
-      onClick={onClose}
-    >
-      <div
-        onClick={(e) => {
-          e.stopPropagation();
-        }}
-        className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-lg bg-white shadow-xl dark:bg-slate-900"
-      >
-        <header className="flex items-center justify-between border-b border-slate-200 px-6 py-3 dark:border-slate-700">
-          <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">AI 模型配置</h2>
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
-            aria-label="关闭"
-          >
-            ×
-          </button>
-        </header>
-
-        <div className="flex-1 space-y-6 overflow-auto px-6 py-4">
-          <ModelsSection models={models} roleDefaults={roleDefaults} />
-          <AddModelSection />
-          <RoleAssignmentsSection models={models} roleDefaults={roleDefaults} />
-        </div>
-      </div>
+    <div className="space-y-6">
+      <ModelsSection models={models} roleDefaults={roleDefaults} />
+      <AddModelSection />
+      <RoleAssignmentsSection models={models} roleDefaults={roleDefaults} />
     </div>
   );
 }
@@ -85,6 +51,7 @@ function ModelsSection({
   roleDefaults: { role: AiRole; modelId: string }[];
 }) {
   const removeModel = useAiStore((s) => s.removeModel);
+  const [editingId, setEditingId] = useState<string | null>(null);
 
   if (models.length === 0) {
     return (
@@ -106,6 +73,18 @@ function ModelsSection({
       <ul className="space-y-2">
         {models.map((m) => {
           const usedFor = roleDefaults.filter((r) => r.modelId === m.id).map((r) => r.role);
+          if (editingId === m.id) {
+            return (
+              <li key={m.id} className="rounded border border-blue-300 p-3 dark:border-blue-700">
+                <ModelEditForm
+                  model={m}
+                  onDone={() => {
+                    setEditingId(null);
+                  }}
+                />
+              </li>
+            );
+          }
           return (
             <li
               key={m.id}
@@ -137,32 +116,172 @@ function ModelsSection({
                   </div>
                 )}
               </div>
-              <button
-                type="button"
-                onClick={() => {
-                  if (usedFor.length > 0) {
-                    window.alert(
-                      `该模型正用于：${usedFor.join(', ')}。请先在「角色指派」中换一个模型，然后再删除。`,
-                    );
-                    return;
-                  }
-                  if (
-                    window.confirm(`确认删除「${m.displayName}」？API key 会从 keychain 删除。`)
-                  ) {
-                    void removeModel(m.id).catch(() => {
-                      /* error already surfaced via store */
-                    });
-                  }
-                }}
-                className="shrink-0 rounded px-2 py-1 text-xs text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950"
-              >
-                删除
-              </button>
+              <div className="flex shrink-0 items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingId(m.id);
+                  }}
+                  className="rounded px-2 py-1 text-xs text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-950"
+                >
+                  编辑
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (usedFor.length > 0) {
+                      window.alert(
+                        `该模型正用于：${usedFor.join(', ')}。请先在「角色指派」中换一个模型，然后再删除。`,
+                      );
+                      return;
+                    }
+                    if (
+                      window.confirm(`确认删除「${m.displayName}」？API key 会从 keychain 删除。`)
+                    ) {
+                      void removeModel(m.id).catch(() => {
+                        /* error already surfaced via store */
+                      });
+                    }
+                  }}
+                  className="rounded px-2 py-1 text-xs text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-950"
+                >
+                  删除
+                </button>
+              </div>
             </li>
           );
         })}
       </ul>
     </section>
+  );
+}
+
+// ── Edit existing model ─────────────────────────────────────────────────────
+
+function ModelEditForm({ model, onDone }: { model: AiModel; onDone: () => void }) {
+  const updateModel = useAiStore((s) => s.updateModel);
+
+  const [displayName, setDisplayName] = useState(model.displayName);
+  const [modelId, setModelId] = useState(model.modelId);
+  const [baseUrl, setBaseUrl] = useState(model.baseUrl ?? '');
+  const [apiKey, setApiKey] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [localError, setLocalError] = useState<string | null>(null);
+
+  async function onSubmit(e: React.SyntheticEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setSubmitting(true);
+    setLocalError(null);
+    try {
+      const form: UpdateModelForm = {
+        displayName: displayName.trim() || model.displayName,
+        modelId: modelId.trim(),
+        baseUrl: baseUrl.trim() === '' ? null : baseUrl.trim(),
+      };
+      // 留空＝保持原 key；仅在用户填了新值时才覆盖 keychain。
+      const key = apiKey.trim();
+      if (key !== '') form.apiKey = key;
+      await updateModel(model.id, form);
+      onDone();
+    } catch (err) {
+      setLocalError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <form
+      onSubmit={(e) => {
+        void onSubmit(e);
+      }}
+      className="space-y-3"
+    >
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+          编辑「{model.displayName}」
+        </span>
+        <span className="text-[10px] text-slate-500">{model.provider}（不可改）</span>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 text-xs">
+        <label>
+          <span className="block font-medium text-slate-700 dark:text-slate-300">显示名</span>
+          <input
+            type="text"
+            required
+            value={displayName}
+            onChange={(e) => {
+              setDisplayName(e.currentTarget.value);
+            }}
+            className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1 dark:border-slate-600 dark:bg-slate-800"
+          />
+        </label>
+        <label>
+          <span className="block font-medium text-slate-700 dark:text-slate-300">Model ID</span>
+          <input
+            type="text"
+            required
+            value={modelId}
+            onChange={(e) => {
+              setModelId(e.currentTarget.value);
+            }}
+            className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1 font-mono dark:border-slate-600 dark:bg-slate-800"
+          />
+        </label>
+      </div>
+
+      <label className="block text-xs">
+        <span className="block font-medium text-slate-700 dark:text-slate-300">
+          Base URL <span className="font-normal text-slate-500">(留空使用 provider 默认)</span>
+        </span>
+        <input
+          type="url"
+          value={baseUrl}
+          onChange={(e) => {
+            setBaseUrl(e.currentTarget.value);
+          }}
+          className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1 font-mono dark:border-slate-600 dark:bg-slate-800"
+        />
+      </label>
+
+      <label className="block text-xs">
+        <span className="block font-medium text-slate-700 dark:text-slate-300">API Key</span>
+        <input
+          type="password"
+          autoComplete="off"
+          value={apiKey}
+          onChange={(e) => {
+            setApiKey(e.currentTarget.value);
+          }}
+          placeholder="留空＝保持原 key 不变"
+          className="mt-1 w-full rounded border border-slate-300 bg-white px-2 py-1 font-mono dark:border-slate-600 dark:bg-slate-800"
+        />
+      </label>
+
+      {localError && (
+        <p className="rounded bg-red-50 px-2 py-1 text-xs text-red-700 dark:bg-red-950 dark:text-red-300">
+          {localError}
+        </p>
+      )}
+
+      <div className="flex justify-end gap-2">
+        <button
+          type="button"
+          onClick={onDone}
+          className="rounded px-3 py-1 text-sm text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+        >
+          取消
+        </button>
+        <button
+          type="submit"
+          disabled={submitting}
+          className="rounded bg-blue-600 px-3 py-1 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+        >
+          {submitting ? '保存中…' : '保存'}
+        </button>
+      </div>
+    </form>
   );
 }
 

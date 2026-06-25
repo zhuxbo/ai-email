@@ -38,7 +38,6 @@ const navProps = {
   onSelectMailbox: noop,
   onAddAccount: noop,
   onSync: noop,
-  onRemoveAccount: noop,
   onOpenSettings: noop,
   onOpenAutoReply: noop,
   autoReplyCount: 0,

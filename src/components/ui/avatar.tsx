@@ -8,13 +8,15 @@ export function colorForSeed(seed: string): string {
 
 interface Props {
   seed: string;
+  /** 首字来源；缺省回落到 seed。用于「显示名首字、颜色仍按邮箱稳定」。 */
+  label?: string;
   size?: number;
   className?: string;
 }
 
-export function Avatar({ seed, size = 28, className = '' }: Props) {
+export function Avatar({ seed, label, size = 28, className = '' }: Props) {
   const color = colorForSeed(seed);
-  const initial = seed.trim().charAt(0).toUpperCase() || '?';
+  const initial = (label ?? seed).trim().charAt(0).toUpperCase() || '?';
   return (
     <span
       className={`grid place-items-center rounded-full font-semibold text-white ${className}`}

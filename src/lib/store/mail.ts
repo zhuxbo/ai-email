@@ -8,6 +8,7 @@ import * as tauri from '../tauri';
 import type {
   Account,
   AddAccountForm,
+  UpdateAccountForm,
   Category,
   Mailbox,
   MessageBody,
@@ -78,6 +79,8 @@ interface MailState {
   /** Filter set — empty array means "show all". */
   categoryFilter: Category[];
   sortByPriority: boolean;
+  /** 仅显示未读（无 \Seen 标记）。与 categoryFilter 叠加。 */
+  unreadOnly: boolean;
 
   query: string;
   /** 部分账户当前加载/同步失败：accountId → 错误信息。聚合层不再静默吞掉部分失败。 */
@@ -90,6 +93,7 @@ interface MailState {
   loadAccounts: () => Promise<void>;
   addAccount: (form: AddAccountForm) => Promise<Account>;
   removeAccount: (id: string) => Promise<void>;
+  updateAccount: (id: string, form: UpdateAccountForm) => Promise<Account>;
 
   syncInbox: (accountId?: string) => Promise<void>;
   selectMessage: (id: string) => Promise<void>;
@@ -102,6 +106,7 @@ interface MailState {
   classifyVisibleMessages: () => Promise<void>;
   toggleCategoryFilter: (cat: Category) => void;
   setSortByPriority: (on: boolean) => void;
+  setUnreadOnly: (on: boolean) => void;
 
   setSeen: (id: string, seen: boolean) => Promise<void>;
   /** 自动已读：打开邮件时本地乐观标 \Seen，IMAP 尽力同步、失败静默不回滚（区别于 setSeen）。 */
@@ -137,6 +142,7 @@ export const useMailStore = create<MailState>((set, get) => ({
 
   categoryFilter: [],
   sortByPriority: false,
+  unreadOnly: false,
 
   query: '',
   accountErrors: {},
@@ -188,6 +194,17 @@ export const useMailStore = create<MailState>((set, get) => ({
       await get().reloadMessages();
     } catch (e) {
       set({ error: errMsg(e) });
+    }
+  },
+
+  updateAccount: async (id, form) => {
+    try {
+      const account = await tauri.accountUpdate(id, form);
+      set((s) => ({ accounts: s.accounts.map((a) => (a.id === id ? account : a)) }));
+      return account;
+    } catch (e) {
+      set({ error: errMsg(e) });
+      throw e;
     }
   },
 
@@ -360,6 +377,10 @@ export const useMailStore = create<MailState>((set, get) => ({
 
   setSortByPriority: (on) => {
     set({ sortByPriority: on });
+  },
+
+  setUnreadOnly: (on) => {
+    set({ unreadOnly: on });
   },
 
   setSeen: async (id, seen) => {

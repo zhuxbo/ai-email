@@ -77,6 +77,35 @@ pub async fn list(pool: &Pool) -> AppResult<Vec<AiModel>> {
     Ok(rows)
 }
 
+#[derive(Debug, Clone)]
+pub struct AiModelUpdate {
+    pub display_name: String,
+    pub model_id: String,
+    pub base_url: Option<String>,
+}
+
+/// Update the editable fields of a model. `provider` is intentionally NOT updatable —
+/// switching the wire protocol is effectively a different model (callers delete + re-add).
+/// The API key lives in the keychain, not in this row, so the command layer updates it
+/// separately and only when a new value is supplied.
+pub async fn update(pool: &Pool, id: Uuid, input: &AiModelUpdate) -> AppResult<AiModel> {
+    let row = sqlx::query_as::<_, AiModel>(
+        r#"
+        UPDATE ai_models
+        SET display_name = ?2, model_id = ?3, base_url = ?4
+        WHERE id = ?1
+        RETURNING id, display_name, provider, model_id, base_url, created_at
+        "#,
+    )
+    .bind(id)
+    .bind(&input.display_name)
+    .bind(&input.model_id)
+    .bind(&input.base_url)
+    .fetch_one(pool)
+    .await?;
+    Ok(row)
+}
+
 /// Delete the row. The `ai_role_defaults` FK has ON DELETE RESTRICT — SQLite errors out
 /// (and so do we) if any role still points here. The caller (UI) is expected to reassign
 /// first; we surface the FK error verbatim so the user sees "this model is still the

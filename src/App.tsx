@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { AppShell } from './components/app-shell';
 import { AddAccountDialog } from './components/add-account-dialog';
 import { AiDrawer } from './components/ai-drawer';
-import { AiSettingsDialog } from './components/ai-settings-dialog';
+import { SettingsDialog } from './components/settings-dialog';
 import { AutoReplyDialog } from './components/auto-reply-dialog';
 import { MessageDetail } from './components/message-detail';
 import { MessageList } from './components/message-list';
@@ -37,7 +37,6 @@ function App() {
   const setFilter = useMailStore((s) => s.setFilter);
   const setQuery = useMailStore((s) => s.setQuery);
   const syncInbox = useMailStore((s) => s.syncInbox);
-  const removeAccount = useMailStore((s) => s.removeAccount);
   const error = useMailStore((s) => s.error);
   const clearError = useMailStore((s) => s.clearError);
   const aiError = useAiStore((s) => s.error);
@@ -46,8 +45,8 @@ function App() {
   const autoReplyCount = useAutoReplyStore((s) => s.queue.length);
 
   const [addOpen, setAddOpen] = useState(false);
-  const [aiSettingsOpen, setAiSettingsOpen] = useState(false);
   const [autoReplyOpen, setAutoReplyOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   // 把 store 初始主题（可能跟随系统）同步到 <html>。
   useEffect(() => {
@@ -217,13 +216,8 @@ function App() {
             // 队列/列表刷新由后台任务完成后 emit 的事件驱动（autoreply://updated、
             // mail://classified），不再需要固定延迟计时器。
           },
-          onRemoveAccount: (id) => {
-            if (window.confirm('确认移除该账户？授权码会从 keychain 删除，本地邮件清空。')) {
-              void removeAccount(id);
-            }
-          },
           onOpenSettings: () => {
-            setAiSettingsOpen(true);
+            setSettingsOpen(true);
           },
           onOpenAutoReply: () => {
             setAutoReplyOpen(true);
@@ -245,10 +239,10 @@ function App() {
           setAddOpen(false);
         }}
       />
-      <AiSettingsDialog
-        open={aiSettingsOpen}
+      <SettingsDialog
+        open={settingsOpen}
         onClose={() => {
-          setAiSettingsOpen(false);
+          setSettingsOpen(false);
         }}
       />
       <AutoReplyDialog

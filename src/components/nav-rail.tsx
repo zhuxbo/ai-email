@@ -7,7 +7,7 @@ import type { Account, Mailbox, SpecialUse } from '../lib/types';
 /** specialUse → 图标 + 中文标签 */
 const SPECIAL_USE_META: Record<SpecialUse, { icon: string; label: string }> = {
   inbox: { icon: '📥', label: '收件箱' },
-  sent: { icon: '📤', label: '已发送' },
+  sent: { icon: '✈️', label: '已发送' },
   drafts: { icon: '✏️', label: '草稿' },
   trash: { icon: '🗑️', label: '废纸篓' },
   junk: { icon: '🚫', label: '垃圾邮件' },
@@ -32,7 +32,9 @@ function mailboxIcon(box: Mailbox): string {
   if (box.specialUse !== null && box.specialUse in SPECIAL_USE_META) {
     return SPECIAL_USE_META[box.specialUse].icon;
   }
-  return '📁';
+  // 自定义文件夹用解码名首字，避免一堆 📁 无法区分
+  const leaf = decodeModifiedUtf7(box.name).split('/').pop() ?? '';
+  return leaf.trim().charAt(0).toUpperCase() || '📁';
 }
 
 function MailboxButton({
@@ -72,7 +74,6 @@ interface Props {
   onSelectMailbox: (mailboxId: string) => void;
   onAddAccount: () => void;
   onSync: () => void;
-  onRemoveAccount: (id: string) => void;
   onOpenSettings: () => void;
   onOpenAutoReply: () => void;
   autoReplyCount: number;
@@ -88,7 +89,6 @@ export function NavRail({
   onSelectMailbox,
   onAddAccount,
   onSync,
-  onRemoveAccount,
   onOpenSettings,
   onOpenAutoReply,
   autoReplyCount,
@@ -123,17 +123,13 @@ export function NavRail({
           type="button"
           aria-label={a.email}
           aria-pressed={a.id === selectedAccountId}
-          title={`${a.email}（右键删除）`}
+          title={a.email}
           onClick={() => {
             onSelectAccount(a.id);
           }}
-          onContextMenu={(e) => {
-            e.preventDefault();
-            onRemoveAccount(a.id);
-          }}
           className={`rounded-full ${a.id === selectedAccountId ? 'ring-2 ring-accent ring-offset-2 ring-offset-[var(--color-ink)]' : ''}`}
         >
-          <Avatar seed={a.email} size={30} />
+          <Avatar seed={a.email} label={a.displayName ?? a.email} size={30} />
         </button>
       ))}
       <IconButton
@@ -212,7 +208,7 @@ export function NavRail({
       <IconButton
         label="设置"
         onClick={onOpenSettings}
-        className="mt-auto h-8 w-8 text-slate-400 hover:bg-slate-700"
+        className="mt-auto h-8 w-8 text-2xl text-slate-400 hover:bg-slate-700"
       >
         ⚙
       </IconButton>

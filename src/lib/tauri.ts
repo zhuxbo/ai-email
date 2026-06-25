@@ -10,7 +10,9 @@ import type {
   Account,
   AttachmentMeta,
   AddAccountForm,
+  UpdateAccountForm,
   AddModelForm,
+  UpdateModelForm,
   AiModel,
   AiRole,
   AutoReplyRule,
@@ -40,6 +42,10 @@ export async function accountAdd(form: AddAccountForm): Promise<Account> {
 
 export async function accountRemove(id: string): Promise<void> {
   await invoke('account_remove', { id });
+}
+
+export async function accountUpdate(id: string, form: UpdateAccountForm): Promise<Account> {
+  return invoke('account_update', { id, form });
 }
 
 export async function inboxSync(accountId: string): Promise<SyncReport> {
@@ -136,6 +142,10 @@ export async function modelAdd(form: AddModelForm): Promise<AiModel> {
 
 export async function modelRemove(id: string): Promise<void> {
   await invoke('model_remove', { id });
+}
+
+export async function modelUpdate(id: string, form: UpdateModelForm): Promise<AiModel> {
+  return invoke('model_update', { id, form });
 }
 
 export async function roleDefaultsList(): Promise<RoleDefault[]> {
@@ -336,8 +346,12 @@ export async function unifiedInbox(opts: {
     opts.accountId == null ? accounts : accounts.filter((a) => a.id === opts.accountId);
   const settled = await Promise.allSettled(
     targets.map(async (acc) => {
-      const inbox = (await mailboxesList(acc.id)).find((m) => m.name.toUpperCase() === 'INBOX');
-      return inbox ? messagesList(inbox.id, 50, 0) : [];
+      // 默认聚合「收到的」邮件：收件箱 + 自定义文件夹；排除 已发送/草稿/垃圾/废纸篓。
+      const boxes = (await mailboxesList(acc.id)).filter(
+        (m) => m.specialUse === null || m.specialUse === 'inbox',
+      );
+      const lists = await Promise.all(boxes.map((m) => messagesList(m.id, 50, 0)));
+      return lists.flat();
     }),
   );
   const lists: MessageHeader[][] = [];

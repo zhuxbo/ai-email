@@ -4,6 +4,7 @@ import type {
   AiModel,
   AiRole,
   AddModelForm,
+  UpdateModelForm,
   RoleDefault,
   SummaryResult,
   TranslateResult,
@@ -26,6 +27,7 @@ interface AiState {
   resetForMessage: (messageId: string) => void;
   addModel: (f: AddModelForm) => Promise<AiModel>;
   removeModel: (id: string) => Promise<void>;
+  updateModel: (id: string, f: UpdateModelForm) => Promise<AiModel>;
   setRoleDefault: (r: AiRole, m: string) => Promise<void>;
   clearRoleDefault: (r: AiRole) => Promise<void>;
   clearError: () => void;
@@ -100,6 +102,16 @@ export const useAiStore = create<AiState>((set, get) => ({
     try {
       await tauri.modelRemove(id);
       set((s) => ({ models: s.models.filter((m) => m.id !== id) }));
+    } catch (e) {
+      set({ error: errMsg(e) });
+      throw e;
+    }
+  },
+  updateModel: async (id, form) => {
+    try {
+      const model = await tauri.modelUpdate(id, form);
+      set((s) => ({ models: s.models.map((m) => (m.id === id ? model : m)) }));
+      return model;
     } catch (e) {
       set({ error: errMsg(e) });
       throw e;

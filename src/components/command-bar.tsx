@@ -9,10 +9,11 @@ interface Props {
 export function CommandBar({ onQueryChange, onAiCommand }: Props) {
   const theme = useUiStore((s) => s.theme);
   const toggleTheme = useUiStore((s) => s.toggleTheme);
+  const drawerOpen = useUiStore((s) => s.drawerOpen);
 
   return (
     <header className="flex items-center gap-2.5 border-b border-[var(--color-border)] bg-panel px-3.5 py-2">
-      <span className="text-[13px] font-bold text-text-1">✉ 统一收件箱</span>
+      <span className="text-[13px] font-bold text-text-1">统一收件箱</span>
       <div className="flex max-w-md flex-1 items-center gap-2 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-app px-2.5 py-1.5">
         <span className="text-text-3">🔍</span>
         <input
@@ -31,7 +32,11 @@ export function CommandBar({ onQueryChange, onAiCommand }: Props) {
       <button
         type="button"
         onClick={onAiCommand}
-        className="ml-auto rounded-[var(--radius-md)] bg-ink px-2.5 py-1.5 text-xs font-medium text-white"
+        aria-pressed={drawerOpen}
+        title={drawerOpen ? '关闭 AI 指令面板' : '打开 AI 指令面板'}
+        className={`ml-auto rounded-[var(--radius-md)] px-2.5 py-1.5 text-xs font-medium text-white ${
+          drawerOpen ? 'bg-accent' : 'bg-ink'
+        }`}
       >
         ✦ AI 指令
       </button>

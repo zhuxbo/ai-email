@@ -5,19 +5,41 @@
 import { useMemo } from 'react';
 
 import { useMailStore } from '../lib/store/mail';
+import { decodeModifiedUtf7 } from '../lib/utils';
+import type { Mailbox } from '../lib/types';
 import { CATEGORY_OPTIONS, MessageRow } from './message-row';
+
+// 列表标题：标准信箱用中文名，自定义文件夹用解码后的叶子名。
+const MAILBOX_LABELS: Record<string, string> = {
+  inbox: '收件箱',
+  sent: '已发送',
+  drafts: '草稿',
+  trash: '废纸篓',
+  junk: '垃圾邮件',
+};
+
+function mailboxTitle(box: Mailbox): string {
+  if (box.specialUse !== null && box.specialUse in MAILBOX_LABELS) {
+    return MAILBOX_LABELS[box.specialUse] ?? '收件箱';
+  }
+  return decodeModifiedUtf7(box.name).split('/').pop() ?? box.name;
+}
 
 export function MessageList() {
   const messages = useMailStore((s) => s.messages);
   const accounts = useMailStore((s) => s.accounts);
+  const mailboxes = useMailStore((s) => s.mailboxes);
+  const selectedMailboxId = useMailStore((s) => s.selectedMailboxId);
   const selectedMessageId = useMailStore((s) => s.selectedMessageId);
   const selectMessage = useMailStore((s) => s.selectMessage);
   const categoryFilter = useMailStore((s) => s.categoryFilter);
   const sortByPriority = useMailStore((s) => s.sortByPriority);
+  const unreadOnly = useMailStore((s) => s.unreadOnly);
   const query = useMailStore((s) => s.query);
   const accountErrors = useMailStore((s) => s.accountErrors);
   const toggleCategoryFilter = useMailStore((s) => s.toggleCategoryFilter);
   const setSortByPriority = useMailStore((s) => s.setSortByPriority);
+  const setUnreadOnly = useMailStore((s) => s.setUnreadOnly);
   const markAllSeen = useMailStore((s) => s.markAllSeen);
 
   // 叠加顺序：query（发件人/主题/snippet 子串，大小写不敏感）→ categoryFilter → sortByPriority。
@@ -33,10 +55,11 @@ export function MessageList() {
               (m.subject?.toLowerCase().includes(q) ?? false) ||
               (m.snippet?.toLowerCase().includes(q) ?? false),
           );
-    const base =
+    const byCategory =
       categoryFilter.length === 0
         ? searched
         : searched.filter((m) => m.category !== null && categoryFilter.includes(m.category));
+    const base = unreadOnly ? byCategory.filter((m) => !m.flags.includes('\\Seen')) : byCategory;
     if (!sortByPriority) return base;
     // Stable-sort by priority ascending (1=high first); null priority sorts last.
     return [...base].sort((a, b) => {
@@ -44,7 +67,14 @@ export function MessageList() {
       const bp = b.priority ?? 99;
       return ap - bp;
     });
-  }, [messages, categoryFilter, sortByPriority, query]);
+  }, [messages, categoryFilter, sortByPriority, unreadOnly, query]);
+
+  // 标题随选中信箱变化；聚合视图（未选具体信箱）显示「收件箱」。
+  const title = useMemo(() => {
+    if (selectedMailboxId === null) return '收件箱';
+    const box = mailboxes.find((m) => m.id === selectedMailboxId);
+    return box ? mailboxTitle(box) : '收件箱';
+  }, [selectedMailboxId, mailboxes]);
 
   // 聚合层把部分账户的加载/同步失败汇到 accountErrors；这里映射成邮箱地址做提示。
   const failedAccounts = useMemo(
@@ -68,23 +98,36 @@ export function MessageList() {
       <header className="border-b border-slate-200 px-3 py-3 dark:border-slate-700">
         <div className="flex items-center justify-between">
           <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-200">
-            收件箱{' '}
+            {title}{' '}
             <span className="text-xs font-normal text-slate-400">
               ({filtered.length}
               {hasFilter && ` / ${String(messages.length)}`})
             </span>
           </h2>
           <div className="flex items-center gap-1">
-            {unreadCount > 0 && (
-              <button
-                type="button"
-                onClick={() => void markAllSeen()}
-                className="rounded px-2 py-0.5 text-[10px] font-medium text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800"
-                title="把已加载的未读全部标为已读"
-              >
-                全部已读
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() => void markAllSeen()}
+              disabled={unreadCount === 0}
+              className="rounded px-2 py-0.5 text-[10px] font-medium text-slate-500 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent dark:text-slate-400 dark:hover:bg-slate-800"
+              title={unreadCount > 0 ? '把已加载的未读全部标为已读' : '没有未读邮件'}
+            >
+              全部已读{unreadCount > 0 ? `（${String(unreadCount)}）` : ''}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setUnreadOnly(!unreadOnly);
+              }}
+              className={`rounded px-2 py-0.5 text-[10px] font-medium ${
+                unreadOnly
+                  ? 'bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300'
+                  : 'text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800'
+              }`}
+              title="只看未读"
+            >
+              未读
+            </button>
             <button
               type="button"
               onClick={() => {

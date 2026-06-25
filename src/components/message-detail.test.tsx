@@ -140,4 +140,16 @@ describe('MessageDetail 附件', () => {
       expect(tauri.messageAttachmentSave).toHaveBeenCalledWith('m1', 0, '/tmp/doc.pdf');
     });
   });
+
+  it('顶部「含附件」可点击并滚动到附件区', async () => {
+    vi.mocked(tauri.messageAttachments).mockResolvedValueOnce([
+      { filename: 'doc.pdf', contentType: 'application/pdf', size: 2048 },
+    ]);
+    const scrollSpy = vi.fn();
+    Element.prototype.scrollIntoView = scrollSpy;
+    render(<MessageDetail />);
+    const headerBtn = await screen.findByRole('button', { name: '📎 含附件' });
+    fireEvent.click(headerBtn);
+    expect(scrollSpy).toHaveBeenCalled();
+  });
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { NavRail } from './nav-rail';
 import type { Account, Mailbox } from '../lib/types';
@@ -39,7 +39,6 @@ function baseProps() {
     onSelectMailbox: vi.fn(),
     onAddAccount: vi.fn(),
     onSync: vi.fn(),
-    onRemoveAccount: vi.fn(),
     onOpenSettings: vi.fn(),
     onOpenAutoReply: vi.fn(),
     autoReplyCount: 0,
@@ -67,11 +66,11 @@ describe('NavRail', () => {
     expect(screen.getByRole('button', { name: '同步收件箱' })).toBeDisabled();
   });
 
-  it('fires remove on right-click of an account', () => {
+  it('fires open-settings on the settings button', async () => {
     const p = baseProps();
     render(<NavRail {...p} />);
-    fireEvent.contextMenu(screen.getByRole('button', { name: /amy@qq.com/ }));
-    expect(p.onRemoveAccount).toHaveBeenCalledWith('a');
+    await userEvent.click(screen.getByRole('button', { name: '设置' }));
+    expect(p.onOpenSettings).toHaveBeenCalledOnce();
   });
 
   it('disables sync only when no accounts', () => {

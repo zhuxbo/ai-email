@@ -135,8 +135,8 @@ vi.mock('./components/add-account-dialog', () => ({
 vi.mock('./components/ai-drawer', () => ({
   AiDrawer: () => null,
 }));
-vi.mock('./components/ai-settings-dialog', () => ({
-  AiSettingsDialog: () => null,
+vi.mock('./components/settings-dialog', () => ({
+  SettingsDialog: () => null,
 }));
 vi.mock('./components/auto-reply-dialog', () => ({
   AutoReplyDialog: () => null,

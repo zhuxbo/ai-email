@@ -19,7 +19,7 @@ use serde::Deserialize;
 use tauri::State;
 use uuid::Uuid;
 
-use crate::db::ai_models::{self, AiModel, AiModelInput};
+use crate::db::ai_models::{self, AiModel, AiModelInput, AiModelUpdate};
 use crate::db::ai_role_defaults::{self, RoleDefault};
 use crate::error::{AppError, AppResult};
 use crate::keychain;
@@ -46,6 +46,30 @@ impl std::fmt::Debug for AddModelForm {
             .field("model_id", &self.model_id)
             .field("base_url", &self.base_url)
             .field("api_key", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Update-model form. Like `AddModelForm` but `provider` is fixed (not editable) and
+/// `api_key` is optional — `None` / empty means "keep the existing key in the keychain".
+///
+/// `Debug` is implemented manually so that `api_key` never appears in log output.
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateModelForm {
+    pub display_name: String,
+    pub model_id: String,
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+}
+
+impl std::fmt::Debug for UpdateModelForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpdateModelForm")
+            .field("display_name", &self.display_name)
+            .field("model_id", &self.model_id)
+            .field("base_url", &self.base_url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
             .finish()
     }
 }
@@ -169,6 +193,37 @@ pub async fn model_remove(state: State<'_, AppState>, id: Uuid) -> AppResult<()>
     ai_models::delete(state.pool().await?, id).await?;
     tracing::info!(model_id = %id, "ai model removed");
     Ok(())
+}
+
+/// Update an existing model's editable fields. `provider` is fixed. The API key is only
+/// touched when `form.api_key` is a non-empty value, so a blank field preserves the
+/// existing keychain entry — mirrors how the UI prefills everything except the key.
+#[tauri::command]
+pub async fn model_update(
+    state: State<'_, AppState>,
+    id: Uuid,
+    form: UpdateModelForm,
+) -> AppResult<AiModel> {
+    // #3: reject non-HTTPS base_url to prevent API key leakage over plain HTTP.
+    let base_url = validate_base_url(form.base_url)?;
+    let input = AiModelUpdate {
+        display_name: form.display_name,
+        model_id: form.model_id,
+        base_url,
+    };
+    let pool = state.pool().await?;
+    let model = ai_models::update(pool, id, &input).await?;
+
+    // API key 仅在提供了非空值时覆盖 keychain；留空 = 保持原 key 不变。
+    if let Some(key) = super::secret_to_store(form.api_key) {
+        let key = SecretString::from(key);
+        tokio::task::spawn_blocking(move || keychain::store_ai_key(id, &key))
+            .await
+            .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
+    }
+
+    tracing::info!(model_id = %model.id, "ai model updated");
+    Ok(model)
 }
 
 #[tauri::command]
@@ -322,6 +377,29 @@ mod tests {
         );
         assert!(
             debug.contains("anthropic"),
+            "non-secret fields must still appear in Debug"
+        );
+    }
+
+    #[test]
+    fn update_model_form_debug_redacts_api_key() {
+        let form = super::UpdateModelForm {
+            display_name: "Claude".into(),
+            model_id: "claude-sonnet-4-6".into(),
+            base_url: None,
+            api_key: Some("sk-ant-secret_999".into()),
+        };
+        let debug = format!("{:?}", form);
+        assert!(
+            !debug.contains("sk-ant-secret_999"),
+            "api_key must not appear in Debug"
+        );
+        assert!(
+            debug.contains("[redacted]"),
+            "Debug must show [redacted] for a present api_key"
+        );
+        assert!(
+            debug.contains("Claude"),
             "non-secret fields must still appear in Debug"
         );
     }

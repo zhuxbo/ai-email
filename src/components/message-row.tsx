@@ -97,16 +97,17 @@ export function MessageRow({
       <button
         type="button"
         onClick={onClick}
-        className={`block w-full border-b border-slate-100 px-3 py-2 text-left transition-colors dark:border-slate-800 ${
+        style={{ borderLeftColor: dotColor }}
+        className={`block w-full border-b border-l-4 border-slate-100 px-3 py-2 text-left transition-colors dark:border-slate-800 ${
           active ? 'bg-blue-50 dark:bg-blue-950' : 'hover:bg-slate-50 dark:hover:bg-slate-800'
         }`}
       >
         <div className="flex items-baseline justify-between gap-2">
           <span className="flex min-w-0 items-center gap-1.5">
             <span
-              data-testid="source-dot"
-              style={{ background: dotColor }}
-              className="h-2 w-2 shrink-0 rounded-full"
+              data-testid="unread-dot"
+              aria-label={unread ? '未读' : undefined}
+              className={`h-2 w-2 shrink-0 rounded-full ${unread ? 'bg-blue-500' : 'bg-transparent'}`}
             />
             <span
               className={`truncate text-xs ${

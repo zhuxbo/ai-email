@@ -111,6 +111,41 @@ pub async fn list(pool: &Pool) -> AppResult<Vec<Account>> {
     Ok(rows)
 }
 
+/// Editable fields for [`update`]. `email` and `provider` are intentionally absent —
+/// changing the address is effectively a different account, and the provider drives the
+/// host presets only at add-time. The auth code lives in the keychain, not this row.
+#[derive(Debug, Clone)]
+pub struct AccountUpdate {
+    pub display_name: Option<String>,
+    pub imap_host: String,
+    pub imap_port: i32,
+    pub smtp_host: String,
+    pub smtp_port: i32,
+}
+
+pub async fn update(pool: &Pool, id: Uuid, input: &AccountUpdate) -> AppResult<Account> {
+    let row = sqlx::query_as::<_, Account>(
+        r#"
+        UPDATE accounts
+        SET display_name = ?2, imap_host = ?3, imap_port = ?4, smtp_host = ?5, smtp_port = ?6
+        WHERE id = ?1
+        RETURNING
+            id, email, display_name, provider,
+            imap_host, imap_port, smtp_host, smtp_port,
+            created_at, last_synced_at
+        "#,
+    )
+    .bind(id)
+    .bind(&input.display_name)
+    .bind(&input.imap_host)
+    .bind(input.imap_port)
+    .bind(&input.smtp_host)
+    .bind(input.smtp_port)
+    .fetch_one(pool)
+    .await?;
+    Ok(row)
+}
+
 pub async fn delete(pool: &Pool, id: Uuid) -> AppResult<()> {
     sqlx::query("DELETE FROM accounts WHERE id = ?1")
         .bind(id)

@@ -114,6 +114,14 @@ export interface AddModelForm {
   apiKey: string;
 }
 
+export interface UpdateModelForm {
+  displayName: string;
+  modelId: string;
+  baseUrl: string | null;
+  /** Omit (or leave blank) to keep the existing API key in the keychain. */
+  apiKey?: string;
+}
+
 export interface DraftResult {
   subject: string;
   body: string;
@@ -182,6 +190,16 @@ export interface AddAccountForm {
   smtpHost: string;
   smtpPort: number;
   authCode: string;
+}
+
+export interface UpdateAccountForm {
+  displayName: string | null;
+  imapHost: string;
+  imapPort: number;
+  smtpHost: string;
+  smtpPort: number;
+  /** Omit (or leave blank) to keep the existing auth code in the keychain. */
+  authCode?: string;
 }
 
 export interface TextTranslation {

@@ -20,7 +20,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::db::accounts::{self, Account, AccountInput};
+use crate::db::accounts::{self, Account, AccountInput, AccountUpdate};
 use crate::error::{AppError, AppResult};
 use crate::keychain;
 use crate::AppState;
@@ -40,7 +40,7 @@ pub(crate) async fn cancel_account_tasks(
 }
 
 /// Known email provider identifiers.
-const KNOWN_PROVIDERS: &[&str] = &["qq", "imap"];
+const KNOWN_PROVIDERS: &[&str] = &["qq", "exmail", "gmail", "imap"];
 
 /// What the add-account form sends across the FFI. `authCode` is split out and never
 /// round-tripped back to the frontend.
@@ -70,6 +70,34 @@ impl std::fmt::Debug for AddAccountForm {
             .field("smtp_host", &self.smtp_host)
             .field("smtp_port", &self.smtp_port)
             .field("auth_code", &"[redacted]")
+            .finish()
+    }
+}
+
+/// Update-account form. `email` and `provider` are fixed (not editable); `authCode` is
+/// optional — `None` / empty means "keep the existing credential in the keychain".
+///
+/// `Debug` is implemented manually so that `auth_code` never appears in log output.
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateAccountForm {
+    pub display_name: Option<String>,
+    pub imap_host: String,
+    pub imap_port: i32,
+    pub smtp_host: String,
+    pub smtp_port: i32,
+    pub auth_code: Option<String>,
+}
+
+impl std::fmt::Debug for UpdateAccountForm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpdateAccountForm")
+            .field("display_name", &self.display_name)
+            .field("imap_host", &self.imap_host)
+            .field("imap_port", &self.imap_port)
+            .field("smtp_host", &self.smtp_host)
+            .field("smtp_port", &self.smtp_port)
+            .field("auth_code", &self.auth_code.as_ref().map(|_| "[redacted]"))
             .finish()
     }
 }
@@ -165,6 +193,41 @@ pub async fn account_remove(state: State<'_, AppState>, id: Uuid) -> AppResult<(
     accounts::delete(state.pool().await?, id).await?;
     tracing::info!(account_id = %id, "account removed");
     Ok(())
+}
+
+/// Update an account's editable fields. `email` / `provider` are fixed. The auth code is
+/// only re-written to the keychain when `form.auth_code` is a non-empty value, so a blank
+/// field preserves the existing credential — mirrors how the edit UI prefills everything
+/// except the secret.
+#[tauri::command]
+pub async fn account_update(
+    state: State<'_, AppState>,
+    id: Uuid,
+    form: UpdateAccountForm,
+) -> AppResult<Account> {
+    validate_port(form.imap_port, "imap_port")?;
+    validate_port(form.smtp_port, "smtp_port")?;
+
+    let input = AccountUpdate {
+        display_name: form.display_name,
+        imap_host: form.imap_host,
+        imap_port: form.imap_port,
+        smtp_host: form.smtp_host,
+        smtp_port: form.smtp_port,
+    };
+    let pool = state.pool().await?;
+    let account = accounts::update(pool, id, &input).await?;
+
+    // 授权码仅在提供了非空值时覆盖 keychain；留空 = 保持原值不变。
+    if let Some(code) = super::secret_to_store(form.auth_code) {
+        let auth = SecretString::from(code);
+        tokio::task::spawn_blocking(move || keychain::store_auth_code(id, &auth))
+            .await
+            .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
+    }
+
+    tracing::info!(account_id = %account.id, "account updated");
+    Ok(account)
 }
 
 #[cfg(test)]
@@ -319,6 +382,31 @@ mod tests {
         assert!(
             debug.contains("user@qq.com"),
             "non-secret fields must still appear in Debug"
+        );
+        assert!(
+            debug.contains("imap.qq.com"),
+            "non-secret fields must still appear in Debug"
+        );
+    }
+
+    #[test]
+    fn update_account_form_debug_redacts_auth_code() {
+        let form = super::UpdateAccountForm {
+            display_name: Some("Test User".into()),
+            imap_host: "imap.qq.com".into(),
+            imap_port: 993,
+            smtp_host: "smtp.qq.com".into(),
+            smtp_port: 465,
+            auth_code: Some("super_secret_auth_code".into()),
+        };
+        let debug = format!("{:?}", form);
+        assert!(
+            !debug.contains("super_secret_auth_code"),
+            "auth_code must not appear in Debug"
+        );
+        assert!(
+            debug.contains("[redacted]"),
+            "Debug must show [redacted] for a present auth_code"
         );
         assert!(
             debug.contains("imap.qq.com"),

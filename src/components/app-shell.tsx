@@ -18,7 +18,6 @@ interface NavProps {
   onSelectMailbox: (mailboxId: string) => void;
   onAddAccount: () => void;
   onSync: () => void;
-  onRemoveAccount: (id: string) => void;
   onOpenSettings: () => void;
   onOpenAutoReply: () => void;
   autoReplyCount: number;
@@ -66,6 +65,11 @@ export function AppShell({ nav, onQueryChange, messageOpenSeq, list, detail, dra
       <CommandBar
         onQueryChange={onQueryChange}
         onAiCommand={() => {
+          // AI 指令按钮作为开关：已打开则关闭，否则带当前邮件上下文打开「写信」tab。
+          if (drawerOpen) {
+            closeDrawer();
+            return;
+          }
           const { selectedMessageId, messages } = useMailStore.getState();
           const msg = selectedMessageId
             ? messages.find((m) => m.id === selectedMessageId)

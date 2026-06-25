@@ -29,11 +29,28 @@ const m: MessageHeader = {
 };
 
 describe('MessageRow', () => {
-  it('渲染主题且带来源色点', () => {
+  it('渲染主题，带未读点与账户来源色边条', () => {
     useMailStore.setState({ accounts: [{ id: 'a1', email: 'acc@x.com' }] as never } as never);
     const { container } = render(<MessageRow m={m} active={false} onClick={vi.fn()} />);
     expect(screen.getByText('主题')).toBeInTheDocument();
-    expect(container.querySelector('[data-testid="source-dot"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="unread-dot"]')).toBeTruthy();
+    // 账户来源色现在体现在行左侧边框，而非独立圆点
+    expect(container.querySelector('button')?.style.borderLeftColor).toBeTruthy();
+  });
+
+  it('未读时未读点为蓝色，已读时透明', () => {
+    useMailStore.setState({ accounts: [{ id: 'a1', email: 'acc@x.com' }] as never } as never);
+    const unread = render(<MessageRow m={{ ...m, flags: [] }} active={false} onClick={vi.fn()} />);
+    expect(unread.container.querySelector('[data-testid="unread-dot"]')?.className).toContain(
+      'bg-blue-500',
+    );
+    unread.unmount();
+    const read = render(
+      <MessageRow m={{ ...m, flags: ['\\Seen'] }} active={false} onClick={vi.fn()} />,
+    );
+    expect(read.container.querySelector('[data-testid="unread-dot"]')?.className).not.toContain(
+      'bg-blue-500',
+    );
   });
 });
 

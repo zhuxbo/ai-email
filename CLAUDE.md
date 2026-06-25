@@ -9,7 +9,7 @@ Keep this file short. When in doubt, ask the user.
 ## What this is
 
 AI-assisted email client. Tauri 2 desktop (macOS) + Android (arm64-v8a).
-Primary email provider: **QQ Mail** (IMAP/SMTP + authorization code).
+Primary email provider: **QQ Mail** (IMAP/SMTP + authorization code); 腾讯企业邮 (exmail) + Gmail also supported via IMAP/SMTP.
 AI calls go to **Anthropic API** — Haiku 4.5 for classification, Sonnet 4.6 for summarization / translation / drafting, Opus 4.7 only for complex threads.
 
 ## Repo layout

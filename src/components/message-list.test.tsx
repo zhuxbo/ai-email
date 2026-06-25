@@ -66,20 +66,22 @@ describe('MessageList 全部已读按钮', () => {
     } as never);
   });
 
-  it('有未读时显示「全部已读」按钮', () => {
+  it('有未读时「全部已读」按钮可用并带计数', () => {
     useMailStore.setState({
       messages: [mkRow({ id: 'm1', flags: [] }), mkRow({ id: 'm2', flags: ['\\Seen'] })] as never,
     } as never);
     render(<MessageList />);
-    expect(screen.getByRole('button', { name: '全部已读' })).toBeInTheDocument();
+    const btn = screen.getByRole('button', { name: /全部已读/ });
+    expect(btn).toBeEnabled();
+    expect(btn).toHaveTextContent('全部已读（1）');
   });
 
-  it('无未读时不显示该按钮', () => {
+  it('无未读时按钮常驻但禁用', () => {
     useMailStore.setState({
       messages: [mkRow({ id: 'm1', flags: ['\\Seen'] })] as never,
     } as never);
     render(<MessageList />);
-    expect(screen.queryByRole('button', { name: '全部已读' })).toBeNull();
+    expect(screen.getByRole('button', { name: /全部已读/ })).toBeDisabled();
   });
 
   it('点击「全部已读」调用 markAllSeen', () => {
@@ -89,7 +91,47 @@ describe('MessageList 全部已读按钮', () => {
       markAllSeen,
     } as never);
     render(<MessageList />);
-    fireEvent.click(screen.getByRole('button', { name: '全部已读' }));
+    fireEvent.click(screen.getByRole('button', { name: /全部已读/ }));
     expect(markAllSeen).toHaveBeenCalled();
+  });
+});
+
+describe('MessageList 未读筛选', () => {
+  beforeEach(() => {
+    useMailStore.setState({
+      accounts: [{ id: 'a1' }],
+      selectedAccountId: null,
+      selectedMailboxId: null,
+      categoryFilter: [],
+      sortByPriority: false,
+      unreadOnly: false,
+      query: '',
+      accountErrors: {},
+      error: null,
+    } as never);
+  });
+
+  it('开启未读只显示未读邮件', () => {
+    useMailStore.setState({
+      messages: [
+        mkRow({ id: 'm1', subject: '未读邮件', flags: [] }),
+        mkRow({ id: 'm2', subject: '已读邮件', flags: ['\\Seen'] }),
+      ] as never,
+      unreadOnly: true,
+    } as never);
+    render(<MessageList />);
+    expect(screen.getByText('未读邮件')).toBeInTheDocument();
+    expect(screen.queryByText('已读邮件')).toBeNull();
+  });
+
+  it('点「未读」按钮切换 unreadOnly', () => {
+    const setUnreadOnly = vi.fn();
+    useMailStore.setState({
+      messages: [mkRow({ id: 'm1', flags: [] })] as never,
+      setUnreadOnly,
+    } as never);
+    render(<MessageList />);
+    fireEvent.click(screen.getByRole('button', { name: '未读' }));
+    expect(setUnreadOnly).toHaveBeenCalledWith(true);
   });
 });

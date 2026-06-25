@@ -18,6 +18,7 @@ vi.mock('../tauri', () => ({
   aiClassify: vi.fn().mockResolvedValue(undefined),
   accountAdd: vi.fn(),
   accountRemove: vi.fn().mockResolvedValue(undefined),
+  accountUpdate: vi.fn(),
   messageSetSeen: vi.fn().mockResolvedValue(undefined),
   messageSetFlagged: vi.fn().mockResolvedValue(undefined),
   messageDelete: vi.fn().mockResolvedValue(undefined),
@@ -642,5 +643,57 @@ describe('mail store 多信箱路径 (Phase 15)', () => {
     // B 的列表不被覆盖
     expect(useMailStore.getState().messages[0]?.id).toBe('m-inbox');
     expect(useMailStore.getState().selectedMailboxId).toBe(INBOX_BOX.id);
+  });
+});
+
+describe('mail store updateAccount', () => {
+  beforeEach(() => {
+    useMailStore.setState({ accounts: [], error: null } as never);
+    vi.clearAllMocks();
+  });
+  it('成功更新后只替换 accounts 中对应项', async () => {
+    const updated = {
+      id: 'a1',
+      email: 'a@qq.com',
+      displayName: '新名',
+      provider: 'qq',
+      imapHost: 'imap.qq.com',
+      imapPort: 993,
+      smtpHost: 'smtp.qq.com',
+      smtpPort: 465,
+      createdAt: '',
+      lastSyncedAt: null,
+    };
+    vi.mocked(tauri.accountUpdate).mockResolvedValueOnce(updated);
+    useMailStore.setState({
+      accounts: [
+        { id: 'a1', displayName: '旧' },
+        { id: 'a2', displayName: '别动' },
+      ] as never,
+    } as never);
+    await useMailStore.getState().updateAccount('a1', {
+      displayName: '新名',
+      imapHost: 'imap.qq.com',
+      imapPort: 993,
+      smtpHost: 'smtp.qq.com',
+      smtpPort: 465,
+    });
+    const accs = useMailStore.getState().accounts;
+    expect(accs.find((a) => a.id === 'a1')?.displayName).toBe('新名');
+    expect(accs.find((a) => a.id === 'a2')?.displayName).toBe('别动');
+  });
+  it('更新失败时设置 error 并抛出', async () => {
+    vi.mocked(tauri.accountUpdate).mockRejectedValueOnce(new Error('boom'));
+    useMailStore.setState({ accounts: [{ id: 'a1' }] as never } as never);
+    await expect(
+      useMailStore.getState().updateAccount('a1', {
+        displayName: null,
+        imapHost: 'h',
+        imapPort: 993,
+        smtpHost: 's',
+        smtpPort: 465,
+      }),
+    ).rejects.toThrow('boom');
+    expect(useMailStore.getState().error).toContain('boom');
   });
 });
