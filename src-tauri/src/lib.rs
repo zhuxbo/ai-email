@@ -3,6 +3,7 @@
 //! The frontend NEVER speaks to IMAP / SMTP / Anthropic / SQLite directly — every cross-process
 //! call lands on a `#[tauri::command]` exported from `crate::commands` (added per sprint).
 
+pub mod addr;
 pub mod ai;
 pub mod auto_reply;
 pub mod commands;
