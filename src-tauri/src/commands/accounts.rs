@@ -13,6 +13,8 @@
 //!
 //! The keychain is the source of truth for secrets; DB never sees the auth code.
 
+use std::future::Future;
+
 use secrecy::SecretString;
 use serde::Deserialize;
 use tauri::State;
@@ -21,6 +23,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::db::accounts::{self, Account, AccountInput, AccountUpdate};
+use crate::db::Pool;
 use crate::error::{AppError, AppResult};
 use crate::keychain;
 use crate::AppState;
@@ -216,18 +219,70 @@ pub async fn account_update(
         smtp_port: form.smtp_port,
     };
     let pool = state.pool().await?;
-    let account = accounts::update(pool, id, &input).await?;
-
-    // 授权码仅在提供了非空值时覆盖 keychain；留空 = 保持原值不变。
-    if let Some(code) = super::secret_to_store(form.auth_code) {
+    // 授权码仅在提供了非空值时覆盖 keychain；留空 = 保持原值不变。keychain 写失败时
+    // apply_account_update 会把 DB 回滚到旧值（见其文档），避免「新配置 + 旧凭据」的部分成功。
+    let secret = super::secret_to_store(form.auth_code);
+    let account = apply_account_update(pool, id, &input, secret, |code| async move {
         let auth = SecretString::from(code);
         tokio::task::spawn_blocking(move || keychain::store_auth_code(id, &auth))
             .await
-            .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
-    }
+            .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?
+    })
+    .await?;
 
     tracing::info!(account_id = %account.id, "account updated");
     Ok(account)
+}
+
+/// 提交一次账户更新：写入新的非密字段，并在 `secret` 为非空值时把新授权码写入 keychain。
+///
+/// 不变量：keychain 写入失败时，DB 行回滚到更新前的旧值，使账户停留在「旧配置 + 旧凭据」
+/// 的一致状态、可安全重试 —— 而不是「新配置 + 旧凭据」的部分成功。`store` 是唯一的副作用
+/// 注入点，测试以一个必失败的实现覆盖回滚路径，无需真实 keychain。
+async fn apply_account_update<F, Fut>(
+    pool: &Pool,
+    id: Uuid,
+    input: &AccountUpdate,
+    secret: Option<String>,
+    store: F,
+) -> AppResult<Account>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: Future<Output = AppResult<()>>,
+{
+    // 仅当确实要改授权码时，才先抓旧值用于回滚；无 secret 时不触碰 keychain，无需回滚。
+    let prev = if secret.is_some() {
+        Some(
+            accounts::get(pool, id)
+                .await?
+                .ok_or_else(|| AppError::Config(format!("account not found: {id}")))?,
+        )
+    } else {
+        None
+    };
+
+    let updated = accounts::update(pool, id, input).await?;
+
+    if let Some(code) = secret {
+        if let Err(e) = store(code).await {
+            // keychain 写失败：把 DB 回滚到旧值，保持「旧配置 + 旧凭据」一致、可安全重试。
+            if let Some(prev) = prev {
+                let rollback = AccountUpdate {
+                    display_name: prev.display_name,
+                    imap_host: prev.imap_host,
+                    imap_port: prev.imap_port,
+                    smtp_host: prev.smtp_host,
+                    smtp_port: prev.smtp_port,
+                };
+                if let Err(re) = accounts::update(pool, id, &rollback).await {
+                    tracing::error!(account_id = %id, error = ?re, "keychain 写失败后回滚账户行也失败");
+                }
+            }
+            return Err(e);
+        }
+    }
+
+    Ok(updated)
 }
 
 #[cfg(test)]
@@ -239,7 +294,9 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
 
-    use super::{cancel_account_tasks, validate_port};
+    use super::{accounts, apply_account_update, cancel_account_tasks, validate_port};
+    use super::{AccountInput, AccountUpdate};
+    use crate::db::{self, Pool};
     use crate::error::AppError;
 
     // ---- 账户删除时取消在途后台任务 ----
@@ -412,5 +469,119 @@ mod tests {
             debug.contains("imap.qq.com"),
             "non-secret fields must still appear in Debug"
         );
+    }
+
+    // ---- L2: update 的 keychain 写失败 → DB 回滚到旧值，不残留新的非密字段 ----
+
+    async fn test_pool() -> Pool {
+        let opts = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(":memory:")
+            .foreign_keys(true);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        db::MIGRATOR.run(&pool).await.unwrap();
+        pool
+    }
+
+    fn sample_account_input() -> AccountInput {
+        AccountInput {
+            email: "user@qq.com".into(),
+            display_name: Some("Old Name".into()),
+            provider: "qq".into(),
+            imap_host: "imap.qq.com".into(),
+            imap_port: 993,
+            smtp_host: "smtp.qq.com".into(),
+            smtp_port: 465,
+        }
+    }
+
+    /// 与 [`sample_account_input`] 完全不同的新非密字段，便于断言更新是否残留。
+    fn changed_update() -> AccountUpdate {
+        AccountUpdate {
+            display_name: Some("New Name".into()),
+            imap_host: "imap.changed.invalid".into(),
+            imap_port: 143,
+            smtp_host: "smtp.changed.invalid".into(),
+            smtp_port: 25,
+        }
+    }
+
+    /// keychain 写失败时，DB 必须回滚到更新前的旧值，不残留新的非密字段。
+    #[tokio::test]
+    async fn account_update_rolls_back_db_when_keychain_write_fails() {
+        let pool = test_pool().await;
+        let original = accounts::insert(&pool, &sample_account_input())
+            .await
+            .unwrap();
+
+        let result = apply_account_update(
+            &pool,
+            original.id,
+            &changed_update(),
+            Some("new_auth_code".into()),
+            |_code| async { Err(AppError::Keychain("simulated keychain failure".into())) },
+        )
+        .await;
+
+        assert!(result.is_err(), "keychain 写失败时整个更新应返回错误");
+
+        // 关键不变量：所有非密字段回到旧值，没有「新配置 + 旧凭据」的部分成功。
+        let reloaded = accounts::get(&pool, original.id).await.unwrap().unwrap();
+        assert_eq!(
+            reloaded.display_name.as_deref(),
+            Some("Old Name"),
+            "display_name 应回滚到旧值"
+        );
+        assert_eq!(reloaded.imap_host, "imap.qq.com", "imap_host 应回滚到旧值");
+        assert_eq!(reloaded.imap_port, 993, "imap_port 应回滚到旧值");
+        assert_eq!(reloaded.smtp_host, "smtp.qq.com", "smtp_host 应回滚到旧值");
+        assert_eq!(reloaded.smtp_port, 465, "smtp_port 应回滚到旧值");
+    }
+
+    /// keychain 写成功时，新的非密字段落库，返回更新后的账户。
+    #[tokio::test]
+    async fn account_update_persists_when_keychain_write_succeeds() {
+        let pool = test_pool().await;
+        let original = accounts::insert(&pool, &sample_account_input())
+            .await
+            .unwrap();
+
+        let updated = apply_account_update(
+            &pool,
+            original.id,
+            &changed_update(),
+            Some("new_auth_code".into()),
+            |_code| async { Ok(()) },
+        )
+        .await
+        .expect("keychain 成功时更新应成功");
+
+        assert_eq!(updated.imap_host, "imap.changed.invalid");
+        let reloaded = accounts::get(&pool, original.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.imap_host, "imap.changed.invalid", "新值应落库");
+        assert_eq!(reloaded.smtp_port, 25, "新值应落库");
+    }
+
+    /// secret = None（未改授权码）时根本不触碰 keychain：store 闭包不应被调用。
+    #[tokio::test]
+    async fn account_update_without_secret_skips_keychain() {
+        let pool = test_pool().await;
+        let original = accounts::insert(&pool, &sample_account_input())
+            .await
+            .unwrap();
+
+        let updated =
+            apply_account_update(&pool, original.id, &changed_update(), None, |_code| async {
+                panic!("无新授权码时不应触碰 keychain")
+            })
+            .await
+            .expect("无 secret 的更新应成功");
+
+        assert_eq!(updated.imap_host, "imap.changed.invalid");
+        let reloaded = accounts::get(&pool, original.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.imap_host, "imap.changed.invalid", "新值应落库");
     }
 }

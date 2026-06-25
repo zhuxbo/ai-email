@@ -14,6 +14,8 @@
 //! Remove-model flow: best-effort delete keychain key first (warn on failure, never abort),
 //! then delete the DB row — mirrors the delete-warn-not-fail invariant from account_remove.
 
+use std::future::Future;
+
 use secrecy::SecretString;
 use serde::Deserialize;
 use tauri::State;
@@ -21,6 +23,7 @@ use uuid::Uuid;
 
 use crate::db::ai_models::{self, AiModel, AiModelInput, AiModelUpdate};
 use crate::db::ai_role_defaults::{self, RoleDefault};
+use crate::db::Pool;
 use crate::error::{AppError, AppResult};
 use crate::keychain;
 use crate::AppState;
@@ -212,18 +215,68 @@ pub async fn model_update(
         base_url,
     };
     let pool = state.pool().await?;
-    let model = ai_models::update(pool, id, &input).await?;
-
-    // API key 仅在提供了非空值时覆盖 keychain；留空 = 保持原 key 不变。
-    if let Some(key) = super::secret_to_store(form.api_key) {
+    // API key 仅在提供了非空值时覆盖 keychain；留空 = 保持原 key 不变。keychain 写失败时
+    // apply_model_update 会把 DB 回滚到旧值（见其文档），避免「新配置 + 旧 key」的部分成功。
+    let secret = super::secret_to_store(form.api_key);
+    let model = apply_model_update(pool, id, &input, secret, |key| async move {
         let key = SecretString::from(key);
         tokio::task::spawn_blocking(move || keychain::store_ai_key(id, &key))
             .await
-            .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
-    }
+            .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?
+    })
+    .await?;
 
     tracing::info!(model_id = %model.id, "ai model updated");
     Ok(model)
+}
+
+/// 提交一次模型更新：写入新的非密字段，并在 `secret` 为非空值时把新 API key 写入 keychain。
+///
+/// 不变量：keychain 写入失败时，DB 行回滚到更新前的旧值，使模型停留在「旧配置 + 旧 key」
+/// 的一致状态、可安全重试 —— 而不是「新配置 + 旧 key」的部分成功。`store` 是唯一的副作用
+/// 注入点，测试以一个必失败的实现覆盖回滚路径，无需真实 keychain。
+async fn apply_model_update<F, Fut>(
+    pool: &Pool,
+    id: Uuid,
+    input: &AiModelUpdate,
+    secret: Option<String>,
+    store: F,
+) -> AppResult<AiModel>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: Future<Output = AppResult<()>>,
+{
+    // 仅当确实要改 API key 时，才先抓旧值用于回滚；无 secret 时不触碰 keychain，无需回滚。
+    let prev = if secret.is_some() {
+        Some(
+            ai_models::get(pool, id)
+                .await?
+                .ok_or_else(|| AppError::Config(format!("model not found: {id}")))?,
+        )
+    } else {
+        None
+    };
+
+    let updated = ai_models::update(pool, id, input).await?;
+
+    if let Some(key) = secret {
+        if let Err(e) = store(key).await {
+            // keychain 写失败：把 DB 回滚到旧值，保持「旧配置 + 旧 key」一致、可安全重试。
+            if let Some(prev) = prev {
+                let rollback = AiModelUpdate {
+                    display_name: prev.display_name,
+                    model_id: prev.model_id,
+                    base_url: prev.base_url,
+                };
+                if let Err(re) = ai_models::update(pool, id, &rollback).await {
+                    tracing::error!(model_id = %id, error = ?re, "keychain 写失败后回滚模型行也失败");
+                }
+            }
+            return Err(e);
+        }
+    }
+
+    Ok(updated)
 }
 
 #[tauri::command]
@@ -259,7 +312,9 @@ pub async fn role_default_clear(state: State<'_, AppState>, role: String) -> App
 
 #[cfg(test)]
 mod tests {
-    use super::validate_base_url;
+    use super::{ai_models, apply_model_update, validate_base_url};
+    use super::{AiModelInput, AiModelUpdate};
+    use crate::db::{self, Pool};
     use crate::error::AppError;
 
     // ---- #3: base_url HTTPS enforcement ----
@@ -402,5 +457,115 @@ mod tests {
             debug.contains("Claude"),
             "non-secret fields must still appear in Debug"
         );
+    }
+
+    // ---- L2: update 的 keychain 写失败 → DB 回滚到旧值，不残留新的非密字段 ----
+
+    async fn test_pool() -> Pool {
+        let opts = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(":memory:")
+            .foreign_keys(true);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        db::MIGRATOR.run(&pool).await.unwrap();
+        pool
+    }
+
+    fn sample_model_input() -> AiModelInput {
+        AiModelInput {
+            display_name: "Old Model".into(),
+            provider: "anthropic".into(),
+            model_id: "claude-old".into(),
+            base_url: Some("https://old.example.com".into()),
+        }
+    }
+
+    /// 与 [`sample_model_input`] 完全不同的新非密字段，便于断言更新是否残留。
+    fn changed_update() -> AiModelUpdate {
+        AiModelUpdate {
+            display_name: "New Model".into(),
+            model_id: "claude-new".into(),
+            base_url: Some("https://new.example.com".into()),
+        }
+    }
+
+    /// keychain 写失败时，DB 必须回滚到更新前的旧值，不残留新的非密字段。
+    #[tokio::test]
+    async fn model_update_rolls_back_db_when_keychain_write_fails() {
+        let pool = test_pool().await;
+        let original = ai_models::insert(&pool, &sample_model_input())
+            .await
+            .unwrap();
+
+        let result = apply_model_update(
+            &pool,
+            original.id,
+            &changed_update(),
+            Some("sk-new-key".into()),
+            |_key| async { Err(AppError::Keychain("simulated keychain failure".into())) },
+        )
+        .await;
+
+        assert!(result.is_err(), "keychain 写失败时整个更新应返回错误");
+
+        // 关键不变量：所有非密字段回到旧值，没有「新配置 + 旧 key」的部分成功。
+        let reloaded = ai_models::get(&pool, original.id).await.unwrap().unwrap();
+        assert_eq!(
+            reloaded.display_name, "Old Model",
+            "display_name 应回滚到旧值"
+        );
+        assert_eq!(reloaded.model_id, "claude-old", "model_id 应回滚到旧值");
+        assert_eq!(
+            reloaded.base_url.as_deref(),
+            Some("https://old.example.com"),
+            "base_url 应回滚到旧值"
+        );
+    }
+
+    /// keychain 写成功时，新的非密字段落库，返回更新后的模型。
+    #[tokio::test]
+    async fn model_update_persists_when_keychain_write_succeeds() {
+        let pool = test_pool().await;
+        let original = ai_models::insert(&pool, &sample_model_input())
+            .await
+            .unwrap();
+
+        let updated = apply_model_update(
+            &pool,
+            original.id,
+            &changed_update(),
+            Some("sk-new-key".into()),
+            |_key| async { Ok(()) },
+        )
+        .await
+        .expect("keychain 成功时更新应成功");
+
+        assert_eq!(updated.model_id, "claude-new");
+        let reloaded = ai_models::get(&pool, original.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.model_id, "claude-new", "新值应落库");
+        assert_eq!(reloaded.display_name, "New Model", "新值应落库");
+    }
+
+    /// secret = None（未改 API key）时根本不触碰 keychain：store 闭包不应被调用。
+    #[tokio::test]
+    async fn model_update_without_secret_skips_keychain() {
+        let pool = test_pool().await;
+        let original = ai_models::insert(&pool, &sample_model_input())
+            .await
+            .unwrap();
+
+        let updated =
+            apply_model_update(&pool, original.id, &changed_update(), None, |_key| async {
+                panic!("无新 API key 时不应触碰 keychain")
+            })
+            .await
+            .expect("无 secret 的更新应成功");
+
+        assert_eq!(updated.model_id, "claude-new");
+        let reloaded = ai_models::get(&pool, original.id).await.unwrap().unwrap();
+        assert_eq!(reloaded.model_id, "claude-new", "新值应落库");
     }
 }
