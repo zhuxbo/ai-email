@@ -75,6 +75,40 @@ pub async fn delete(pool: &Pool, id: Uuid) -> AppResult<()> {
     Ok(())
 }
 
+/// §2.2 命中判定。优先级阶梯：具体度（address > domain > domain_glob），同档白先于黑。
+pub fn verdict(from_addr: Option<&str>, filters: &[SenderFilter]) -> Verdict {
+    let Some(addr) = crate::addr::extract_email(from_addr) else {
+        return Verdict::None;
+    };
+    let domain = crate::addr::domain_of(&addr);
+
+    let hits = |mt: &str, lt: &str| -> bool {
+        filters.iter().any(|f| {
+            f.match_type == mt
+                && f.list_type == lt
+                && match mt {
+                    "address" => addr == f.pattern,
+                    "domain" => domain == Some(f.pattern.as_str()),
+                    "domain_glob" => {
+                        domain.is_some_and(|d| crate::addr::domain_matches(d, &f.pattern))
+                    }
+                    _ => false,
+                }
+        })
+    };
+
+    // 七层阶梯，自上而下命中即返回
+    for mt in ["address", "domain", "domain_glob"] {
+        if hits(mt, "white") {
+            return Verdict::Whitelist;
+        }
+        if hits(mt, "black") {
+            return Verdict::Blacklist;
+        }
+    }
+    Verdict::None
+}
+
 /// §2.1 录入规范化 + 判型 + 校验。返回 (match_type, pattern)。纯函数可单测。
 pub fn normalize_entry(value: &str) -> AppResult<(String, String)> {
     let v = value.trim().to_ascii_lowercase();
@@ -212,5 +246,84 @@ mod tests {
         ] {
             assert!(normalize_entry(bad).is_err(), "应拒: {bad:?}");
         }
+    }
+
+    fn mk(list: &str, mt: &str, pat: &str) -> SenderFilter {
+        SenderFilter {
+            id: Uuid::new_v4(),
+            list_type: list.into(),
+            match_type: mt.into(),
+            pattern: pat.into(),
+            note: None,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+        }
+    }
+
+    fn is_black(v: &Verdict) -> bool {
+        matches!(v, Verdict::Blacklist)
+    }
+    fn is_white(v: &Verdict) -> bool {
+        matches!(v, Verdict::Whitelist)
+    }
+    fn is_none(v: &Verdict) -> bool {
+        matches!(v, Verdict::None)
+    }
+
+    #[test]
+    fn verdict_address_domain_glob_and_case() {
+        let fs = vec![mk("black", "address", "a@x.com")];
+        assert!(is_black(&verdict(Some("a@x.com"), &fs)));
+        assert!(is_black(&verdict(Some("Alice <A@X.COM>"), &fs))); // 大小写 + 显示名
+        assert!(is_none(&verdict(Some("b@x.com"), &fs)));
+
+        let fs = vec![mk("black", "domain", "x.com")];
+        assert!(is_black(&verdict(Some("a@x.com"), &fs)));
+        assert!(is_none(&verdict(Some("a@sub.x.com"), &fs))); // 精确域不含子域
+
+        let fs = vec![mk("black", "domain_glob", "x.com")];
+        assert!(is_black(&verdict(Some("a@x.com"), &fs))); // 含裸域
+        assert!(is_black(&verdict(Some("a@sub.x.com"), &fs))); // 子域
+        assert!(is_black(&verdict(Some("a@a.b.x.com"), &fs))); // 多层
+        assert!(is_none(&verdict(Some("a@evilx.com"), &fs))); // 后缀混淆
+    }
+
+    #[test]
+    fn verdict_malformed_and_empty_are_none() {
+        let fs = vec![mk("black", "domain", "x.com")];
+        for bad in [None, Some(""), Some("Alice <>"), Some("no-at"), Some("  ")] {
+            assert!(is_none(&verdict(bad, &fs)), "应 None: {bad:?}");
+        }
+        // a@b@x.com 的域是 x.com → 命中 domain 条目
+        assert!(is_black(&verdict(Some("a@b@x.com"), &fs)));
+        // 空名单短路
+        assert!(is_none(&verdict(Some("a@x.com"), &[])));
+    }
+
+    #[test]
+    fn verdict_priority_specificity_then_white() {
+        // 白通配 + 黑地址，来信地址 → 具体的黑胜
+        let fs = vec![
+            mk("white", "domain_glob", "x.com"),
+            mk("black", "address", "ceo@x.com"),
+        ];
+        assert!(is_black(&verdict(Some("ceo@x.com"), &fs)));
+        // 黑通配 + 白地址，来信地址 → 具体的白胜
+        let fs = vec![
+            mk("black", "domain_glob", "x.com"),
+            mk("white", "address", "ceo@x.com"),
+        ];
+        assert!(is_white(&verdict(Some("ceo@x.com"), &fs)));
+        // 同档同 pattern 黑白并存 → 白优先
+        let fs = vec![
+            mk("black", "domain", "x.com"),
+            mk("white", "domain", "x.com"),
+        ];
+        assert!(is_white(&verdict(Some("a@x.com"), &fs)));
+        // 地址 > 域名：白地址 + 黑精确域
+        let fs = vec![
+            mk("white", "address", "a@x.com"),
+            mk("black", "domain", "x.com"),
+        ];
+        assert!(is_white(&verdict(Some("a@x.com"), &fs)));
     }
 }
