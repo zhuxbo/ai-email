@@ -2,6 +2,8 @@
 // in-memory pool（foreign_keys 必须开）。max_connections(1)：每个 `:memory:` 连接是独立空库，
 // 限单连接才能让迁移后的表对后续查询可见。
 
+use ai_email_lib::ai::extract::Action;
+use ai_email_lib::db;
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -91,4 +93,141 @@ async fn migration_adds_filter_disabled_column_default_zero() {
         .unwrap();
     let fd: i64 = row.get("filter_disabled");
     assert_eq!(fd, 0, "filter_disabled 默认应为 0");
+}
+
+// ── CRUD + resolve_for ──────────────────────────────────────────────────────────
+
+fn input(
+    scope: &str,
+    scope_value: &str,
+    target: &str,
+    action: &str,
+    pattern: Option<&str>,
+) -> db::filter_rules::FilterRuleInput {
+    db::filter_rules::FilterRuleInput {
+        scope: scope.into(),
+        scope_value: scope_value.into(),
+        target: target.into(),
+        action: action.into(),
+        pattern: pattern.map(|s| s.into()),
+        enabled: true,
+        note: None,
+    }
+}
+
+#[tokio::test]
+async fn crud_roundtrip() {
+    let pool = mem_pool().await;
+    let r = db::filter_rules::insert(
+        &pool,
+        &input("domain", "cnssl.cn", "signature", "strip", Some("免责声明")),
+    )
+    .await
+    .unwrap();
+    assert_eq!(r.scope, "domain");
+    assert_eq!(r.pattern.as_deref(), Some("免责声明"));
+
+    let all = db::filter_rules::list_all(&pool).await.unwrap();
+    assert_eq!(all.len(), 1);
+
+    let mut edited = r.clone();
+    edited.action = "keep".into();
+    db::filter_rules::update(&pool, &edited).await.unwrap();
+    db::filter_rules::set_enabled(&pool, r.id, false)
+        .await
+        .unwrap();
+
+    db::filter_rules::delete(&pool, r.id).await.unwrap();
+    assert!(db::filter_rules::list_all(&pool).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn resolve_for_email_beats_domain_beats_global() {
+    let pool = mem_pool().await;
+    db::filter_rules::insert(&pool, &input("global", "", "signature", "strip", None))
+        .await
+        .unwrap();
+    db::filter_rules::insert(
+        &pool,
+        &input("domain", "cnssl.cn", "signature", "keep", None),
+    )
+    .await
+    .unwrap();
+    db::filter_rules::insert(
+        &pool,
+        &input("email", "boss@cnssl.cn", "signature", "strip", None),
+    )
+    .await
+    .unwrap();
+    db::filter_rules::insert(
+        &pool,
+        &input("email", "boss@cnssl.cn", "quote", "keep", None),
+    )
+    .await
+    .unwrap();
+
+    let r = db::filter_rules::resolve_for(&pool, Some("Boss <boss@cnssl.cn>"))
+        .await
+        .unwrap();
+    assert_eq!(
+        r.signature,
+        Some(Action::Strip),
+        "email 级 signature 应胜出"
+    );
+    assert_eq!(r.quote, Some(Action::Keep), "email 级 quote keep");
+    assert_eq!(r.repeat, None, "无 repeat 规则 → None（走能力默认）");
+}
+
+#[tokio::test]
+async fn resolve_for_domain_when_no_email_rule() {
+    let pool = mem_pool().await;
+    db::filter_rules::insert(&pool, &input("global", "", "signature", "strip", None))
+        .await
+        .unwrap();
+    db::filter_rules::insert(
+        &pool,
+        &input("domain", "cnssl.cn", "signature", "keep", None),
+    )
+    .await
+    .unwrap();
+    let r = db::filter_rules::resolve_for(&pool, Some("hr@cnssl.cn"))
+        .await
+        .unwrap();
+    assert_eq!(r.signature, Some(Action::Keep), "domain 应胜过 global");
+}
+
+#[tokio::test]
+async fn resolve_for_disabled_rule_ignored() {
+    let pool = mem_pool().await;
+    let g = db::filter_rules::insert(&pool, &input("global", "", "signature", "strip", None))
+        .await
+        .unwrap();
+    db::filter_rules::set_enabled(&pool, g.id, false)
+        .await
+        .unwrap();
+    let r = db::filter_rules::resolve_for(&pool, Some("x@y.com"))
+        .await
+        .unwrap();
+    assert_eq!(r.signature, None, "禁用规则不参与解析");
+}
+
+#[tokio::test]
+async fn resolve_for_carries_signature_pattern() {
+    let pool = mem_pool().await;
+    db::filter_rules::insert(
+        &pool,
+        &input(
+            "domain",
+            "cnssl.cn",
+            "signature",
+            "strip",
+            Some("Disclaimer"),
+        ),
+    )
+    .await
+    .unwrap();
+    let r = db::filter_rules::resolve_for(&pool, Some("a@cnssl.cn"))
+        .await
+        .unwrap();
+    assert_eq!(r.signature_pattern.as_deref(), Some("Disclaimer"));
 }
