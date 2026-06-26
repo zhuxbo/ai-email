@@ -10,6 +10,7 @@ import type {
   AddAccountForm,
   UpdateAccountForm,
   Category,
+  ConversationView,
   Mailbox,
   MessageBody,
   MessageHeader,
@@ -86,6 +87,10 @@ interface MailState {
   /** 部分账户当前加载/同步失败：accountId → 错误信息。聚合层不再静默吞掉部分失败。 */
   accountErrors: Record<string, string>;
 
+  conversation: ConversationView | null;
+  loadingConversation: boolean;
+  loadConversation: (messageId: string) => Promise<void>;
+
   syncing: boolean;
   loadingBody: boolean;
   error: string | null;
@@ -146,6 +151,9 @@ export const useMailStore = create<MailState>((set, get) => ({
 
   query: '',
   accountErrors: {},
+
+  conversation: null,
+  loadingConversation: false,
 
   syncing: false,
   loadingBody: false,
@@ -258,6 +266,18 @@ export const useMailStore = create<MailState>((set, get) => ({
       set({ error: errMsg(e) });
     } finally {
       set({ loadingBody: false });
+    }
+  },
+
+  loadConversation: async (messageId) => {
+    set({ loadingConversation: true, conversation: null });
+    try {
+      const view = await tauri.conversationThread(messageId);
+      if (get().selectedMessageId === messageId)
+        set({ conversation: view, loadingConversation: false });
+    } catch (e) {
+      if (get().selectedMessageId === messageId)
+        set({ error: errMsg(e), loadingConversation: false });
     }
   },
 

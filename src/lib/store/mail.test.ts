@@ -2,7 +2,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { useMailStore } from './mail';
 import { useComposeStore } from './compose';
-import type { MessageHeader } from '../types';
+import type { ConversationView, MessageHeader } from '../types';
 vi.mock('../tauri', () => ({
   accountsList: vi.fn().mockResolvedValue([{ id: 'a1' }, { id: 'a2' }]),
   unifiedInbox: vi
@@ -23,6 +23,7 @@ vi.mock('../tauri', () => ({
   messageSetFlagged: vi.fn().mockResolvedValue(undefined),
   messageDelete: vi.fn().mockResolvedValue(undefined),
   messagesMarkSeenBulk: vi.fn().mockResolvedValue(undefined),
+  conversationThread: vi.fn(),
 }));
 import * as tauri from '../tauri';
 describe('mail store 聚合新成员', () => {
@@ -643,6 +644,44 @@ describe('mail store 多信箱路径 (Phase 15)', () => {
     // B 的列表不被覆盖
     expect(useMailStore.getState().messages[0]?.id).toBe('m-inbox');
     expect(useMailStore.getState().selectedMailboxId).toBe(INBOX_BOX.id);
+  });
+});
+
+describe('mail store loadConversation', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useMailStore.setState({
+      selectedMessageId: null,
+      conversation: null,
+      loadingConversation: false,
+      error: null,
+    } as never);
+  });
+
+  it('loadConversation 填充 conversation', async () => {
+    const view: ConversationView = { threadId: 't1', sentSyncOk: true, messages: [] };
+    vi.mocked(tauri.conversationThread).mockResolvedValue(view);
+    useMailStore.setState({ selectedMessageId: 'm1' } as never);
+    await useMailStore.getState().loadConversation('m1');
+    expect(useMailStore.getState().conversation?.threadId).toBe('t1');
+    expect(useMailStore.getState().loadingConversation).toBe(false);
+  });
+
+  it('loadConversation 迟到响应不覆盖已切换的会话', async () => {
+    let resolveM1: ((v: unknown) => void) | undefined;
+    vi.mocked(tauri.conversationThread).mockImplementation(
+      () =>
+        new Promise((r) => {
+          resolveM1 = r;
+        }) as never,
+    );
+    useMailStore.setState({ selectedMessageId: 'm1', conversation: null } as never);
+    const p = useMailStore.getState().loadConversation('m1');
+    // user switches to m2 while m1 is in flight
+    useMailStore.setState({ selectedMessageId: 'm2' } as never);
+    resolveM1?.({ threadId: 't1-stale', sentSyncOk: true, messages: [] });
+    await p;
+    expect(useMailStore.getState().conversation).toBeNull(); // stale m1 response rejected
   });
 });
 
