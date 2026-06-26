@@ -182,6 +182,16 @@ pub async fn mark_body_fetched(
     Ok(())
 }
 
+/// 切 per-message 过滤开关。disabled=true 时 AI 管道跳过签名/引用剥离，直接用原文。
+pub async fn set_filter_disabled(pool: &Pool, id: Uuid, disabled: bool) -> AppResult<()> {
+    sqlx::query("UPDATE messages SET filter_disabled = ?2 WHERE id = ?1")
+        .bind(id)
+        .bind(disabled)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// Update the priority + category fields the classifier produced. `category` is stored as a
 /// plain TEXT so we don't have to enforce the closed set at schema level (Sprint 3 spec uses
 /// 5 values; future could refine).

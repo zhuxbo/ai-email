@@ -286,6 +286,8 @@ pub fn run() {
             commands::filter_rules::filter_rule_remove,
             commands::filter_rules::filter_rule_set_enabled,
             commands::conversation::conversation_thread,
+            commands::mail::message_filter_preview,
+            commands::mail::message_set_filter_disabled,
         ])
         .build(tauri::generate_context!())
         .map_err(|e| {

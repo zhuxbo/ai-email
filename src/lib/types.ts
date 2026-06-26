@@ -293,3 +293,16 @@ export interface SuggestedReply {
   priority: number | null;
   createdAt: string;
 }
+
+export interface RemovedBlock {
+  kind: FilterTarget;
+  text: string;
+  reason: string;
+}
+
+export interface MessageFilterPreview {
+  net: string;
+  removed: RemovedBlock[];
+  disabled: boolean;
+  original: string;
+}

@@ -413,6 +413,103 @@ pub async fn message_delete(state: State<'_, AppState>, id: Uuid) -> AppResult<(
     Ok(())
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemovedBlockView {
+    pub kind: String, // 'signature' | 'quote' | 'repeat'
+    pub text: String,
+    pub reason: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageFilterPreview {
+    pub net: String,
+    pub removed: Vec<RemovedBlockView>,
+    /// 当前 filter_disabled 态：true=AI 收完整原文（预览仍展示"若启用会剥成"）。
+    pub disabled: bool,
+    /// 原文（disabled 时 AI 实收；启用时供对照）。
+    pub original: String,
+}
+
+fn target_label(t: crate::ai::extract::Target) -> &'static str {
+    match t {
+        crate::ai::extract::Target::Signature => "signature",
+        crate::ai::extract::Target::Quote => "quote",
+        crate::ai::extract::Target::Repeat => "repeat",
+    }
+}
+
+fn preview_from_result(
+    result: crate::ai::extract::ExtractResult,
+    disabled: bool,
+    original: String,
+) -> MessageFilterPreview {
+    MessageFilterPreview {
+        net: result.net,
+        removed: result
+            .removed
+            .into_iter()
+            .map(|b| RemovedBlockView {
+                kind: target_label(b.kind).to_string(),
+                text: b.text,
+                reason: b.reason,
+            })
+            .collect(),
+        disabled,
+        original,
+    }
+}
+
+/// 实时预览当前规则会如何剥离该封邮件。固定用 summary 默认（三类全剥）展示最大剥离效果；
+/// disabled 态时仍实时重算（预览态：让用户看到"若启用会剥成什么"），disabled 字段仅供 UI 标注。
+#[tauri::command]
+pub async fn message_filter_preview(
+    state: State<'_, AppState>,
+    message_id: Uuid,
+) -> AppResult<MessageFilterPreview> {
+    let pool = state.pool().await?;
+    let ctx = crate::ai::context::load_thread_context(pool, message_id).await?;
+    let current = ctx
+        .members
+        .get(ctx.current_index)
+        .ok_or_else(|| AppError::Ai("会话上下文缺当前封".into()))?;
+    let original = current
+        .text_plain
+        .clone()
+        .or_else(|| current.html.clone())
+        .unwrap_or_default();
+    let msg = messages::get(pool, message_id).await?;
+    let disabled = msg.as_ref().map(|m| m.filter_disabled).unwrap_or(false);
+
+    let prior: Vec<Option<String>> = ctx.members[..ctx.current_index]
+        .iter()
+        .map(|m| m.text_plain.clone())
+        .collect();
+    let resolved =
+        crate::db::filter_rules::resolve_for(pool, current.header.from_addr.as_deref()).await?;
+    // 预览固定用 summary 默认（三类全剥）展示最大剥离效果；disabled 态仍实时重算（预览态）。
+    let actions = crate::ai::extract::resolve_target_actions(
+        "summary",
+        resolved.signature,
+        resolved.quote,
+        resolved.repeat,
+        resolved.signature_pattern.as_deref(),
+    );
+    let result = crate::ai::extract::extract_increment(&original, &prior, current.is_own, &actions);
+    Ok(preview_from_result(result, disabled, original))
+}
+
+/// 切 per-message 过滤开关。disabled=true 时 AI 管道跳过剥离直接用原文。
+#[tauri::command]
+pub async fn message_set_filter_disabled(
+    state: State<'_, AppState>,
+    message_id: Uuid,
+    disabled: bool,
+) -> AppResult<()> {
+    messages::set_filter_disabled(state.pool().await?, message_id, disabled).await
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -571,5 +668,24 @@ mod tests {
             msg.contains("not found"),
             "应透传回退自取的真实失败原因（message not found），实际：{msg}"
         );
+    }
+
+    #[test]
+    fn preview_maps_removed_blocks_and_flags() {
+        use crate::ai::extract::{ExtractResult, RemovedBlock, Target};
+        let result = ExtractResult {
+            net: "净增量".into(),
+            removed: vec![RemovedBlock {
+                kind: Target::Signature,
+                text: "-- \nAlice".into(),
+                reason: "签名".into(),
+            }],
+        };
+        let p = super::preview_from_result(result, true, "完整原文".into());
+        assert_eq!(p.net, "净增量");
+        assert_eq!(p.removed.len(), 1);
+        assert_eq!(p.removed[0].kind, "signature");
+        assert!(p.disabled);
+        assert_eq!(p.original, "完整原文");
     }
 }

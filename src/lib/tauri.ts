@@ -24,6 +24,7 @@ import type {
   FilterRuleInput,
   Mailbox,
   MessageBody,
+  MessageFilterPreview,
   MessageHeader,
   RoleDefault,
   SendDraft,
@@ -409,4 +410,15 @@ export async function unifiedInbox(opts: {
     }
   });
   return { messages: mergeBySentAt(lists), errors };
+}
+
+export async function messageFilterPreview(messageId: string): Promise<MessageFilterPreview> {
+  return invoke('message_filter_preview', { messageId });
+}
+
+export async function messageSetFilterDisabled(
+  messageId: string,
+  disabled: boolean,
+): Promise<void> {
+  await invoke('message_set_filter_disabled', { messageId, disabled });
 }
