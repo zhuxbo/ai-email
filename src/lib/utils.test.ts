@@ -54,4 +54,9 @@ describe('formatDateTimeCN', () => {
   it('非法日期返回空串', () => {
     expect(formatDateTimeCN('not-a-date')).toBe('');
   });
+
+  it('带时区偏移的 UTC（Z）串也能格式化', () => {
+    // 实际邮件 sentAt 多为带偏移串。按本地时区显示，故只断言结构与年月（日依时区落 25-27）。
+    expect(formatDateTimeCN('2026-06-26T07:49:00Z')).toMatch(/^2026年6月2[567]日 \d{2}:\d{2}$/);
+  });
 });

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { useMailStore } from '../lib/store/mail';
 import * as tauri from '../lib/tauri';
@@ -16,6 +16,9 @@ export function FilterTab() {
   const selectedMessageId = useMailStore((s) => s.selectedMessageId);
   const [data, setData] = useState<MessageFilterPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // 最新选中 id（useLatest）：供事件处理器在 await 后判断邮件是否已切换。
+  const currentId = useRef(selectedMessageId);
+  currentId.current = selectedMessageId;
 
   // 切换邮件即重新预览；active 守卫防迟到结果覆盖新选中。
   useEffect(() => {
@@ -47,14 +50,20 @@ export function FilterTab() {
   }, [selectedMessageId]);
 
   const onToggleDisabled = async (disabled: boolean): Promise<void> => {
-    if (selectedMessageId === null) return;
+    const id = selectedMessageId;
+    if (id === null) return;
     setError(null);
     try {
-      await tauri.messageSetFilterDisabled(selectedMessageId, disabled);
-      const d = await tauri.messageFilterPreview(selectedMessageId);
-      setData(d);
+      await tauri.messageSetFilterDisabled(id, disabled);
+      const d = await tauri.messageFilterPreview(id);
+      // 两次 await 间用户可能已切换邮件——比对最新选中，丢弃陈旧结果。
+      if (currentId.current === id) {
+        setData(d);
+      }
     } catch (e) {
-      setError(errMsg(e));
+      if (currentId.current === id) {
+        setError(errMsg(e));
+      }
     }
   };
 
