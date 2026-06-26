@@ -2,11 +2,13 @@ import { useUiStore } from '../lib/store/ui';
 import { SummaryTab } from './summary-tab';
 import { TranslateTab } from './translate-tab';
 import { ComposeTab } from './compose-tab';
+import { FilterTab } from './filter-tab';
 
 const TABS = [
   { key: 'summary', label: '摘要' },
   { key: 'translate', label: '翻译' },
   { key: 'compose', label: '写信' },
+  { key: 'filter', label: '过滤' },
 ] as const;
 
 export function AiDrawer() {
@@ -35,6 +37,7 @@ export function AiDrawer() {
         {drawerTab === 'summary' && <SummaryTab />}
         {drawerTab === 'translate' && <TranslateTab />}
         {drawerTab === 'compose' && <ComposeTab />}
+        {drawerTab === 'filter' && <FilterTab />}
       </div>
     </div>
   );

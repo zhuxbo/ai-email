@@ -27,4 +27,9 @@ describe('AiDrawer', () => {
     render(<AiDrawer />);
     expect(screen.getByRole('button', { name: '发送' })).toBeInTheDocument();
   });
+  it('drawerTab=filter 渲染过滤 tab', () => {
+    useUiStore.setState({ drawerTab: 'filter' } as never);
+    render(<AiDrawer />);
+    expect(screen.getByRole('button', { name: '过滤' })).toBeInTheDocument();
+  });
 });

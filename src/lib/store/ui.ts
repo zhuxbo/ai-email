@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 
 export type Theme = 'light' | 'dark';
-export type DrawerTab = 'summary' | 'translate' | 'compose';
+export type DrawerTab = 'summary' | 'translate' | 'compose' | 'filter';
 export type MobileView = 'list' | 'detail';
 
 const STORAGE_KEY = 'ai-email-theme';
