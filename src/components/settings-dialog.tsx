@@ -1,10 +1,11 @@
 // 设置中心：左栏单一 ⚙ 入口打开此对话框，用 tab 区分各类设置。
-// 目前两类：账户（增删改邮箱）与 AI 模型（配置 + 角色指派）。各 tab 内容由独立 Panel 提供。
+// 目前四类：账户（增删改邮箱）、AI 模型（配置 + 角色指派）、黑白名单、AI 过滤规则。各 tab 内容由独立 Panel 提供。
 
 import { useState } from 'react';
 
 import { AccountsPanel } from './account-settings-dialog';
 import { AiModelsPanel } from './ai-settings-dialog';
+import { FilterRulesPanel } from './filter-rules-dialog';
 import { SenderFiltersPanel } from './sender-filters-dialog';
 
 interface Props {
@@ -16,6 +17,7 @@ const TABS = [
   { key: 'accounts', label: '账户' },
   { key: 'ai', label: 'AI 模型' },
   { key: 'filters', label: '黑白名单' },
+  { key: 'ai-filters', label: 'AI 过滤规则' },
 ] as const;
 type TabKey = (typeof TABS)[number]['key'];
 
@@ -73,6 +75,7 @@ export function SettingsDialog({ open, onClose }: Props) {
           {tab === 'accounts' && <AccountsPanel />}
           {tab === 'ai' && <AiModelsPanel />}
           {tab === 'filters' && <SenderFiltersPanel />}
+          {tab === 'ai-filters' && <FilterRulesPanel />}
         </div>
       </div>
     </div>
