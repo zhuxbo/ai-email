@@ -60,6 +60,7 @@ const enMsg: MessageHeader = {
   category: null,
   tags: [],
   bodyFetchedAt: null,
+  referencesHeader: null,
 };
 
 describe('#24 runSend 成功后刷新列表与队列', () => {

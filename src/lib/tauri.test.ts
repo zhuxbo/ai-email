@@ -33,6 +33,7 @@ function mh(
     category: null,
     tags: [],
     bodyFetchedAt: null,
+    referencesHeader: null,
   };
 }
 

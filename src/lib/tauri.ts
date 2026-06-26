@@ -18,6 +18,7 @@ import type {
   AutoReplyRule,
   AutoReplyRuleInput,
   ClassifyResult,
+  ConversationView,
   DraftResult,
   Mailbox,
   MessageBody,
@@ -203,6 +204,10 @@ export async function senderFiltersAdd(
 
 export async function senderFiltersRemove(id: string): Promise<void> {
   await invoke('sender_filters_remove', { id });
+}
+
+export async function conversationThread(messageId: string): Promise<ConversationView> {
+  return invoke('conversation_thread', { messageId });
 }
 
 // ---------------------------------------------------------------------------

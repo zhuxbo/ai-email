@@ -53,6 +53,19 @@ export interface MessageHeader {
   /** AI + user tags joined from message_tags. */
   tags: string[];
   bodyFetchedAt: string | null;
+  referencesHeader: string | null;
+}
+
+export interface ConversationMessage extends MessageHeader {
+  textPlain: string | null;
+  html: string | null;
+  isOwn: boolean;
+}
+
+export interface ConversationView {
+  threadId: string | null;
+  messages: ConversationMessage[];
+  sentSyncOk: boolean;
 }
 
 export interface AttachmentMeta {
