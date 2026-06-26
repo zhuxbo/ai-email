@@ -345,6 +345,38 @@ fn paragraph_is_repeat(para: &str, prior: &str) -> bool {
     hits as f64 / para_lines.len() as f64 >= 0.80
 }
 
+// ── 规则 → TargetActions 合成（能力默认 + 规则覆盖）──────────────────────────
+
+/// 能力默认每-target action。summarize/draft 三类全 strip；translate sig=keep、quote/repeat=strip。
+pub fn capability_defaults(role: &str) -> (Action, Action, Action) {
+    // 返回 (signature, quote, repeat)。
+    match role {
+        "translate" => (Action::Keep, Action::Strip, Action::Strip),
+        _ => (Action::Strip, Action::Strip, Action::Strip), // summary / draft
+    }
+}
+
+/// 合成最终 TargetActions：规则命中用规则，否则用能力默认。pattern 来自规则解析（已校验可编译）。
+/// `resolved_*`：None=无规则，Some=规则 action；`signature_pattern`：规则携带的原始正则字符串。
+pub fn resolve_target_actions(
+    role: &str,
+    resolved_signature: Option<Action>,
+    resolved_quote: Option<Action>,
+    resolved_repeat: Option<Action>,
+    signature_pattern: Option<&str>,
+) -> TargetActions {
+    let (def_sig, def_quote, def_repeat) = capability_defaults(role);
+    let sig_re = signature_pattern
+        .filter(|p| !p.is_empty())
+        .and_then(|p| regex::Regex::new(p).ok());
+    TargetActions {
+        signature: resolved_signature.unwrap_or(def_sig),
+        quote: resolved_quote.unwrap_or(def_quote),
+        repeat: resolved_repeat.unwrap_or(def_repeat),
+        signature_pattern: sig_re,
+    }
+}
+
 // ── 主入口 ──────────────────────────────────────────────────────────────────────
 
 /// 把一封邮件正文剥成净增量。三步管道见模块级文档。
@@ -802,5 +834,46 @@ mod pipeline_tests {
         };
         let r = extract_increment(body, &prior, false, &actions);
         assert!(r.net.contains("项目背景的说明"), "repeat=keep 时保留");
+    }
+
+    // ── 合成纯函数测试 ────────────────────────────────────────────────────────
+
+    #[test]
+    fn capability_defaults_translate_keeps_signature() {
+        assert_eq!(
+            capability_defaults("translate"),
+            (Action::Keep, Action::Strip, Action::Strip)
+        );
+        assert_eq!(
+            capability_defaults("summary"),
+            (Action::Strip, Action::Strip, Action::Strip)
+        );
+        assert_eq!(
+            capability_defaults("draft"),
+            (Action::Strip, Action::Strip, Action::Strip)
+        );
+    }
+
+    #[test]
+    fn resolve_target_actions_rule_overrides_default() {
+        // translate 默认 sig=keep，但规则 sig=strip → 规则胜。
+        let a = resolve_target_actions("translate", Some(Action::Strip), None, None, None);
+        assert_eq!(a.signature, Action::Strip);
+        assert_eq!(a.quote, Action::Strip); // 无规则 → 默认 strip
+    }
+
+    #[test]
+    fn resolve_target_actions_no_rule_uses_default() {
+        let a = resolve_target_actions("translate", None, None, None, None);
+        assert_eq!(a.signature, Action::Keep); // translate 默认保留签名
+    }
+
+    #[test]
+    fn resolve_target_actions_compiles_signature_pattern() {
+        let a = resolve_target_actions("summary", None, None, None, Some("Disclaimer"));
+        assert!(a.signature_pattern.is_some());
+        // 非法 pattern 静默退化为 None（命令侧已拒非法，此处防御）。
+        let b = resolve_target_actions("summary", None, None, None, Some("("));
+        assert!(b.signature_pattern.is_none());
     }
 }

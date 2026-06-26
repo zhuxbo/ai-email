@@ -4,8 +4,9 @@
 //!   1. Resolve the user-configured "summary" model via `ai_role_defaults`. Bail with a
 //!      clear "请先在 AI 设置中配置默认摘要模型" error if none is configured.
 //!   2. Pull the API key for that model from the OS keychain (spawn_blocking).
-//!   3. Load message header + cached body from SQLite. Bail if the body isn't cached — we want
-//!      the user to open the message first so the lazy-fetch lands the body.
+//!   3. Materialize the whole thread via `load_thread_context` (guarantees the current body is
+//!      in the DB), then take the current message's net increment (signature/quote/repeat
+//!      stripped per filter rules) via `net_body_for` to save tokens.
 //!   4. Compute `prompt_hash = sha256(system_prompt || \n---\n || user_prompt)`.
 //!   5. `ai_results::get` by `(message_id, "summary", prompt_hash)` — return immediately
 //!      on hit, with `source = "cached"`.
@@ -21,7 +22,7 @@ use uuid::Uuid;
 use crate::ai::{extract_json, prompts, AiClient, CompletionRequest, SystemBlock, UserMessage};
 use crate::db::ai_results::{self, AiResultInsert};
 use crate::db::messages::MessageHeader;
-use crate::db::{ai_role_defaults, bodies, messages, Pool};
+use crate::db::{ai_role_defaults, Pool};
 use crate::error::{AppError, AppResult};
 use crate::keychain;
 
@@ -65,16 +66,14 @@ pub async fn summarize_message(pool: &Pool, message_id: Uuid) -> AppResult<Summa
             .await
             .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
 
-    let msg = messages::get(pool, message_id)
-        .await?
+    // Plan B：物化整条会话取净增量。删去旧"未缓存即 bail"守卫——load_thread_context 保证 body 入库。
+    let ctx = crate::ai::context::load_thread_context(pool, message_id).await?;
+    let current = ctx
+        .members
+        .get(ctx.current_index)
         .ok_or_else(|| AppError::Config(format!("message {message_id} not found")))?;
-    let body = bodies::get(pool, message_id).await?.ok_or_else(|| {
-        AppError::Config(format!(
-            "正文尚未加载，请先打开邮件 (message_id={message_id})"
-        ))
-    })?;
-
-    let body_text = pick_body_for_summary(&body)?;
+    let msg = current.header.clone();
+    let body_text = net_body_for(pool, &ctx, "summary", MAX_BODY_CHARS).await?;
     let user_prompt = build_user_prompt(&msg, &body_text);
     let prompt_hash = compute_prompt_hash(prompts::SUMMARY_SYSTEM, &user_prompt);
 
@@ -152,24 +151,6 @@ pub async fn summarize_message(pool: &Pool, message_id: Uuid) -> AppResult<Summa
     })
 }
 
-fn pick_body_for_summary(body: &crate::db::bodies::MessageBody) -> AppResult<String> {
-    // Prefer text/plain — it's already the model's preferred input. HTML fallback is a
-    // last resort for messages with no plain alternative (Sprint 3+ may strip HTML tags
-    // server-side; for now we just send the raw HTML and let the model handle it).
-    let raw = body
-        .text_plain
-        .as_deref()
-        .or(body.html.as_deref())
-        .ok_or_else(|| AppError::Ai("邮件没有可摘要的正文内容".into()))?;
-    if raw.chars().count() <= MAX_BODY_CHARS {
-        return Ok(raw.to_string());
-    }
-    let truncated: String = raw.chars().take(MAX_BODY_CHARS).collect();
-    Ok(format!(
-        "{truncated}\n\n[... 邮件已截断，仅摘要前 {MAX_BODY_CHARS} 字符]"
-    ))
-}
-
 fn build_user_prompt(msg: &MessageHeader, body: &str) -> String {
     format!(
         "主题：{subject}\n发件人：{from}\n\n正文：\n{body}",
@@ -194,6 +175,68 @@ fn truncate_for_log(s: &str) -> String {
     } else {
         let cut: String = s.chars().take(limit).collect();
         format!("{cut}…")
+    }
+}
+
+/// 取当前封净增量并截断。filter_disabled=1 时跳过剥离用原文。无 thread 上下文时退化为当前封原文。
+/// 抽出来供 summarize/draft/translate 共用，每个 role 能力默认不同（capability_defaults）。
+pub(crate) async fn net_body_for(
+    pool: &Pool,
+    ctx: &crate::ai::context::ThreadContext,
+    role: &str,
+    max_chars: usize,
+) -> AppResult<String> {
+    use crate::ai::extract::{extract_increment, resolve_target_actions};
+
+    let current = ctx
+        .members
+        .get(ctx.current_index)
+        .ok_or_else(|| AppError::Ai("会话上下文缺当前封".into()))?;
+    // 当前封原文（text_plain 优先，回退 html）。
+    let raw = current
+        .text_plain
+        .clone()
+        .or_else(|| current.html.clone())
+        .ok_or_else(|| AppError::Ai("邮件没有可处理的正文内容".into()))?;
+
+    // filter_disabled 直接读 header（Task 6 已给 MessageHeader 加该字段并贯通 SELECT）——
+    // 不再 messages::get 重查该列，省一次 DB roundtrip。
+    let disabled = current.header.filter_disabled;
+
+    let net = if disabled {
+        raw
+    } else {
+        // 前序封只取 text_plain：仅-HTML 的前序封映射为 None，符合 extract_increment 契约
+        //（§2.6：物化失败/仅-HTML 的前序项为 None，行/句匹配退启发式）。前序 HTML→text 回退留后期。
+        let prior: Vec<Option<String>> = ctx.members[..ctx.current_index]
+            .iter()
+            .map(|m| m.text_plain.clone())
+            .collect();
+        let sender = current.header.from_addr.as_deref();
+        let resolved = crate::db::filter_rules::resolve_for(pool, sender).await?;
+        let actions = resolve_target_actions(
+            role,
+            resolved.signature,
+            resolved.quote,
+            resolved.repeat,
+            resolved.signature_pattern.as_deref(),
+        );
+        let result = extract_increment(&raw, &prior, current.is_own, &actions);
+        // 净增量为空（全剥）是合法的——退回原文避免喂空 prompt。
+        if result.net.trim().is_empty() {
+            raw
+        } else {
+            result.net
+        }
+    };
+
+    if net.chars().count() <= max_chars {
+        Ok(net)
+    } else {
+        let truncated: String = net.chars().take(max_chars).collect();
+        Ok(format!(
+            "{truncated}\n\n[... 已截断，仅取前 {max_chars} 字符]"
+        ))
     }
 }
 

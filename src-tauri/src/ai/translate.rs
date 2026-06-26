@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::ai::{extract_json, prompts, AiClient, CompletionRequest, SystemBlock, UserMessage};
 use crate::db::ai_results::{self, AiResultInsert};
 use crate::db::messages::MessageHeader;
-use crate::db::{ai_role_defaults, bodies, messages, Pool};
+use crate::db::{ai_role_defaults, Pool};
 use crate::error::{AppError, AppResult};
 use crate::keychain;
 
@@ -65,16 +65,15 @@ pub async fn translate_message(
             .await
             .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
 
-    let msg = messages::get(pool, message_id)
-        .await?
+    // Plan B：物化整条会话取净增量。删去旧"未缓存即 bail"守卫——load_thread_context 保证 body 入库。
+    let ctx = crate::ai::context::load_thread_context(pool, message_id).await?;
+    let current = ctx
+        .members
+        .get(ctx.current_index)
         .ok_or_else(|| AppError::Config(format!("message {message_id} not found")))?;
-    let body = bodies::get(pool, message_id).await?.ok_or_else(|| {
-        AppError::Config(format!(
-            "正文尚未加载，请先打开邮件 (message_id={message_id})"
-        ))
-    })?;
-
-    let body_text = pick_body_for_translate(&body)?;
+    let msg = current.header.clone();
+    let body_text =
+        crate::ai::summarize::net_body_for(pool, &ctx, "translate", MAX_BODY_CHARS).await?;
     let user_prompt = build_user_prompt(&msg, &body_text, &target);
     let prompt_hash = compute_prompt_hash(prompts::TRANSLATE_SYSTEM, &target, &user_prompt);
 
@@ -155,21 +154,6 @@ pub async fn translate_message(
         output_tokens: stored.output_tokens,
         cache_read_tokens: stored.cache_read_tokens,
     })
-}
-
-fn pick_body_for_translate(body: &crate::db::bodies::MessageBody) -> AppResult<String> {
-    let raw = body
-        .text_plain
-        .as_deref()
-        .or(body.html.as_deref())
-        .ok_or_else(|| AppError::Ai("邮件没有可翻译的正文内容".into()))?;
-    if raw.chars().count() <= MAX_BODY_CHARS {
-        return Ok(raw.to_string());
-    }
-    let truncated: String = raw.chars().take(MAX_BODY_CHARS).collect();
-    Ok(format!(
-        "{truncated}\n\n[... 邮件已截断，仅翻译前 {MAX_BODY_CHARS} 字符]"
-    ))
 }
 
 fn build_user_prompt(msg: &MessageHeader, body: &str, target: &str) -> String {
