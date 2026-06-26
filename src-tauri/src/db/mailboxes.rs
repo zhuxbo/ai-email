@@ -72,6 +72,26 @@ pub async fn get_by_name(pool: &Pool, account_id: Uuid, name: &str) -> AppResult
     Ok(row)
 }
 
+/// 按 special_use 定位信箱（'inbox'|'sent'|'drafts'|'trash'|'junk'）。Sent 名各异，必须靠 special_use。
+pub async fn get_by_special_use(
+    pool: &Pool,
+    account_id: Uuid,
+    special_use: &str,
+) -> AppResult<Option<Mailbox>> {
+    let row = sqlx::query_as::<_, Mailbox>(
+        r#"
+        SELECT id, account_id, name, delimiter, uid_validity, uid_next, last_synced_at, special_use
+        FROM mailboxes
+        WHERE account_id = ?1 AND special_use = ?2
+        "#,
+    )
+    .bind(account_id)
+    .bind(special_use)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
 pub async fn get(pool: &Pool, id: Uuid) -> AppResult<Option<Mailbox>> {
     let row = sqlx::query_as::<_, Mailbox>(
         r#"
