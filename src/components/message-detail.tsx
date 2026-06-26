@@ -12,7 +12,6 @@ import { save } from '@tauri-apps/plugin-dialog';
 import * as tauri from '../lib/tauri';
 import { useMailStore } from '../lib/store/mail';
 import type { AttachmentMeta, MessageHeader } from '../lib/types';
-import { formatDateTimeCN } from '../lib/utils';
 import { MessageActions } from './message-actions';
 import { ConversationThread } from './conversation-thread';
 
@@ -107,38 +106,31 @@ export function MessageDetail() {
   return (
     <section className="flex h-full flex-1 flex-col bg-slate-50 dark:bg-slate-950">
       <header className="border-b border-slate-200 bg-white px-6 py-4 dark:border-slate-700 dark:bg-slate-900">
-        <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100">
-          {msg.subject ?? '(无主题)'}
-        </h3>
-        <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs text-slate-600 dark:text-slate-400">
-          <dt className="font-medium">发件人</dt>
-          <dd className="break-all">{msg.fromAddr ?? '—'}</dd>
-          <dt className="font-medium">收件人</dt>
-          <dd className="break-all">{msg.toAddrs.join(', ') || '—'}</dd>
-          {msg.ccAddrs.length > 0 && (
-            <>
-              <dt className="font-medium">抄送</dt>
-              <dd className="break-all">{msg.ccAddrs.join(', ')}</dd>
-            </>
+        <div className="flex items-center gap-2">
+          <h3 className="min-w-0 truncate text-lg font-semibold text-slate-900 dark:text-slate-100">
+            {msg.subject ?? '(无主题)'}
+          </h3>
+          {conversation && conversation.messages.length > 1 && (
+            <span
+              className="shrink-0 rounded-full bg-slate-200 px-2 py-0.5 text-xs font-medium text-slate-600 dark:bg-slate-700 dark:text-slate-300"
+              title={`此会话共 ${String(conversation.messages.length)} 封`}
+            >
+              {conversation.messages.length}
+            </span>
           )}
-          <dt className="font-medium">时间</dt>
-          <dd>{formatDateTimeCN(msg.sentAt)}</dd>
           {msg.hasAttachment && (
-            <>
-              <dt className="font-medium">附件</dt>
-              <dd>
-                <button
-                  type="button"
-                  onClick={scrollToAttachments}
-                  className="text-amber-600 underline-offset-2 hover:underline dark:text-amber-400"
-                  title="跳到下方附件区"
-                >
-                  📎 含附件
-                </button>
-              </dd>
-            </>
+            <button
+              type="button"
+              onClick={scrollToAttachments}
+              aria-label="跳到下方附件区"
+              className="shrink-0 text-amber-600 underline-offset-2 hover:underline dark:text-amber-400"
+              title="跳到下方附件区"
+            >
+              📎
+            </button>
           )}
-        </dl>
+        </div>
+        <MessageActions />
       </header>
 
       <div className="flex-1 overflow-auto p-6">
@@ -179,7 +171,6 @@ export function MessageDetail() {
         ) : (
           <div className="text-sm text-slate-500">选择一封邮件查看会话。</div>
         )}
-        <MessageActions />
       </div>
     </section>
   );

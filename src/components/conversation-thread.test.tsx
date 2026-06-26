@@ -11,6 +11,7 @@ const view: ConversationView = {
   messages: [
     {
       id: 'm1',
+      accountId: 'acc1',
       fromAddr: 'peer@x.com',
       sentAt: '2026-06-25T10:00:00',
       snippet: '第一封预览',
@@ -20,6 +21,7 @@ const view: ConversationView = {
     } as never,
     {
       id: 'm2',
+      accountId: 'acc1',
       fromAddr: 'me@qq.com',
       sentAt: '2026-06-25T11:00:00',
       snippet: '我的回复预览',
@@ -44,6 +46,13 @@ describe('ConversationThread', () => {
   it('折叠态显示中文格式时间', () => {
     render(<ConversationThread view={view} />);
     expect(screen.getByText('2026年6月25日 10:00')).toBeInTheDocument(); // m1 折叠态
+  });
+
+  it('显示真实发件人名而非「我」', () => {
+    render(<ConversationThread view={view} />);
+    // m2 自己发的，仍显示邮箱地址、不显示「我」
+    expect(screen.getByText('me@qq.com')).toBeInTheDocument();
+    expect(screen.queryByText('我')).not.toBeInTheDocument();
   });
 
   it('点击折叠行展开正文', () => {
@@ -80,6 +89,7 @@ describe('ConversationThread', () => {
       messages: [
         {
           id: 'a',
+          accountId: 'acc1',
           fromAddr: 'a@x.com',
           sentAt: null,
           snippet: 'A预览',
@@ -89,6 +99,7 @@ describe('ConversationThread', () => {
         } as never,
         {
           id: 'b',
+          accountId: 'acc1',
           fromAddr: 'b@x.com',
           sentAt: null,
           snippet: 'B预览',
@@ -98,6 +109,7 @@ describe('ConversationThread', () => {
         } as never,
         {
           id: 'c',
+          accountId: 'acc1',
           fromAddr: 'c@x.com',
           sentAt: null,
           snippet: 'C预览',

@@ -209,7 +209,7 @@ describe('MessageDetail 附件', () => {
     const scrollSpy = vi.fn();
     Element.prototype.scrollIntoView = scrollSpy;
     render(<MessageDetail />);
-    const headerBtn = await screen.findByRole('button', { name: '📎 含附件' });
+    const headerBtn = await screen.findByRole('button', { name: '跳到下方附件区' });
     fireEvent.click(headerBtn);
     expect(scrollSpy).toHaveBeenCalled();
   });
