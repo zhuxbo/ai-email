@@ -247,6 +247,46 @@ impl ImapClient {
         })?
     }
 
+    /// 批量按 UID 取 BODY[]，drain 全流按 uid 配对。会话物化一次拉多封，省握手。超时按批量放大。
+    pub async fn uid_fetch_bodies(&mut self, uids: &[u32]) -> AppResult<Vec<(u32, Vec<u8>)>> {
+        if uids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let set = uids
+            .iter()
+            .map(|u| u.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let budget = BODY_TIMEOUT.saturating_mul(u32::try_from(uids.len()).unwrap_or(1));
+        timeout(budget, async {
+            let mut stream = self
+                .session
+                .uid_fetch(set, "(UID BODY.PEEK[])")
+                .await
+                .map_err(|e| AppError::Imap(e.to_string()))?;
+            let mut out = Vec::new();
+            while let Some(item) = stream.next().await {
+                let f = item.map_err(|e| AppError::Imap(e.to_string()))?;
+                let Some(uid) = f.uid else {
+                    tracing::warn!("UID FETCH BODY item missing UID; skipping");
+                    continue;
+                };
+                if let Some(body) = f.body() {
+                    out.push((uid, body.to_vec()));
+                }
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|_| {
+            AppError::Imap(format!(
+                "IMAP 批量 UID FETCH BODY 超时（{} 封 / {}s）",
+                uids.len(),
+                budget.as_secs()
+            ))
+        })?
+    }
+
     /// `UID STORE <uid> ±FLAGS (<flag>)`。flag 传字面 IMAP 形式（如 `"\\Seen"` / `"\\Flagged"`）。
     /// add=true → `+FLAGS`，false → `-FLAGS`。STORE 回流更新后的 FLAGS（fetch 流），全部 drain。
     /// 安全：`flag` 必须是受控的 IMAP flag 字面（如 `\\Seen` / `\\Flagged` 或 `flag_to_string` 输出），
