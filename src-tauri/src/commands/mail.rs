@@ -373,8 +373,21 @@ pub async fn messages_mark_seen_bulk(state: State<'_, AppState>, ids: Vec<Uuid>)
     Ok(())
 }
 
+/// 判断 IMAP 错误是否表示「邮件在服务端已不存在」（QQ: "Mails not exist!"）。
+/// 这类错误下移动到废纸篓无意义——邮件本就没了，应容错为「已删除」继续本地清理，不报错。
+fn imap_msg_already_gone(e: &AppError) -> bool {
+    let AppError::Imap(msg) = e else {
+        return false;
+    };
+    let lower = msg.to_lowercase();
+    lower.contains("not exist")
+        || lower.contains("no such message")
+        || lower.contains("does not exist")
+}
+
 /// 删除 = 移到废纸篓（可恢复）。move 成功即逻辑成功；本地 remove 失败仅 warn 返 Ok
 /// （服务端权威态已变，宁留极罕见幽灵行也不让用户看到删除回退）。
+/// 服务端已无此邮件（move 报 not-exist）同样视为成功，跳过移动直接本地清理。
 #[tauri::command]
 pub async fn message_delete(state: State<'_, AppState>, id: Uuid) -> AppResult<()> {
     let pool = state.pool().await?;
@@ -402,7 +415,14 @@ pub async fn message_delete(state: State<'_, AppState>, id: Uuid) -> AppResult<(
     let trash = resolve_trash_mailbox(&boxes)
         .ok_or_else(|| AppError::Imap("未找到废纸篓文件夹".to_string()))?;
     client.select(&mailbox.name).await?;
-    client.uid_move(uid, &trash).await?;
+    // 服务端已删除该邮件时 uid_move 报 "Mails not exist!"——容错为已删除，继续本地清理。
+    if let Err(e) = client.uid_move(uid, &trash).await {
+        if imap_msg_already_gone(&e) {
+            tracing::warn!(message_id = %id, error = %e, "邮件在服务端已不存在，视为已删除，跳过移动");
+        } else {
+            return Err(e);
+        }
+    }
     if let Err(e) = client.logout().await {
         tracing::warn!(error = ?e, "imap logout failed (non-fatal)");
     }
@@ -517,6 +537,33 @@ mod tests {
 
     use tokio::sync::{watch, Mutex};
     use uuid::Uuid;
+
+    use crate::error::AppError;
+
+    #[test]
+    fn imap_already_gone_detects_not_exist() {
+        let cases = [
+            "no response: Mails not exist!",
+            "NO Such message",
+            "Message does not exist",
+        ];
+        for c in cases {
+            assert!(
+                super::imap_msg_already_gone(&AppError::Imap(c.into())),
+                "should detect already-gone: {c}"
+            );
+        }
+    }
+
+    #[test]
+    fn imap_already_gone_false_for_other_errors() {
+        assert!(!super::imap_msg_already_gone(&AppError::Imap(
+            "connection timeout".into()
+        )));
+        assert!(!super::imap_msg_already_gone(&AppError::Config(
+            "not found".into()
+        )));
+    }
 
     /// 测试专用内存 SQLite pool（单连接、迁移已跑、外键启用）。
     async fn test_pool() -> crate::db::Pool {
