@@ -280,6 +280,7 @@ pub fn run() {
             commands::sender_filters::sender_filters_list,
             commands::sender_filters::sender_filters_add,
             commands::sender_filters::sender_filters_remove,
+            commands::conversation::conversation_thread,
         ])
         .build(tauri::generate_context!())
         .map_err(|e| {
