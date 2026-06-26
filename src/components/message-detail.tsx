@@ -1,11 +1,9 @@
-// Right pane: header + body (text or html with sandbox) + actions bar.
+// Right pane: header + conversation thread + actions bar.
 //
-// HTML rendering uses an iframe with `srcDoc` + a `sandbox` attribute (no allow-same-origin,
-// no allow-scripts) plus an injected Content-Security-Policy meta tag. Remote images load by
-// default (img-src allows http/https) so email images show without a click; scripts/fonts/
-// frames stay blocked by default-src 'none' + the no-scripts sandbox. Trade-off: remote images
-// include tracking pixels, which will load when a message is opened.
-// Plain-text fallback if the message has no HTML. Reply moved into the actions bar.
+// Body area renders ConversationThread (Task 13). Each ConversationMessage uses BodyView
+// internally, which renders HTML via an iframe with srcDoc + sandbox (no allow-same-origin,
+// no allow-scripts) plus an injected CSP meta tag. Remote images load by default; scripts blocked.
+// selectMessage still fetches store.body so the AI drawer (summary/translate/actions) keeps working.
 // AI 摘要/翻译/写信通过操作条触发右侧抽屉展示。
 
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -15,7 +13,7 @@ import * as tauri from '../lib/tauri';
 import { useMailStore } from '../lib/store/mail';
 import type { AttachmentMeta, MessageHeader } from '../lib/types';
 import { MessageActions } from './message-actions';
-import { BodyView } from './body-view';
+import { ConversationThread } from './conversation-thread';
 
 function selectedMessage(messages: MessageHeader[], id: string | null): MessageHeader | null {
   if (id === null) return null;
@@ -44,8 +42,9 @@ function formatSize(bytes: number): string {
 export function MessageDetail() {
   const messages = useMailStore((s) => s.messages);
   const selectedMessageId = useMailStore((s) => s.selectedMessageId);
-  const body = useMailStore((s) => s.body);
-  const loadingBody = useMailStore((s) => s.loadingBody);
+  const conversation = useMailStore((s) => s.conversation);
+  const loadingConversation = useMailStore((s) => s.loadingConversation);
+  const loadConversation = useMailStore((s) => s.loadConversation);
 
   const msg = useMemo(
     () => selectedMessage(messages, selectedMessageId),
@@ -83,6 +82,13 @@ export function MessageDetail() {
       active = false;
     };
   }, [msg?.id, msg?.hasAttachment]);
+
+  // 打开邮件时加载对话流。selectMessage 仍会单独拉 body 供 AI 抽屉使用（store.body）。
+  // 两者各自连接 IMAP 一次：message_body 拉当前邮件正文，conversation_thread 拉对话其他成员。
+  // 当前邮件的正文在 materialize_thread_bodies 里已被缓存，不会重复请求。
+  useEffect(() => {
+    if (msg?.id) void loadConversation(msg.id);
+  }, [msg?.id, loadConversation]);
 
   function scrollToAttachments() {
     attachmentsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -178,10 +184,12 @@ export function MessageDetail() {
             )}
           </div>
         )}
-        {loadingBody && <div className="text-sm text-slate-500">正在加载正文…</div>}
-        {!loadingBody && body && <BodyView html={body.html} textPlain={body.textPlain} />}
-        {!loadingBody && !body && (
-          <div className="text-sm text-slate-500">无法加载正文 — 检查左下角错误提示。</div>
+        {conversation ? (
+          <ConversationThread view={conversation} />
+        ) : loadingConversation ? (
+          <div className="text-sm text-slate-500">加载会话…</div>
+        ) : (
+          <div className="text-sm text-slate-500">选择一封邮件查看会话。</div>
         )}
         <MessageActions />
       </div>
