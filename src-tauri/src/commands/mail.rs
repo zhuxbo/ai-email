@@ -221,17 +221,21 @@ async fn fetch_raw_body(db: &db::Pool, id: Uuid) -> AppResult<Vec<u8>> {
 
 /// IMAP 取 body 并持久化到 DB，供 `message_body` 调用。
 async fn fetch_and_cache_body(db: &db::Pool, id: Uuid) -> AppResult<MessageBody> {
-    let raw = fetch_raw_body(db, id).await?;
-    let parsed = parse::parse_body(&raw);
-    let snippet = parsed
-        .text_plain
-        .as_deref()
-        .and_then(|t| parse::snippet(t, 200));
-
-    let body = bodies::upsert(db, id, &parsed).await?;
-    messages::mark_body_fetched(db, id, parsed.has_attachment, snippet).await?;
+    let msg = messages::get(db, id)
+        .await?
+        .ok_or_else(|| AppError::Config(format!("message {id} not found")))?;
+    let account = db::accounts::get(db, msg.account_id)
+        .await?
+        .ok_or_else(|| AppError::Config(format!("account {} not found", msg.account_id)))?;
+    let account_id = account.id;
+    let auth = tokio::task::spawn_blocking(move || keychain::get_auth_code(account_id))
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
+    crate::imap::materialize::materialize_one(db, &account, &auth, id).await?;
     tracing::info!(message_id = %id, "message body fetched and cached");
-    Ok(body)
+    bodies::get(db, id)
+        .await?
+        .ok_or_else(|| AppError::Config(format!("body still missing after materialize: {id}")))
 }
 
 /// 列出某邮件的附件元信息（IMAP 取原文 → 解析，不入库）。供详情页附件区展示。

@@ -10,6 +10,7 @@
 //! No STARTTLS fallback — providers we care about (QQ, 163, Gmail) all support implicit TLS.
 
 pub mod client;
+pub mod materialize;
 pub mod parse;
 pub mod sync;
 pub mod tls;
