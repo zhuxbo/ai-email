@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { ConversationMessage, ConversationView } from '../lib/types';
 import { BodyView } from './body-view';
+import { FilterPreview } from './filter-preview';
 
 function MessageBlock({ msg, defaultOpen }: { msg: ConversationMessage; defaultOpen: boolean }) {
   const [open, setOpen] = useState(defaultOpen);
@@ -32,6 +33,7 @@ function MessageBlock({ msg, defaultOpen }: { msg: ConversationMessage; defaultO
         <span>{when}</span>
       </div>
       <BodyView html={msg.html} textPlain={msg.textPlain} />
+      <FilterPreview messageId={msg.id} />
     </div>
   );
 }
