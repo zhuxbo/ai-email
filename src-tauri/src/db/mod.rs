@@ -17,6 +17,7 @@ pub mod ai_results;
 pub mod ai_role_defaults;
 pub mod auto_reply_rules;
 pub mod bodies;
+pub mod conversations;
 pub mod mailboxes;
 pub mod message_tags;
 pub mod messages;

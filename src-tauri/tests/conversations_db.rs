@@ -48,6 +48,34 @@ async fn seed_mailbox(
     id
 }
 
+async fn seed_message(
+    pool: &sqlx::SqlitePool,
+    account_id: Uuid,
+    mailbox_id: Uuid,
+    uid: i64,
+    thread: &str,
+    sent_at: &str,
+    from: &str,
+) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO messages (id, account_id, mailbox_id, imap_uid, thread_id, subject, from_addr,
+            to_addrs, cc_addrs, sent_at, flags, has_attachment)
+         VALUES (?1,?2,?3,?4,?5,'主题',?6,'[]','[]',?7,'[]',0)",
+    )
+    .bind(id)
+    .bind(account_id)
+    .bind(mailbox_id)
+    .bind(uid)
+    .bind(thread)
+    .bind(from)
+    .bind(sent_at)
+    .execute(pool)
+    .await
+    .unwrap();
+    id
+}
+
 #[tokio::test]
 async fn get_by_special_use_finds_sent() {
     let pool = mem_pool().await;
@@ -62,4 +90,59 @@ async fn get_by_special_use_finds_sent() {
         .await
         .unwrap()
         .is_none());
+}
+
+#[tokio::test]
+async fn list_conversation_spans_inbox_and_sent_ordered() {
+    let pool = mem_pool().await;
+    let acc = seed_account(&pool, "me@qq.com").await;
+    let inbox = seed_mailbox(&pool, acc, "INBOX", Some("inbox")).await;
+    let sent = seed_mailbox(&pool, acc, "Sent", Some("sent")).await;
+    let m1 = seed_message(
+        &pool,
+        acc,
+        inbox,
+        1,
+        "t1",
+        "2026-06-25T10:00:00+00:00",
+        "peer@x.com",
+    )
+    .await;
+    let m2 = seed_message(
+        &pool,
+        acc,
+        sent,
+        1,
+        "t1",
+        "2026-06-25T11:00:00+00:00",
+        "me@qq.com",
+    )
+    .await;
+    let m3 = seed_message(
+        &pool,
+        acc,
+        inbox,
+        2,
+        "t1",
+        "2026-06-25T12:00:00+00:00",
+        "peer@x.com",
+    )
+    .await;
+    seed_message(
+        &pool,
+        acc,
+        inbox,
+        3,
+        "t2",
+        "2026-06-25T13:00:00+00:00",
+        "peer@x.com",
+    )
+    .await;
+    let conv = db::conversations::list_conversation(&pool, acc, "t1")
+        .await
+        .unwrap();
+    assert_eq!(
+        conv.iter().map(|m| m.id).collect::<Vec<_>>(),
+        vec![m1, m2, m3]
+    );
 }
