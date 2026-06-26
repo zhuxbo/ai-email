@@ -54,6 +54,7 @@ export interface MessageHeader {
   tags: string[];
   bodyFetchedAt: string | null;
   referencesHeader: string | null;
+  filterDisabled: boolean;
 }
 
 export interface ConversationMessage extends MessageHeader {
@@ -250,6 +251,32 @@ export interface AutoReplyRuleInput {
   matchCategory: Category | null;
   matchPriorityCeiling: number | null;
   draftIntent: string;
+}
+
+export type FilterScope = 'global' | 'domain' | 'email';
+export type FilterTarget = 'signature' | 'quote' | 'repeat';
+export type FilterAction = 'keep' | 'strip';
+
+export interface FilterRule {
+  id: string;
+  scope: FilterScope;
+  scopeValue: string;
+  target: FilterTarget;
+  action: FilterAction;
+  pattern: string | null;
+  enabled: boolean;
+  note: string | null;
+  createdAt: string;
+}
+
+export interface FilterRuleInput {
+  scope: FilterScope;
+  scopeValue: string;
+  target: FilterTarget;
+  action: FilterAction;
+  pattern: string | null;
+  enabled: boolean;
+  note: string | null;
 }
 
 export interface SuggestedReply {

@@ -51,6 +51,8 @@ pub struct MessageHeader {
     /// Space-separated RFC 5322 References header of this message, stored verbatim.
     /// Used by the sender to extend the thread chain on reply.
     pub references_header: Option<String>,
+    /// 若为 true，AI 管道跳过签名/引用剥离，直接用原文。由用户或规则引擎设置。
+    pub filter_disabled: bool,
 }
 
 /// Owned struct passed to `insert`. Separate from `MessageHeader` so callers don't need to
@@ -85,7 +87,7 @@ const SELECT_COLUMNS: &str = r#"
     m.subject, m.from_addr, m.to_addrs, m.cc_addrs, m.sent_at, m.internal_date,
     m.flags, m.size_bytes, m.has_attachment, m.snippet, m.priority, m.category,
     COALESCE(json_group_array(t.tag) FILTER (WHERE t.tag IS NOT NULL), '[]') AS tags,
-    m.body_fetched_at, m.references_header
+    m.body_fetched_at, m.references_header, m.filter_disabled
 "#;
 
 /// `INSERT … ON CONFLICT DO NOTHING RETURNING id`. Returns `Some(id)` iff a row was

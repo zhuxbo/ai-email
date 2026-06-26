@@ -32,6 +32,7 @@ const enMsg: MessageHeader = {
   tags: [],
   bodyFetchedAt: null,
   referencesHeader: null,
+  filterDisabled: false,
 };
 
 // M2：提为模块级稳定 spy，使"未关抽屉"可断言（而非每次 getState() 返回不同实例）

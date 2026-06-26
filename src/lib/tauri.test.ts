@@ -34,6 +34,7 @@ function mh(
     tags: [],
     bodyFetchedAt: null,
     referencesHeader: null,
+    filterDisabled: false,
   };
 }
 

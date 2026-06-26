@@ -9,6 +9,7 @@ pub mod ai;
 pub mod ai_config;
 pub mod auto_reply;
 pub mod conversation;
+pub mod filter_rules;
 pub mod mail;
 pub mod sender_filters;
 pub mod system;

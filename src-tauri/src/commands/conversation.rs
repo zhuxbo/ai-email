@@ -75,6 +75,7 @@ mod tests {
             tags: vec![],
             body_fetched_at: None,
             references_header: None,
+            filter_disabled: false,
         }
     }
     #[test]

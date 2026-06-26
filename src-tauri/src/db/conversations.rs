@@ -18,7 +18,7 @@ pub async fn list_conversation(
             m.subject, m.from_addr, m.to_addrs, m.cc_addrs, m.sent_at, m.internal_date,
             m.flags, m.size_bytes, m.has_attachment, m.snippet, m.priority, m.category,
             COALESCE(json_group_array(t.tag) FILTER (WHERE t.tag IS NOT NULL), '[]') AS tags,
-            m.body_fetched_at, m.references_header
+            m.body_fetched_at, m.references_header, m.filter_disabled
         FROM messages m
         LEFT JOIN message_tags t ON t.message_id = m.id
         WHERE m.account_id = ?1 AND m.thread_id = ?2

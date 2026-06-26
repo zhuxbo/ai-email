@@ -20,6 +20,8 @@ import type {
   ClassifyResult,
   ConversationView,
   DraftResult,
+  FilterRule,
+  FilterRuleInput,
   Mailbox,
   MessageBody,
   MessageHeader,
@@ -208,6 +210,26 @@ export async function senderFiltersRemove(id: string): Promise<void> {
 
 export async function conversationThread(messageId: string): Promise<ConversationView> {
   return invoke('conversation_thread', { messageId });
+}
+
+export async function filterRulesList(): Promise<FilterRule[]> {
+  return invoke('filter_rules_list');
+}
+
+export async function filterRuleAdd(input: FilterRuleInput): Promise<FilterRule> {
+  return invoke('filter_rule_add', { input });
+}
+
+export async function filterRuleUpdate(rule: FilterRule): Promise<void> {
+  await invoke('filter_rule_update', { rule });
+}
+
+export async function filterRuleRemove(id: string): Promise<void> {
+  await invoke('filter_rule_remove', { id });
+}
+
+export async function filterRuleSetEnabled(id: string, enabled: boolean): Promise<void> {
+  await invoke('filter_rule_set_enabled', { id, enabled });
 }
 
 // ---------------------------------------------------------------------------

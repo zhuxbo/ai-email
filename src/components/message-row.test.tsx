@@ -27,6 +27,7 @@ const m: MessageHeader = {
   tags: [],
   bodyFetchedAt: null,
   referencesHeader: null,
+  filterDisabled: false,
 };
 
 describe('MessageRow', () => {
@@ -77,6 +78,7 @@ describe('MessageRow 星标指示', () => {
     tags: [],
     bodyFetchedAt: null,
     referencesHeader: null,
+    filterDisabled: false,
   };
   it('\\Flagged 时渲染星标', () => {
     render(<MessageRow m={{ ...base, flags: ['\\Flagged'] }} active={false} onClick={vi.fn()} />);
