@@ -428,6 +428,63 @@ pub async fn sync_mailbox(
     Ok(report)
 }
 
+const SENT_SYNC_TTL: time::Duration = time::Duration::minutes(5);
+
+/// 纯函数：Sent 上次同步时间 + 现在 → 是否需补同步。
+pub(crate) fn sent_sync_due(
+    last_synced_at: Option<time::OffsetDateTime>,
+    now: time::OffsetDateTime,
+) -> bool {
+    match last_synced_at {
+        None => true,
+        Some(t) => now - t >= SENT_SYNC_TTL,
+    }
+}
+
+/// 按需补同步该账户 Sent（5min 节流：每账户每 5min 至多一次整箱增量同步）。内部自连。失败由调用方 warn-not-fail。
+pub async fn ensure_sent_synced(
+    pool: &Pool,
+    account: &Account,
+    auth_code: &SecretString,
+) -> AppResult<()> {
+    let Some(sent) = crate::db::mailboxes::get_by_special_use(pool, account.id, "sent").await?
+    else {
+        tracing::debug!(
+            account = %account.id,
+            "no Sent mailbox known yet; skip ensure_sent_synced"
+        );
+        return Ok(());
+    };
+    if !sent_sync_due(sent.last_synced_at, time::OffsetDateTime::now_utc()) {
+        return Ok(());
+    }
+    sync_mailbox(pool, account, auth_code, &sent.name).await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod ensure_sent_tests {
+    use super::*;
+    use time::{Duration, OffsetDateTime};
+
+    #[test]
+    fn due_when_never_synced() {
+        assert!(sent_sync_due(None, OffsetDateTime::UNIX_EPOCH));
+    }
+
+    #[test]
+    fn due_when_older_than_5min() {
+        let now = OffsetDateTime::UNIX_EPOCH + Duration::hours(1);
+        assert!(sent_sync_due(Some(now - Duration::minutes(6)), now));
+    }
+
+    #[test]
+    fn not_due_when_recent() {
+        let now = OffsetDateTime::UNIX_EPOCH + Duration::hours(1);
+        assert!(!sent_sync_due(Some(now - Duration::minutes(2)), now));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
