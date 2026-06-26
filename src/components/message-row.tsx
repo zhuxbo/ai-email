@@ -1,26 +1,7 @@
 import { useMailStore } from '../lib/store/mail';
 import type { Category, MessageHeader } from '../lib/types';
+import { formatDateTimeCN } from '../lib/utils';
 import { colorForSeed } from './ui/avatar';
-
-function relativeDate(iso: string | null): string {
-  if (!iso) return '';
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return '';
-  const now = new Date();
-  const sameDay =
-    date.getFullYear() === now.getFullYear() &&
-    date.getMonth() === now.getMonth() &&
-    date.getDate() === now.getDate();
-  if (sameDay) {
-    return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
-  }
-  const sameYear = date.getFullYear() === now.getFullYear();
-  return date.toLocaleDateString(undefined, {
-    year: sameYear ? undefined : '2-digit',
-    month: '2-digit',
-    day: '2-digit',
-  });
-}
 
 function isUnread(m: MessageHeader): boolean {
   return !m.flags.includes('\\Seen');
@@ -127,7 +108,9 @@ export function MessageRow({
                 ★
               </span>
             )}
-            <span className="text-xs text-slate-400">{relativeDate(m.sentAt)}</span>
+            <span className="whitespace-nowrap text-xs text-slate-400">
+              {formatDateTimeCN(m.sentAt)}
+            </span>
           </span>
         </div>
         <div className="flex items-center gap-2">

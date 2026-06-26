@@ -7,6 +7,17 @@ export function errMsg(e: unknown): string {
   return JSON.stringify(e);
 }
 
+// 统一的中文日期时间格式：2026年6月26日 15:49（本地时区）。空/非法返回空串。
+// 列表、会话流、详情头部统一用它，消除此前 ISO 串 / toLocaleString / 相对时间三种并存。
+export function formatDateTimeCN(iso: string | null): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mi = String(d.getMinutes()).padStart(2, '0');
+  return `${String(d.getFullYear())}年${String(d.getMonth() + 1)}月${String(d.getDate())}日 ${hh}:${mi}`;
+}
+
 // IMAP modified UTF-7（RFC 3501 §5.1.3）解码。IMAP 文件夹名用它编码非 ASCII：ASCII 原样，
 // `&...-` 段是 modified base64（用 , 代替 /）编码的 UTF-16BE，`&-` 表示字面 `&`。QQ 等服务器
 // 据此编码中文文件夹名（"其他文件夹" → "&UXZO1mWHTvZZOQ-"）。后端存 raw（IMAP SELECT 需要原始

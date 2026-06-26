@@ -12,25 +12,13 @@ import { save } from '@tauri-apps/plugin-dialog';
 import * as tauri from '../lib/tauri';
 import { useMailStore } from '../lib/store/mail';
 import type { AttachmentMeta, MessageHeader } from '../lib/types';
+import { formatDateTimeCN } from '../lib/utils';
 import { MessageActions } from './message-actions';
 import { ConversationThread } from './conversation-thread';
 
 function selectedMessage(messages: MessageHeader[], id: string | null): MessageHeader | null {
   if (id === null) return null;
   return messages.find((m) => m.id === id) ?? null;
-}
-
-function formatDateTime(iso: string | null): string {
-  if (!iso) return '';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '';
-  return d.toLocaleString(undefined, {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
 }
 
 function formatSize(bytes: number): string {
@@ -134,7 +122,7 @@ export function MessageDetail() {
             </>
           )}
           <dt className="font-medium">时间</dt>
-          <dd>{formatDateTime(msg.sentAt)}</dd>
+          <dd>{formatDateTimeCN(msg.sentAt)}</dd>
           {msg.hasAttachment && (
             <>
               <dt className="font-medium">附件</dt>

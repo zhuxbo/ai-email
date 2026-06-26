@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { decodeModifiedUtf7, errMsg } from './utils';
+import { decodeModifiedUtf7, errMsg, formatDateTimeCN } from './utils';
 
 describe('errMsg', () => {
   it('string 原样', () => {
@@ -34,5 +34,24 @@ describe('decodeModifiedUtf7', () => {
 
   it('空串返回空串', () => {
     expect(decodeModifiedUtf7('')).toBe('');
+  });
+});
+
+describe('formatDateTimeCN', () => {
+  // 无时区偏移的串按本地时区解析，读取也用本地时区 → 断言与运行时区无关。
+  it('格式化为中文年月日时分', () => {
+    expect(formatDateTimeCN('2026-06-26T15:49:00')).toBe('2026年6月26日 15:49');
+  });
+
+  it('月日不补零、时分补零', () => {
+    expect(formatDateTimeCN('2026-01-05T09:05:00')).toBe('2026年1月5日 09:05');
+  });
+
+  it('null 返回空串', () => {
+    expect(formatDateTimeCN(null)).toBe('');
+  });
+
+  it('非法日期返回空串', () => {
+    expect(formatDateTimeCN('not-a-date')).toBe('');
   });
 });
