@@ -22,6 +22,7 @@ import type {
   DraftResult,
   FilterRule,
   FilterRuleInput,
+  FoldedItem,
   Mailbox,
   MessageBody,
   MessageFilterPreview,
@@ -36,6 +37,7 @@ import type {
   TextTranslation,
   TranslateResult,
 } from './types';
+import { isSingleFold } from './types';
 
 export async function accountsList(): Promise<Account[]> {
   return invoke('accounts_list');
@@ -331,18 +333,30 @@ export async function onAutoReplyUpdated(
  *    行为；internalDate 投产后自动升级为服务器到达时间。两者皆 null 排末尾。
  *    主键并列时以 imapUid 降序为稳定次级键，保证排序结果确定。
  */
-export function mergeBySentAt(lists: MessageHeader[][]): MessageHeader[] {
+export function mergeBySentAt<T extends MessageHeader>(lists: T[][]): T[] {
   const flat = lists.flat();
 
   /** 到达键：internalDate 可用时优先，否则回落 sentAt（Sprint 1.4 前 internalDate 恒 null） */
   const arrivalKey = (m: MessageHeader): string | null => m.internalDate ?? m.sentAt;
 
+  /**
+   * 是否参与 rfcMessageId 去重。
+   * 规则：纯 MessageHeader（无 foldKind）或 foldKind==='single' 的折叠代表参与去重；
+   * 折叠组（foldKind 存在且非 single）直接保留，不做跨组去重（避免丢 count）。
+   */
+  const eligibleForDedup = (m: MessageHeader): boolean => !('foldKind' in m) || isSingleFold(m);
+
   // #55: 按 rfcMessageId 去重，保留到达键最早的副本
-  const seen = new Map<string, MessageHeader>();
-  const deduped: MessageHeader[] = [];
+  const seen = new Map<string, T>();
+  const deduped: T[] = [];
   for (const msg of flat) {
     if (msg.rfcMessageId === null || msg.rfcMessageId === '') {
       // 空串来自畸形 Message-ID: <> 头，视同无 ID，不参与去重
+      deduped.push(msg);
+      continue;
+    }
+    // 折叠组不参与去重，直接保留
+    if (!eligibleForDedup(msg)) {
       deduped.push(msg);
       continue;
     }
@@ -377,29 +391,75 @@ export function mergeBySentAt(lists: MessageHeader[][]): MessageHeader[] {
 }
 
 export interface UnifiedInboxResult {
-  messages: MessageHeader[];
+  messages: FoldedItem[];
   /** 加载失败的账户：accountId → 错误信息。allSettled 下单账户失败不丢，集中上报供 UI 提示。 */
   errors: Record<string, string>;
 }
 
-/** 前端聚合。accountId 省略/null=全部。P2 不分页（每账户前 50）。单账户失败只标记该账户、不整体 reject。 */
+/** 后端折叠查询原始返回形态（每账户命令的 raw shape）。 */
+interface FoldedRaw {
+  representative: MessageHeader;
+  foldKind: FoldedItem['foldKind'];
+  foldKey: string;
+  count: number;
+  hasUnread: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// 折叠列表命令绑定
+// ---------------------------------------------------------------------------
+
+/** 按信箱取折叠列表（信箱 id + 条数上限）。 */
+export async function mailboxFolded(mailboxId: string, limit = 100): Promise<FoldedItem[]> {
+  const raw = await invoke<FoldedRaw[]>('mailbox_folded', { mailboxId, limit });
+  return raw.map((r) => ({
+    ...r.representative,
+    foldKind: r.foldKind,
+    foldKey: r.foldKey,
+    count: r.count,
+    hasUnread: r.hasUnread,
+  }));
+}
+
+/** 按账户取收件箱折叠列表（account id + 条数上限）。 */
+export async function accountInboxFolded(accountId: string, limit = 100): Promise<FoldedItem[]> {
+  const raw = await invoke<FoldedRaw[]>('account_inbox_folded', { accountId, limit });
+  return raw.map((r) => ({
+    ...r.representative,
+    foldKind: r.foldKind,
+    foldKey: r.foldKey,
+    count: r.count,
+    hasUnread: r.hasUnread,
+  }));
+}
+
+/** 将信箱内所有邮件标为已读（服务端操作）。 */
+export async function mailboxMarkSeen(mailboxId: string): Promise<void> {
+  await invoke('mailbox_mark_seen', { mailboxId });
+}
+
+/** 将账户收件箱所有邮件标为已读（服务端操作）。 */
+export async function accountInboxMarkSeen(accountId: string): Promise<void> {
+  await invoke('account_inbox_mark_seen', { accountId });
+}
+
+/** 按发件人地址取会话线索列表。 */
+export async function senderGroupThread(
+  accountId: string,
+  fromAddr: string,
+): Promise<ConversationView> {
+  return invoke('sender_group_thread', { accountId, fromAddr });
+}
+
+/** 前端聚合。accountId 省略/null=全部。每账户上限 100 条。单账户失败只标记该账户、不整体 reject。 */
 export async function unifiedInbox(opts: {
   accountId?: string | null;
 }): Promise<UnifiedInboxResult> {
   const accounts = await accountsList();
   const targets =
     opts.accountId == null ? accounts : accounts.filter((a) => a.id === opts.accountId);
-  const settled = await Promise.allSettled(
-    targets.map(async (acc) => {
-      // 默认聚合「收到的」邮件：收件箱 + 自定义文件夹；排除 已发送/草稿/垃圾/废纸篓。
-      const boxes = (await mailboxesList(acc.id)).filter(
-        (m) => m.specialUse === null || m.specialUse === 'inbox',
-      );
-      const lists = await Promise.all(boxes.map((m) => messagesList(m.id, 50, 0)));
-      return lists.flat();
-    }),
-  );
-  const lists: MessageHeader[][] = [];
+  const settled = await Promise.allSettled(targets.map((acc) => accountInboxFolded(acc.id, 100)));
+  const lists: FoldedItem[][] = [];
   const errors: Record<string, string> = {};
   settled.forEach((r, i) => {
     const acc = targets[i];

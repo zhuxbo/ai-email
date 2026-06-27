@@ -1,13 +1,50 @@
 // src/lib/store/mail.test.ts
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+
+/**
+ * 最小 FoldedItem mock（foldKind:'single' 代表单封）。
+ * 用 vi.hoisted 提升，确保 vi.mock 工厂函数（被 hoist 到文件顶部）里可安全调用。
+ */
+const { mkFoldedMock } = vi.hoisted(() => {
+  const mkFoldedMock = (id: string, accountId = 'a1') => ({
+    id,
+    accountId,
+    mailboxId: 'm',
+    imapUid: 1,
+    rfcMessageId: null,
+    threadId: null,
+    subject: id,
+    fromAddr: null,
+    toAddrs: [],
+    ccAddrs: [],
+    sentAt: null,
+    internalDate: null,
+    flags: [],
+    sizeBytes: null,
+    hasAttachment: false,
+    snippet: null,
+    priority: null,
+    category: null,
+    tags: [],
+    bodyFetchedAt: null,
+    referencesHeader: null,
+    filterDisabled: false,
+    categoryLocked: false,
+    foldKind: 'single' as const,
+    foldKey: `msg:${id}`,
+    count: 1,
+    hasUnread: false,
+  });
+  return { mkFoldedMock };
+});
+
 import { useMailStore } from './mail';
 import { useComposeStore } from './compose';
 import type { ConversationView, MessageHeader } from '../types';
+
 vi.mock('../tauri', () => ({
   accountsList: vi.fn().mockResolvedValue([{ id: 'a1' }, { id: 'a2' }]),
-  unifiedInbox: vi
-    .fn()
-    .mockResolvedValue({ messages: [{ id: 'm1', accountId: 'a1' }], errors: {} }),
+  unifiedInbox: vi.fn().mockResolvedValue({ messages: [mkFoldedMock('m1', 'a1')], errors: {} }),
   inboxSync: vi.fn().mockResolvedValue({ newMessageCount: 0, totalInMailbox: 0 }),
   mailboxSync: vi.fn().mockResolvedValue({ newMessageCount: 0, totalInMailbox: 5 }),
   messageBody: vi

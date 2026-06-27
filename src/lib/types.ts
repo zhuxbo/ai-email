@@ -59,6 +59,20 @@ export interface MessageHeader {
   categoryLocked: boolean;
 }
 
+export type FoldKind = 'single' | 'thread' | 'sender';
+
+export interface FoldedItem extends MessageHeader {
+  foldKind: FoldKind;
+  foldKey: string;
+  count: number;
+  hasUnread: boolean;
+}
+
+/** 类型守卫：判断 m 是 FoldedItem 且 foldKind === 'single'（单封代表，参与 rfc 去重）。 */
+export function isSingleFold(m: MessageHeader): m is FoldedItem {
+  return 'foldKind' in m && (m as FoldedItem).foldKind === 'single';
+}
+
 export interface ConversationMessage extends MessageHeader {
   textPlain: string | null;
   html: string | null;

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { mergeBySentAt } from './tauri';
-import type { MessageHeader } from './types';
+import type { FoldedItem, MessageHeader } from './types';
 
 function mh(
   id: string,
@@ -38,6 +38,69 @@ function mh(
     categoryLocked: false,
   };
 }
+
+// ── FoldedItem helper ─────────────────────────────────────────────────────────
+function mkFolded(opts: {
+  id: string;
+  rfcMessageId: string | null;
+  foldKind: 'single' | 'thread' | 'sender';
+  foldKey: string;
+  count: number;
+  hasUnread: boolean;
+}): FoldedItem {
+  return {
+    id: opts.id,
+    accountId: 'a',
+    mailboxId: 'm',
+    imapUid: 1,
+    rfcMessageId: opts.rfcMessageId,
+    threadId: null,
+    subject: opts.id,
+    fromAddr: null,
+    toAddrs: [],
+    ccAddrs: [],
+    sentAt: '2026-06-01T10:00:00Z',
+    internalDate: '2026-06-01T10:00:00Z',
+    flags: [],
+    sizeBytes: null,
+    hasAttachment: false,
+    snippet: null,
+    priority: null,
+    category: null,
+    tags: [],
+    bodyFetchedAt: null,
+    referencesHeader: null,
+    filterDisabled: false,
+    categoryLocked: false,
+    foldKind: opts.foldKind,
+    foldKey: opts.foldKey,
+    count: opts.count,
+    hasUnread: opts.hasUnread,
+  };
+}
+
+describe('mergeBySentAt FoldedItem 去重守卫', () => {
+  it('mergeBySentAt 跨账户仅对 single 去重，折叠组不去重', () => {
+    // 两个 rfcMessageId 相同：a=single(count1)、b=thread(count3)
+    const a = mkFolded({
+      id: '1',
+      rfcMessageId: 'R',
+      foldKind: 'single',
+      foldKey: 'msg:1',
+      count: 1,
+      hasUnread: false,
+    });
+    const b = mkFolded({
+      id: '2',
+      rfcMessageId: 'R',
+      foldKind: 'thread',
+      foldKey: 'thread:T',
+      count: 3,
+      hasUnread: true,
+    });
+    expect(mergeBySentAt([[a], [b]])).toHaveLength(2); // 同 rfc 但非 single → 不去重
+  });
+});
 
 describe('mergeBySentAt', () => {
   it('internalDate 降序、null 末尾', () => {
