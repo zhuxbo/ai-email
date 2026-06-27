@@ -126,10 +126,11 @@ pub async fn account_inbox_folded(
     account_id: Uuid,
     limit: i64,
 ) -> AppResult<Vec<FoldedItem>> {
-    let sql = folded_sql(
+    let sql = folded_sql(&format!(
         "m.mailbox_id IN (SELECT id FROM mailboxes \
-         WHERE account_id = ?1 AND (special_use IS NULL OR special_use = 'inbox'))",
-    );
+         WHERE account_id = ?1 AND {})",
+        crate::db::INBOX_KIND_PRED
+    ));
     let rows = sqlx::query_as::<_, FoldedRow>(&sql)
         .bind(account_id)
         .bind(limit)

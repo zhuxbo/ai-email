@@ -37,6 +37,11 @@ use crate::error::AppResult;
 /// Shared connection pool. Cloning is cheap (it's an `Arc`).
 pub type Pool = sqlx::SqlitePool;
 
+/// 收件箱类信箱谓词（对 `mailboxes` 行）：`special_use IS NULL`（普通收件箱）或 `'inbox'`。
+/// 排除 Sent/Drafts/Trash 等。`folded`（折叠列表）与 `messages`（全部已读）共享，
+/// 保证「收件箱范围」口径一致。用在子查询里时以 `mailboxes` 列名直接出现，无表别名。
+pub(crate) const INBOX_KIND_PRED: &str = "(special_use IS NULL OR special_use = 'inbox')";
+
 /// Embeds every `.sql` file under `migrations/` at compile time, then applies any that the
 /// target DB hasn't seen. Idempotent.
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");

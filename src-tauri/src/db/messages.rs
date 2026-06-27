@@ -294,6 +294,85 @@ pub async fn update_flags_by_uid(
     Ok(())
 }
 
+/// 给范围内所有消息的 flags 批量加 `\Seen`（去重，已读的不重复加，幂等）。
+///
+/// 复用 `update_flag_atomic` add 分支的 json 写法（`json_each(flags) UNION SELECT '\Seen'`），
+/// 在单条 SQL 内对 `scope_pred` 命中的每行各自去重合并。`scope_pred` 用 `messages` 列名
+/// （无表别名）。
+///
+/// **纯本地、不打 IMAP**：对齐前端 markAllSeen「乐观本地 + 失败 reload」语义，避免 N 封逐个连
+/// IMAP（账户收件箱可能上千封）。已知局限：服务端 \Seen 未写，下次 sync 可能把未读拉回。
+async fn mark_seen_where(pool: &Pool, scope_pred: &str, scope_id: Uuid) -> AppResult<()> {
+    let sql = format!(
+        r#"
+        UPDATE messages
+        SET flags = (
+            SELECT json_group_array(value)
+            FROM (
+                SELECT value FROM json_each(flags)
+                UNION SELECT '\Seen'
+            )
+        )
+        WHERE {scope_pred}
+        "#
+    );
+    sqlx::query(&sql).bind(scope_id).execute(pool).await?;
+    Ok(())
+}
+
+/// 单信箱「全部已读」：把该信箱内所有消息标 `\Seen`（纯本地，见 [`mark_seen_where`]）。
+pub async fn mailbox_mark_seen(pool: &Pool, mailbox_id: Uuid) -> AppResult<()> {
+    mark_seen_where(pool, "mailbox_id = ?1", mailbox_id).await
+}
+
+/// 账户级收件箱「全部已读」：把账户下所有 inbox 类信箱（`special_use IS NULL` 或 `'inbox'`，
+/// 排除 Sent 等）内的消息标 `\Seen`（纯本地，见 [`mark_seen_where`]）。
+/// scope 谓词与折叠列表共享 [`crate::db::INBOX_KIND_PRED`]，保证「收件箱范围」口径一致。
+pub async fn account_inbox_mark_seen(pool: &Pool, account_id: Uuid) -> AppResult<()> {
+    let pred = format!(
+        "mailbox_id IN (SELECT id FROM mailboxes WHERE account_id = ?1 AND {})",
+        crate::db::INBOX_KIND_PRED
+    );
+    mark_seen_where(pool, &pred, account_id).await
+}
+
+/// 同发件人组成员：收件箱范围内、`from_addr = ?` 且 `category IN ('notification','promotion')`
+/// 的消息头，按 `sent_at DESC, imap_uid DESC` 取最多 `limit` 条。
+///
+/// 供 `sender_group_thread` 命令选成员（与折叠列表的 sender 组同口径：仅通知/推广类按发件人
+/// 聚合）。纯 db 查询，不打 IMAP，故可单测。
+pub async fn sender_group_members(
+    pool: &Pool,
+    account_id: Uuid,
+    from_addr: &str,
+    limit: i64,
+) -> AppResult<Vec<MessageHeader>> {
+    let sql = format!(
+        r#"
+        SELECT {SELECT_COLUMNS}
+        FROM messages m
+        LEFT JOIN message_tags t ON t.message_id = m.id
+        WHERE m.account_id = ?1
+          AND m.from_addr = ?2
+          AND m.category IN ('notification','promotion')
+          AND m.mailbox_id IN (
+              SELECT id FROM mailboxes WHERE account_id = ?1 AND {}
+          )
+        GROUP BY m.id
+        ORDER BY m.sent_at DESC, m.imap_uid DESC
+        LIMIT ?3
+        "#,
+        crate::db::INBOX_KIND_PRED
+    );
+    let rows = sqlx::query_as::<_, MessageHeader>(&sql)
+        .bind(account_id)
+        .bind(from_addr)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows)
+}
+
 /// 删除本地消息行。bodies 等子表对 messages 均 ON DELETE CASCADE + 连接启用 foreign_keys，
 /// 故单删 messages 即级联清理，无需显式删 body。
 pub async fn remove(pool: &Pool, id: Uuid) -> AppResult<()> {
@@ -616,6 +695,133 @@ mod tests {
             .unwrap();
         assert_eq!(set_category_locked(&pool, id, "work").await.unwrap(), 0);
     }
+
+    /// 读取一封消息的 flags 数组（测试辅助）。
+    async fn flags_of(pool: &Pool, id: Uuid) -> Vec<String> {
+        let row: (String,) = sqlx::query_as("SELECT flags FROM messages WHERE id = ?1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        serde_json::from_str(&row.0).unwrap()
+    }
+
+    // 批量已读（账户级收件箱）：两封未读 → 两封都含 \Seen；再调一次幂等不重复加。
+    #[tokio::test]
+    async fn account_inbox_mark_seen_marks_and_is_idempotent() {
+        use crate::db::test_seed::*;
+        let pool = crate::db::test_pool().await;
+        let acc = seed_account(&pool).await;
+        let inbox = seed_mailbox(&pool, acc, "INBOX", None).await;
+        let a = seed_msg(&pool, acc, inbox, 1, "p@x.com", None, None, false, "[]").await;
+        let b = seed_msg(&pool, acc, inbox, 2, "q@x.com", None, None, false, "[]").await;
+
+        account_inbox_mark_seen(&pool, acc).await.unwrap();
+        assert_eq!(flags_of(&pool, a).await, vec!["\\Seen"]);
+        assert_eq!(flags_of(&pool, b).await, vec!["\\Seen"]);
+
+        // 幂等：再调一次不重复加。
+        account_inbox_mark_seen(&pool, acc).await.unwrap();
+        assert_eq!(flags_of(&pool, a).await, vec!["\\Seen"]);
+        assert_eq!(flags_of(&pool, b).await, vec!["\\Seen"]);
+    }
+
+    // 账户级 mark_seen 不碰 Sent（special_use='sent'）。
+    #[tokio::test]
+    async fn account_inbox_mark_seen_excludes_sent() {
+        use crate::db::test_seed::*;
+        let pool = crate::db::test_pool().await;
+        let acc = seed_account(&pool).await;
+        let inbox = seed_mailbox(&pool, acc, "INBOX", None).await;
+        let sent = seed_mailbox(&pool, acc, "Sent", Some("sent")).await;
+        let inbox_msg = seed_msg(&pool, acc, inbox, 1, "p@x.com", None, None, false, "[]").await;
+        let sent_msg = seed_msg(&pool, acc, sent, 2, "me@x.com", None, None, false, "[]").await;
+
+        account_inbox_mark_seen(&pool, acc).await.unwrap();
+        assert_eq!(flags_of(&pool, inbox_msg).await, vec!["\\Seen"]);
+        assert!(
+            flags_of(&pool, sent_msg).await.is_empty(),
+            "Sent 不应被标已读"
+        );
+    }
+
+    // 单信箱 mark_seen：只标该信箱内的消息。
+    #[tokio::test]
+    async fn mailbox_mark_seen_scopes_to_one_mailbox() {
+        use crate::db::test_seed::*;
+        let pool = crate::db::test_pool().await;
+        let acc = seed_account(&pool).await;
+        let inbox = seed_mailbox(&pool, acc, "INBOX", None).await;
+        let other = seed_mailbox(&pool, acc, "Other", None).await;
+        let in_msg = seed_msg(&pool, acc, inbox, 1, "p@x.com", None, None, false, "[]").await;
+        let other_msg = seed_msg(&pool, acc, other, 2, "q@x.com", None, None, false, "[]").await;
+
+        mailbox_mark_seen(&pool, inbox).await.unwrap();
+        assert_eq!(flags_of(&pool, in_msg).await, vec!["\\Seen"]);
+        assert!(
+            flags_of(&pool, other_msg).await.is_empty(),
+            "别的信箱不应被标"
+        );
+    }
+
+    // sender_group_members：同发件人 3 封 notification → 返回 3 条、按 sent_at DESC、limit 生效、
+    // 只含 notification/promotion 类别。
+    #[tokio::test]
+    async fn sender_group_members_filters_and_orders() {
+        use crate::db::test_seed::*;
+        let pool = crate::db::test_pool().await;
+        let acc = seed_account(&pool).await;
+        let inbox = seed_mailbox(&pool, acc, "INBOX", None).await;
+        let m1 = seed_msg(&pool, acc, inbox, 1, "ad@x.com", None, NOTIF, false, "[]").await;
+        let m2 = seed_msg(&pool, acc, inbox, 2, "ad@x.com", None, NOTIF, false, "[]").await;
+        let m3 = seed_msg(&pool, acc, inbox, 3, "ad@x.com", None, NOTIF, false, "[]").await;
+        // 干扰项：同发件人但 personal → 不应入组。
+        let _personal = seed_msg(
+            &pool, acc, inbox, 4, "ad@x.com", None, PERSONAL, false, "[]",
+        )
+        .await;
+        // 干扰项：别的发件人 notification → 不应入组。
+        let _other = seed_msg(&pool, acc, inbox, 5, "zz@x.com", None, NOTIF, false, "[]").await;
+
+        let got = sender_group_members(&pool, acc, "ad@x.com", 50)
+            .await
+            .unwrap();
+        assert_eq!(got.len(), 3, "{got:#?}");
+        // sent_at DESC：uid 越大越新 → m3, m2, m1
+        assert_eq!(
+            got.iter().map(|h| h.id).collect::<Vec<_>>(),
+            vec![m3, m2, m1]
+        );
+
+        // limit 生效：取最新 2 条。
+        let capped = sender_group_members(&pool, acc, "ad@x.com", 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            capped.iter().map(|h| h.id).collect::<Vec<_>>(),
+            vec![m3, m2]
+        );
+    }
+
+    // sender_group_members 只在收件箱范围内选（不含 Sent）。
+    #[tokio::test]
+    async fn sender_group_members_excludes_sent() {
+        use crate::db::test_seed::*;
+        let pool = crate::db::test_pool().await;
+        let acc = seed_account(&pool).await;
+        let inbox = seed_mailbox(&pool, acc, "INBOX", None).await;
+        let sent = seed_mailbox(&pool, acc, "Sent", Some("sent")).await;
+        let in_msg = seed_msg(&pool, acc, inbox, 1, "ad@x.com", None, NOTIF, false, "[]").await;
+        let _sent_msg = seed_msg(&pool, acc, sent, 2, "ad@x.com", None, NOTIF, false, "[]").await;
+
+        let got = sender_group_members(&pool, acc, "ad@x.com", 50)
+            .await
+            .unwrap();
+        assert_eq!(got.iter().map(|h| h.id).collect::<Vec<_>>(), vec![in_msg]);
+    }
+
+    const NOTIF: Option<&str> = Some("notification");
+    const PERSONAL: Option<&str> = Some("personal");
 
     #[tokio::test]
     async fn reclassify_candidates_excludes_locked_and_unclassified() {

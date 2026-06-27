@@ -373,6 +373,45 @@ pub async fn messages_mark_seen_bulk(state: State<'_, AppState>, ids: Vec<Uuid>)
     Ok(())
 }
 
+// ── 折叠列表（B1: db::folded） ────────────────────────────────────────────
+
+/// 单信箱折叠列表：scope = 该信箱内的消息，折成 thread / sender / single 行。
+#[tauri::command]
+pub async fn mailbox_folded(
+    state: State<'_, AppState>,
+    mailbox_id: Uuid,
+    limit: i64,
+) -> AppResult<Vec<db::folded::FoldedItem>> {
+    db::folded::mailbox_folded(state.pool().await?, mailbox_id, limit).await
+}
+
+/// 账户级收件箱折叠列表：汇聚账户下所有 inbox 类信箱（排除 Sent）。
+#[tauri::command]
+pub async fn account_inbox_folded(
+    state: State<'_, AppState>,
+    account_id: Uuid,
+    limit: i64,
+) -> AppResult<Vec<db::folded::FoldedItem>> {
+    db::folded::account_inbox_folded(state.pool().await?, account_id, limit).await
+}
+
+// ── 全部已读（纯本地，不打 IMAP；见 db::messages::mark_seen_where） ────────────
+
+/// 单信箱「全部已读」：把该信箱内所有消息标 `\Seen`（纯本地）。
+#[tauri::command]
+pub async fn mailbox_mark_seen(state: State<'_, AppState>, mailbox_id: Uuid) -> AppResult<()> {
+    messages::mailbox_mark_seen(state.pool().await?, mailbox_id).await
+}
+
+/// 账户级收件箱「全部已读」：把账户下所有 inbox 类信箱内的消息标 `\Seen`（纯本地）。
+#[tauri::command]
+pub async fn account_inbox_mark_seen(
+    state: State<'_, AppState>,
+    account_id: Uuid,
+) -> AppResult<()> {
+    messages::account_inbox_mark_seen(state.pool().await?, account_id).await
+}
+
 /// 判断 IMAP 错误是否表示「邮件在服务端已不存在」（QQ: "Mails not exist!"）。
 /// 这类错误下移动到废纸篓无意义——邮件本就没了，应容错为「已删除」继续本地清理，不报错。
 fn imap_msg_already_gone(e: &AppError) -> bool {

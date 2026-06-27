@@ -52,7 +52,7 @@ pub struct ThreadContext {
     pub sent_sync_ok: bool,
 }
 
-async fn take_auth(account_id: Uuid) -> AppResult<SecretString> {
+pub(crate) async fn take_auth(account_id: Uuid) -> AppResult<SecretString> {
     tokio::task::spawn_blocking(move || crate::keychain::get_auth_code(account_id))
         .await
         .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?
