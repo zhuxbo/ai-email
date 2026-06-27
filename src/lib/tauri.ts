@@ -17,6 +17,7 @@ import type {
   AiRole,
   AutoReplyRule,
   AutoReplyRuleInput,
+  Category,
   ClassifyResult,
   ConversationView,
   DraftResult,
@@ -125,6 +126,10 @@ export async function messageSetFlagged(id: string, flagged: boolean): Promise<v
 
 export async function messageDelete(id: string): Promise<void> {
   await invoke('message_delete', { id });
+}
+
+export async function messageSetCategory(messageId: string, category: Category): Promise<void> {
+  await invoke('message_set_category', { messageId, category });
 }
 
 export async function messageAttachments(id: string): Promise<AttachmentMeta[]> {

@@ -58,6 +58,7 @@ vi.mock('../tauri', () => ({
   accountUpdate: vi.fn(),
   messageSetSeen: vi.fn().mockResolvedValue(undefined),
   messageSetFlagged: vi.fn().mockResolvedValue(undefined),
+  messageSetCategory: vi.fn().mockResolvedValue(undefined),
   messageDelete: vi.fn().mockResolvedValue(undefined),
   messagesMarkSeenBulk: vi.fn().mockResolvedValue(undefined),
   conversationThread: vi.fn(),
@@ -877,6 +878,96 @@ const SENDER_VIEW: ConversationView = {
     },
   ],
 };
+
+// ────────────────────────────────────────────────────────────────────────────
+// B7: setCategoryLocal 乐观更新三切片（列表代表 / conversation 成员 / senderGroup 成员）
+// ────────────────────────────────────────────────────────────────────────────
+
+describe('B7 setCategoryLocal 乐观更新三切片', () => {
+  const mkConvMsg = (id: string) => ({
+    ...mkFoldedMock(id, 'a1'),
+    textPlain: 'hi',
+    html: null,
+    isOwn: false,
+  });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useMailStore.setState({
+      accounts: [{ id: 'a1' }] as never,
+      selectedAccountId: null,
+      selectedMailboxId: null,
+      messages: [{ ...mkFoldedMock('m1', 'a1'), category: 'spam' }] as never,
+      conversation: {
+        threadId: 't1',
+        sentSyncOk: true,
+        messages: [{ ...mkConvMsg('m1'), category: 'spam' }],
+      } as never,
+      senderGroup: {
+        threadId: null,
+        sentSyncOk: true,
+        messages: [{ ...mkConvMsg('m1'), category: 'spam' }],
+      } as never,
+      error: null,
+      accountErrors: {},
+    } as never);
+  });
+
+  it('setCategoryLocal 乐观更新列表代表/会话成员/senderGroup 成员的 category 并 reload', async () => {
+    // reload 返回含更新后 category 的列表（模拟后端已落盘）
+    vi.mocked(tauri.unifiedInbox).mockResolvedValueOnce({
+      messages: [{ ...mkFoldedMock('m1', 'a1'), category: 'personal', categoryLocked: true }],
+      errors: {},
+    } as never);
+
+    // 捕获乐观写时刻：在 messageSetCategory 被调用时乐观写已完成，采样 store 快照。
+    type Snap = { id: string; category: string | null; categoryLocked: boolean }[];
+    let optimisticMessages: Snap = [];
+    vi.mocked(tauri.messageSetCategory).mockImplementationOnce(() => {
+      const msgs: unknown = useMailStore.getState().messages;
+      optimisticMessages = msgs as Snap;
+      return Promise.resolve();
+    });
+
+    await useMailStore.getState().setCategoryLocal('m1', 'personal');
+
+    // 乐观写阶段：列表代表 category 已为 personal
+    expect(optimisticMessages.find((m) => m.id === 'm1')?.category).toBe('personal');
+    expect(optimisticMessages.find((m) => m.id === 'm1')?.categoryLocked).toBe(true);
+
+    const s = useMailStore.getState();
+
+    // reload 后列表来自后端（category='personal' 由 mock 保证）
+    expect(s.messages.find((m) => m.id === 'm1')?.category).toBe('personal');
+
+    // conversation / senderGroup 在乐观写后不被 reload 覆盖（reload 只写 messages）
+    expect(s.conversation?.messages.find((m) => m.id === 'm1')?.category).toBe('personal');
+    expect(s.conversation?.messages.find((m) => m.id === 'm1')?.categoryLocked).toBe(true);
+    expect(s.senderGroup?.messages.find((m) => m.id === 'm1')?.category).toBe('personal');
+    expect(s.senderGroup?.messages.find((m) => m.id === 'm1')?.categoryLocked).toBe(true);
+
+    // 调用后端命令
+    expect(tauri.messageSetCategory).toHaveBeenCalledWith('m1', 'personal');
+
+    // 触发 reload
+    expect(tauri.unifiedInbox).toHaveBeenCalled();
+  });
+
+  it('setCategoryLocal 失败时回滚三切片并记 error', async () => {
+    vi.mocked(tauri.messageSetCategory).mockRejectedValueOnce(new Error('set-cat boom'));
+
+    await useMailStore.getState().setCategoryLocal('m1', 'personal');
+
+    const s = useMailStore.getState();
+
+    // 回滚：category 恢复为 spam
+    expect(s.messages.find((m) => m.id === 'm1')?.category).toBe('spam');
+    expect(s.conversation?.messages.find((m) => m.id === 'm1')?.category).toBe('spam');
+    expect(s.senderGroup?.messages.find((m) => m.id === 'm1')?.category).toBe('spam');
+
+    expect(s.error).toContain('set-cat boom');
+  });
+});
 
 describe('B6 detailMode 状态机 + openSenderGroup', () => {
   beforeEach(() => {

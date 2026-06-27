@@ -14,6 +14,7 @@ import type {
   FoldedItem,
   Mailbox,
   MessageBody,
+  MessageHeader,
 } from '../types';
 import { errMsg } from '../utils';
 import { useAiStore } from './ai';
@@ -133,6 +134,11 @@ interface MailState {
   setSeen: (id: string, seen: boolean) => Promise<void>;
   /** 自动已读：打开邮件时本地乐观标 \Seen，IMAP 尽力同步、失败静默不回滚（区别于 setSeen）。 */
   markSeenSilent: (id: string) => Promise<void>;
+  /**
+   * 手动修改分类：乐观更新三切片（列表代表 / conversation 成员 / senderGroup 成员），
+   * 调 message_set_category 并 reloadMessages；失败全量回滚。
+   */
+  setCategoryLocal: (messageId: string, category: Category) => Promise<void>;
   /** 全部已读：把当前视图所有未读批量标 \Seen（乐观 + 失败 reload 恢复）。 */
   markAllSeen: () => Promise<void>;
   setFlagged: (id: string, flagged: boolean) => Promise<void>;
@@ -449,6 +455,36 @@ export const useMailStore = create<MailState>((set, get) => ({
 
   setUnreadOnly: (on) => {
     set({ unreadOnly: on });
+  },
+
+  setCategoryLocal: async (messageId, category) => {
+    // 泛型 patch 保子类型：非泛型 (m:MessageHeader) map over ConversationMessage[] 会把元素
+    // 拓宽回 MessageHeader 丢 textPlain/html/isOwn → TS2322。
+    const patch = <T extends MessageHeader>(m: T): T =>
+      m.id === messageId ? { ...m, category, categoryLocked: true } : m;
+    const prev = {
+      messages: get().messages,
+      conversation: get().conversation,
+      senderGroup: get().senderGroup,
+    };
+    const curConv = get().conversation;
+    const curSg = get().senderGroup;
+    set({
+      messages: get().messages.map(patch),
+      conversation: curConv !== null ? { ...curConv, messages: curConv.messages.map(patch) } : null,
+      senderGroup: curSg !== null ? { ...curSg, messages: curSg.messages.map(patch) } : null,
+    });
+    try {
+      await tauri.messageSetCategory(messageId, category);
+      await get().reloadMessages();
+    } catch (e) {
+      set({
+        messages: prev.messages,
+        conversation: prev.conversation,
+        senderGroup: prev.senderGroup,
+        error: errMsg(e),
+      });
+    }
   },
 
   setSeen: async (id, seen) => {

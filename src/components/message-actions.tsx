@@ -1,6 +1,8 @@
+import { useState } from 'react';
 import { useMailStore } from '../lib/store/mail';
 import { useComposeStore } from '../lib/store/compose';
 import { useUiStore } from '../lib/store/ui';
+import { CategoryDialog } from './category-dialog';
 
 export function MessageActions() {
   const body = useMailStore((s) => s.body);
@@ -9,6 +11,9 @@ export function MessageActions() {
   const deleteMessage = useMailStore((s) => s.deleteMessage);
   const setSeen = useMailStore((s) => s.setSeen);
   const setFlagged = useMailStore((s) => s.setFlagged);
+  const setCategoryLocal = useMailStore((s) => s.setCategoryLocal);
+
+  const [categoryOpen, setCategoryOpen] = useState(false);
 
   // 早 return 让闭包里 selectedMessageId 收窄为 string，无需 non-null assertion。
   if (selectedMessageId === null) return null;
@@ -63,6 +68,17 @@ export function MessageActions() {
           type="button"
           disabled={message === undefined}
           onClick={() => {
+            setCategoryOpen(true);
+          }}
+          className="rounded border border-[var(--color-border)] bg-panel px-3 py-1 text-xs font-medium text-text-1 hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          title={message ? '修改此邮件的分类' : '选中邮件后可用'}
+        >
+          分类
+        </button>
+        <button
+          type="button"
+          disabled={message === undefined}
+          onClick={() => {
             if (message && window.confirm('删除这封邮件？将移到废纸篓，可在邮箱中找回。')) {
               void deleteMessage(message.id);
             }
@@ -95,6 +111,17 @@ export function MessageActions() {
           {flagged ? '取消加星' : '加星'}
         </button>
       </div>
+      <CategoryDialog
+        open={categoryOpen}
+        messageId={selectedMessageId}
+        current={message?.category ?? null}
+        onClose={() => {
+          setCategoryOpen(false);
+        }}
+        onConfirm={(msgId, category) => {
+          void setCategoryLocal(msgId, category);
+        }}
+      />
     </div>
   );
 }
