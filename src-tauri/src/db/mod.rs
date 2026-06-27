@@ -78,6 +78,9 @@ pub(crate) fn is_unique_violation(e: &sqlx::Error) -> bool {
 }
 
 #[cfg(test)]
+pub(crate) mod test_seed;
+
+#[cfg(test)]
 pub(crate) async fn test_pool() -> Pool {
     let opts = sqlx::sqlite::SqliteConnectOptions::new()
         .filename(":memory:")
