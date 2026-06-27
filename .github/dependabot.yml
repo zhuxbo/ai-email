@@ -23,6 +23,14 @@ updates:
         patterns:
           - 'vite*'
           - 'vitest*'
+    ignore:
+      # eslint 10 暂不可升：eslint-plugin-react 最新 7.37.5 的 eslint peer 上限为 ^9.7
+      # （eslint 10 移除了 plugin-react 仍在调用的 context.getFilename()，加载 react/* 规则即崩）。
+      # 待 eslint-plugin-react 支持 eslint 10 后，删除本 ignore 即可解锁升级。
+      - dependency-name: 'eslint'
+        update-types: ['version-update:semver-major']
+      - dependency-name: '@eslint/js'
+        update-types: ['version-update:semver-major']
 
   - package-ecosystem: cargo
     directory: /src-tauri
