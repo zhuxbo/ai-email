@@ -11,6 +11,7 @@ pub mod auto_reply;
 pub mod conversation;
 pub mod filter_rules;
 pub mod mail;
+pub mod reclassify;
 pub mod sender_filters;
 pub mod system;
 

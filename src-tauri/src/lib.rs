@@ -131,6 +131,13 @@ async fn run_db_init<F, Fut>(
         ("db://ready", _) => {
             tracing::info!("数据库初始化完成，发送 db://ready");
             let _ = app_handle.emit("db://ready", DbReadyPayload {});
+            // pool 已填充进 db_cell，clone 廉价（Arc 内部）。
+            if let Some(p) = db_cell.get() {
+                let p = p.clone();
+                tokio::spawn(async move {
+                    crate::commands::reclassify::run_once_if_needed(&p).await;
+                });
+            }
         }
         (_, Some(msg)) => {
             let _ = app_handle.emit("db://error", DbErrorPayload { message: msg });

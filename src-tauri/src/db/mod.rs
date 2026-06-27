@@ -15,6 +15,7 @@ pub mod accounts;
 pub mod ai_models;
 pub mod ai_results;
 pub mod ai_role_defaults;
+pub mod app_meta;
 pub mod auto_reply_rules;
 pub mod bodies;
 pub mod conversations;

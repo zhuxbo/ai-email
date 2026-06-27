@@ -389,6 +389,23 @@ pub async fn list_in_mailbox(
     Ok(rows)
 }
 
+/// 返回存量中需要重跑分类的消息 ID 列表。
+///
+/// 条件：属于收件箱类型（special_use IS NULL 或 'inbox'）、已有分类（category IS NOT NULL）、
+/// 未被用户锁定（category_locked=0）。按 sent_at DESC 排序，最多取 `cap` 条。
+pub async fn reclassify_candidates(pool: &Pool, cap: i64) -> AppResult<Vec<Uuid>> {
+    let rows: Vec<(Uuid,)> = sqlx::query_as(
+        "SELECT m.id FROM messages m JOIN mailboxes b ON m.mailbox_id=b.id \
+         WHERE (b.special_use IS NULL OR b.special_use='inbox') \
+           AND m.category IS NOT NULL AND m.category_locked=0 \
+         ORDER BY m.sent_at DESC LIMIT ?1",
+    )
+    .bind(cap)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|r| r.0).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -598,5 +615,29 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(set_category_locked(&pool, id, "work").await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn reclassify_candidates_excludes_locked_and_unclassified() {
+        use crate::db::test_seed::*;
+        let pool = crate::db::test_pool().await;
+        let acc = seed_account(&pool).await;
+        let mb = seed_mailbox(&pool, acc, "INBOX", None).await;
+        let classified = seed_msg(
+            &pool,
+            acc,
+            mb,
+            1,
+            "a@x.com",
+            None,
+            Some("spam"),
+            false,
+            "[]",
+        )
+        .await;
+        let _locked = seed_msg(&pool, acc, mb, 2, "b@x.com", None, Some("spam"), true, "[]").await;
+        let _raw = seed_msg(&pool, acc, mb, 3, "c@x.com", None, None, false, "[]").await;
+        let ids = reclassify_candidates(&pool, 1000).await.unwrap();
+        assert_eq!(ids, vec![classified]);
     }
 }
