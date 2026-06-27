@@ -40,7 +40,7 @@ const { mkFoldedMock } = vi.hoisted(() => {
 
 import { useMailStore } from './mail';
 import { useComposeStore } from './compose';
-import type { ConversationView, MessageHeader } from '../types';
+import type { ConversationView, FoldedItem } from '../types';
 
 vi.mock('../tauri', () => ({
   accountsList: vi.fn().mockResolvedValue([{ id: 'a1' }, { id: 'a2' }]),
@@ -61,6 +61,9 @@ vi.mock('../tauri', () => ({
   messageDelete: vi.fn().mockResolvedValue(undefined),
   messagesMarkSeenBulk: vi.fn().mockResolvedValue(undefined),
   conversationThread: vi.fn(),
+  mailboxFolded: vi.fn().mockResolvedValue([]),
+  mailboxMarkSeen: vi.fn().mockResolvedValue(undefined),
+  accountInboxMarkSeen: vi.fn().mockResolvedValue(undefined),
 }));
 import * as tauri from '../tauri';
 describe('mail store 聚合新成员', () => {
@@ -292,46 +295,50 @@ describe('mail store 全部已读', () => {
     vi.clearAllMocks();
   });
 
-  it('把当前视图未读批量标已读（乐观）并只对未读发命令', async () => {
+  it('聚合视图：调 accountInboxMarkSeen 覆盖所有账户并 reload', async () => {
     useMailStore.setState({
+      accounts: [{ id: 'a1' }, { id: 'a2' }] as never,
       messages: [
-        { id: 'm1', accountId: 'a1', flags: [] },
-        { id: 'm2', accountId: 'a1', flags: ['\\Seen'] },
-        { id: 'm3', accountId: 'a1', flags: ['\\Flagged'] },
+        { ...mkFoldedMock('m1', 'a1'), hasUnread: true },
+        { ...mkFoldedMock('m2', 'a2'), hasUnread: false },
       ] as never,
       selectedAccountId: null,
       selectedMailboxId: null,
       error: null,
     } as never);
     await useMailStore.getState().markAllSeen();
-    const s = useMailStore.getState();
-    expect(s.messages.find((m) => m.id === 'm1')?.flags).toContain('\\Seen');
-    expect(s.messages.find((m) => m.id === 'm3')?.flags).toContain('\\Seen');
-    expect(s.messages.find((m) => m.id === 'm2')?.flags).toContain('\\Seen');
-    // 只对未读 m1、m3 发命令（已读 m2 不在内）
-    expect(tauri.messagesMarkSeenBulk).toHaveBeenCalledWith(['m1', 'm3']);
+    expect(tauri.accountInboxMarkSeen).toHaveBeenCalledWith('a1');
+    expect(tauri.accountInboxMarkSeen).toHaveBeenCalledWith('a2');
+    // reload 走聚合路径
+    expect(tauri.unifiedInbox).toHaveBeenCalled();
   });
 
-  it('无未读时不发命令', async () => {
+  it('单信箱选中：调 mailboxMarkSeen(mailboxId) 并 reload', async () => {
     useMailStore.setState({
-      messages: [{ id: 'm1', accountId: 'a1', flags: ['\\Seen'] }] as never,
+      accounts: [{ id: 'a1' }] as never,
+      messages: [{ ...mkFoldedMock('m1', 'a1'), hasUnread: true }] as never,
+      selectedAccountId: 'a1',
+      selectedMailboxId: 'box-inbox',
       error: null,
     } as never);
     await useMailStore.getState().markAllSeen();
-    expect(tauri.messagesMarkSeenBulk).not.toHaveBeenCalled();
+    expect(tauri.mailboxMarkSeen).toHaveBeenCalledWith('box-inbox');
+    expect(tauri.mailboxFolded).toHaveBeenCalledWith('box-inbox', 100);
+    expect(tauri.accountInboxMarkSeen).not.toHaveBeenCalled();
   });
 
-  it('失败时记 error 并 reload 重拉恢复', async () => {
-    vi.mocked(tauri.messagesMarkSeenBulk).mockRejectedValueOnce(new Error('STORE boom'));
+  it('单信箱标记失败：记 error 并仍 reload', async () => {
+    vi.mocked(tauri.mailboxMarkSeen).mockRejectedValueOnce(new Error('STORE boom'));
     useMailStore.setState({
-      messages: [{ id: 'm1', accountId: 'a1', flags: [] }] as never,
-      selectedAccountId: null,
-      selectedMailboxId: null,
+      accounts: [{ id: 'a1' }] as never,
+      messages: [{ ...mkFoldedMock('m1', 'a1'), hasUnread: true }] as never,
+      selectedAccountId: 'a1',
+      selectedMailboxId: 'box-1',
       error: null,
     } as never);
     await useMailStore.getState().markAllSeen();
     expect(useMailStore.getState().error).toContain('STORE boom');
-    expect(tauri.unifiedInbox).toHaveBeenCalled();
+    expect(tauri.mailboxFolded).toHaveBeenCalled();
   });
 });
 
@@ -342,6 +349,8 @@ describe('mail store deleteMessage', () => {
         { id: 'm1', accountId: 'a1', flags: [] },
         { id: 'm2', accountId: 'a1', flags: [] },
       ] as never,
+      selectedAccountId: null,
+      selectedMailboxId: null,
       selectedMessageId: 'm1',
       messageOpenSeq: 7,
       body: { messageId: 'm1', textPlain: 'x', html: null, fetchedAt: '' } as never,
@@ -606,28 +615,28 @@ describe('mail store 多信箱路径 (Phase 15)', () => {
       error: null,
     } as never);
     vi.clearAllMocks();
-    vi.mocked(tauri.messagesList).mockResolvedValue([{ id: 'm-s1', accountId: 'a1' }] as never);
+    vi.mocked(tauri.mailboxFolded).mockResolvedValue([mkFoldedMock('m-s1', 'a1')]);
     vi.mocked(tauri.mailboxSync).mockResolvedValue({ newMessageCount: 0, totalInMailbox: 1 });
   });
 
-  it('selectMailbox 切非 INBOX 信箱：调用 mailboxSync + messagesList，不走 unifiedInbox', async () => {
+  it('selectMailbox 切非 INBOX 信箱：调用 mailboxSync + mailboxFolded，不走 unifiedInbox', async () => {
     await useMailStore.getState().selectMailbox(SENT_BOX.id);
 
-    // 单信箱路径：messagesList 按 mailboxId 拉取
-    expect(tauri.messagesList).toHaveBeenCalledWith(SENT_BOX.id, 50, 0);
+    // 单信箱路径：mailboxFolded 按 mailboxId 拉取折叠列表
+    expect(tauri.mailboxFolded).toHaveBeenCalledWith(SENT_BOX.id, 100);
     // 非 INBOX 触发按需同步
     expect(tauri.mailboxSync).toHaveBeenCalledWith('a1', 'Sent');
     // 聚合路径绝不应被调用
     expect(tauri.unifiedInbox).not.toHaveBeenCalled();
   });
 
-  it('INBOX 选中走单信箱 messagesList 路径，不走 unifiedInbox', async () => {
+  it('INBOX 选中走单信箱 mailboxFolded 路径，不走 unifiedInbox', async () => {
     // selectedMailboxId 已是 INBOX_BOX.id（beforeEach 默认），INBOX 不触发 mailboxSync
-    vi.mocked(tauri.messagesList).mockResolvedValue([{ id: 'm-i1', accountId: 'a1' }] as never);
+    vi.mocked(tauri.mailboxFolded).mockResolvedValue([mkFoldedMock('m-i1', 'a1')]);
 
     await useMailStore.getState().reloadMessages();
 
-    expect(tauri.messagesList).toHaveBeenCalledWith(INBOX_BOX.id, 50, 0);
+    expect(tauri.mailboxFolded).toHaveBeenCalledWith(INBOX_BOX.id, 100);
     expect(tauri.unifiedInbox).not.toHaveBeenCalled();
     expect(useMailStore.getState().messages[0]?.id).toBe('m-i1');
   });
@@ -639,25 +648,25 @@ describe('mail store 多信箱路径 (Phase 15)', () => {
       mailboxes: [],
     } as never);
     vi.mocked(tauri.unifiedInbox).mockResolvedValue({
-      messages: [{ id: 'm-u1', accountId: 'a1' }],
+      messages: [mkFoldedMock('m-u1', 'a1')],
       errors: {},
-    } as never);
+    });
 
     await useMailStore.getState().reloadMessages();
 
     expect(tauri.unifiedInbox).toHaveBeenCalled();
-    expect(tauri.messagesList).not.toHaveBeenCalled();
+    expect(tauri.mailboxFolded).not.toHaveBeenCalled();
     expect(useMailStore.getState().messages[0]?.id).toBe('m-u1');
   });
 
   it('切换迟到守卫：reloadMessages 迟到（mailboxId 已变）时不覆盖新信箱列表', async () => {
     // 直接测试 reloadMessages 里的 selectedMailboxId 守卫：
     // 1. store 设置 selectedMailboxId = SENT_BOX（A）
-    // 2. 发起 reloadMessages()（内部调用 messagesList(SENT_BOX)，请求挂起）
+    // 2. 发起 reloadMessages()（内部调用 mailboxFolded(SENT_BOX)，请求挂起）
     // 3. 在请求返回前，将 selectedMailboxId 切到 INBOX_BOX（B）并拉到 B 的数据
     // 4. A 的响应迟到 resolve → 守卫 selectedMailboxId===SENT_BOX 不成立 → 不覆盖
-    let resolveA!: (msgs: MessageHeader[] | PromiseLike<MessageHeader[]>) => void;
-    vi.mocked(tauri.messagesList).mockImplementationOnce(
+    let resolveA!: (msgs: FoldedItem[] | PromiseLike<FoldedItem[]>) => void;
+    vi.mocked(tauri.mailboxFolded).mockImplementationOnce(
       () =>
         new Promise((res) => {
           resolveA = res;
@@ -671,11 +680,11 @@ describe('mail store 多信箱路径 (Phase 15)', () => {
     // 模拟用户已切到 B（INBOX）并完成加载
     useMailStore.setState({
       selectedMailboxId: INBOX_BOX.id,
-      messages: [{ id: 'm-inbox', accountId: 'a1' }] as never,
+      messages: [mkFoldedMock('m-inbox', 'a1')] as never,
     } as never);
 
     // A 的迟到响应 resolve — 守卫：get().selectedMailboxId（INBOX）!== SENT_BOX → 不写入
-    resolveA([{ id: 'm-sent-late', accountId: 'a1' }] as unknown as MessageHeader[]);
+    resolveA([mkFoldedMock('m-sent-late', 'a1')]);
     await pendingA;
 
     // B 的列表不被覆盖
@@ -719,6 +728,80 @@ describe('mail store loadConversation', () => {
     resolveM1?.({ threadId: 't1-stale', sentSyncOk: true, messages: [] });
     await p;
     expect(useMailStore.getState().conversation).toBeNull(); // stale m1 response rejected
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// B4: FoldedItem state + markAllSeen 走后端范围标记 + 组级未读计数
+// ────────────────────────────────────────────────────────────────────────────
+
+describe('B4 markAllSeen 走后端范围标记', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('单信箱选中：调 mailboxMarkSeen(mailboxId) 并 reload', async () => {
+    useMailStore.setState({
+      accounts: [{ id: 'a1' }] as never,
+      selectedAccountId: 'a1',
+      selectedMailboxId: 'box-1',
+      messages: [mkFoldedMock('m1', 'a1'), mkFoldedMock('m2', 'a1')] as never,
+      accountErrors: {},
+      error: null,
+    } as never);
+    vi.mocked(tauri.mailboxMarkSeen).mockResolvedValueOnce(undefined);
+    // unifiedInbox/messagesList mock 由 beforeEach 中 vi.mock 提供
+
+    await useMailStore.getState().markAllSeen();
+
+    expect(tauri.mailboxMarkSeen).toHaveBeenCalledWith('box-1');
+    // reload 后应调用 mailboxFolded（单信箱路径）
+    expect(tauri.mailboxFolded).toHaveBeenCalledWith('box-1', 100);
+  });
+
+  it('聚合视图：对各账户 accountInboxMarkSeen 并 allSettled 容错 + reload', async () => {
+    useMailStore.setState({
+      accounts: [{ id: 'a1' }, { id: 'a2' }] as never,
+      selectedAccountId: null,
+      selectedMailboxId: null,
+      messages: [mkFoldedMock('m1', 'a1'), mkFoldedMock('m2', 'a2')] as never,
+      accountErrors: {},
+      error: null,
+    } as never);
+    // a1 成功，a2 失败 — allSettled 不应整体抛
+    vi.mocked(tauri.accountInboxMarkSeen).mockImplementation((id: string) =>
+      id === 'a1' ? Promise.resolve() : Promise.reject(new Error('a2 boom')),
+    );
+
+    await expect(useMailStore.getState().markAllSeen()).resolves.toBeUndefined();
+
+    expect(tauri.accountInboxMarkSeen).toHaveBeenCalledWith('a1');
+    expect(tauri.accountInboxMarkSeen).toHaveBeenCalledWith('a2');
+    // reload
+    expect(tauri.unifiedInbox).toHaveBeenCalled();
+  });
+});
+
+describe('B4 unreadCount 用组级 hasUnread 计数', () => {
+  it('有 hasUnread 的行才计入未读数', () => {
+    useMailStore.setState({
+      messages: [
+        { ...mkFoldedMock('m1'), hasUnread: true },
+        { ...mkFoldedMock('m2'), hasUnread: true },
+        { ...mkFoldedMock('m3'), hasUnread: false },
+      ] as never,
+    } as never);
+    expect(useMailStore.getState().unreadCount()).toBe(2);
+  });
+
+  it('全部已读时 unreadCount 为 0', () => {
+    useMailStore.setState({
+      messages: [
+        { ...mkFoldedMock('m1'), hasUnread: false },
+        { ...mkFoldedMock('m2'), hasUnread: false },
+      ] as never,
+    } as never);
+    expect(useMailStore.getState().unreadCount()).toBe(0);
   });
 });
 

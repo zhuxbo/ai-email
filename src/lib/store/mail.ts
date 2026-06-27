@@ -11,9 +11,9 @@ import type {
   UpdateAccountForm,
   Category,
   ConversationView,
+  FoldedItem,
   Mailbox,
   MessageBody,
-  MessageHeader,
 } from '../types';
 import { errMsg } from '../utils';
 import { useAiStore } from './ai';
@@ -72,7 +72,7 @@ interface MailState {
    */
   selectedMailboxId: string | null;
 
-  messages: MessageHeader[];
+  messages: FoldedItem[];
   selectedMessageId: string | null;
   messageOpenSeq: number;
   body: MessageBody | null;
@@ -121,6 +121,9 @@ interface MailState {
   setFlagged: (id: string, flagged: boolean) => Promise<void>;
   deleteMessage: (id: string) => Promise<void>;
 
+  /** 当前视图未读组数（FoldedItem.hasUnread 为 true 的行数）。 */
+  unreadCount: () => number;
+
   /**
    * 当前视图是否受 mail://classified 事件影响。
    * classified 只更新 INBOX 邮件的 category/priority，因此仅当视图在看 INBOX 时才需要重拉：
@@ -141,6 +144,7 @@ export const useMailStore = create<MailState>((set, get) => ({
   selectedMailboxId: null,
 
   messages: [],
+  unreadCount: () => get().messages.filter((m) => m.hasUnread).length,
   selectedMessageId: null,
   messageOpenSeq: 0,
   body: null,
@@ -284,10 +288,10 @@ export const useMailStore = create<MailState>((set, get) => ({
   reloadMessages: async () => {
     const { selectedAccountId: filter, selectedMailboxId: mailboxId } = get();
 
-    // 单账户且已选中特定信箱（非 INBOX 聚合）：直接按 mailboxId 取消息。
+    // 单账户且已选中特定信箱（非 INBOX 聚合）：按 mailboxId 取折叠列表。
     if (filter !== null && mailboxId !== null) {
       try {
-        const messages = await tauri.messagesList(mailboxId, 50, 0);
+        const messages = await tauri.mailboxFolded(mailboxId, 100);
         // 守卫：迟到 reload 不覆盖已切换的筛选。
         if (get().selectedAccountId === filter && get().selectedMailboxId === mailboxId) {
           set({ messages, accountErrors: {} });
@@ -374,6 +378,8 @@ export const useMailStore = create<MailState>((set, get) => ({
   },
 
   classifyVisibleMessages: async () => {
+    // 折叠后 m.id 为代表邮件 id，只对代表发起分类。
+    // 组内非代表邮件靠 sync 后台补分类（A5 兜底）；此处不需要展开折叠组。
     const ids = get().messages.map((m) => m.id);
     if (ids.length === 0) return;
     try {
@@ -420,24 +426,24 @@ export const useMailStore = create<MailState>((set, get) => ({
   },
 
   markAllSeen: async () => {
-    const ids = get()
-      .messages.filter((m) => !m.flags.includes('\\Seen'))
-      .map((m) => m.id);
-    if (ids.length === 0) return;
-    // 乐观批量标 \Seen（只动未读，已读保持），并清旧 error。
-    set({
-      messages: get().messages.map((m) =>
-        m.flags.includes('\\Seen') ? m : { ...m, flags: toggleFlag(m.flags, '\\Seen', true) },
-      ),
-      error: null,
-    });
-    try {
-      await tauri.messagesMarkSeenBulk(ids);
-    } catch (e) {
-      // 批量 IMAP 失败：记 error 并从后端重拉，反映真实状态（部分分组可能已成功）。
-      set({ error: errMsg(e) });
+    const { selectedAccountId, selectedMailboxId, accounts } = get();
+
+    // 单信箱选中：按 mailboxId 范围标记。
+    if (selectedAccountId !== null && selectedMailboxId !== null) {
+      try {
+        await tauri.mailboxMarkSeen(selectedMailboxId);
+      } catch (e) {
+        set({ error: errMsg(e) });
+      }
       await get().reloadMessages();
+      return;
     }
+
+    // 聚合视图：对当前可见账户的 INBOX 各自范围标记，allSettled 容错（单账户失败不阻断）。
+    const targets =
+      selectedAccountId !== null ? accounts.filter((a) => a.id === selectedAccountId) : accounts;
+    await Promise.allSettled(targets.map((a) => tauri.accountInboxMarkSeen(a.id)));
+    await get().reloadMessages();
   },
 
   setFlagged: async (id, flagged) => {
@@ -449,8 +455,9 @@ export const useMailStore = create<MailState>((set, get) => ({
     const wasSelected = selectedMessageId === id;
     // 开始新操作即清旧错误（与 setFlagOptimistic 对齐）；乐观移除目标行；
     // 不 bump messageOpenSeq（同切筛选约定）。
+    const nextMessages = prev.filter((m) => m.id !== id);
     const next: Partial<MailState> = {
-      messages: prev.filter((m) => m.id !== id),
+      messages: nextMessages,
       error: null,
     };
     if (wasSelected) {
