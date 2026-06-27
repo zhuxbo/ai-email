@@ -5,6 +5,7 @@ import type { ConversationMessage, ConversationView } from '../lib/types';
 import { formatDateTimeCN } from '../lib/utils';
 import { colorForSeed } from './ui/avatar';
 import { BodyView } from './body-view';
+import { AttachmentList } from './attachment-list';
 
 export function MessageBlock({
   msg,
@@ -57,6 +58,7 @@ export function MessageBlock({
       </button>
       <div className="pt-2">
         <BodyView html={msg.html} textPlain={msg.textPlain} category={msg.category} />
+        {msg.hasAttachment && <AttachmentList messageId={msg.id} hasAttachment />}
       </div>
     </div>
   );

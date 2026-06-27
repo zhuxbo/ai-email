@@ -1,8 +1,11 @@
-import { render, screen, fireEvent } from '@testing-library/react';
-import { describe, it, expect } from 'vitest';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 import { ConversationThread } from './conversation-thread';
 import type { ConversationView } from '../lib/types';
+import * as tauri from '../lib/tauri';
+
+vi.mock('../lib/tauri');
 
 // sentAt 用无时区偏移串：按本地时区解析、格式化也按本地 → 时间断言与运行时区无关。
 const view: ConversationView = {
@@ -18,6 +21,7 @@ const view: ConversationView = {
       textPlain: '第一封',
       html: null,
       isOwn: false,
+      hasAttachment: false,
     } as never,
     {
       id: 'm2',
@@ -28,11 +32,17 @@ const view: ConversationView = {
       textPlain: '我的回复',
       html: null,
       isOwn: true,
+      hasAttachment: false,
     } as never,
   ],
 };
 
 describe('ConversationThread', () => {
+  beforeEach(() => {
+    vi.mocked(tauri.messageAttachments).mockResolvedValue([]);
+    vi.mocked(tauri.messageBody).mockResolvedValue({ textPlain: null, html: null } as never);
+  });
+
   it('最新一封展开、其余折叠，最新排在最上（倒序）', () => {
     const { container } = render(<ConversationThread view={view} />);
     expect(screen.getByText('我的回复')).toBeInTheDocument(); // m2 正文展开
@@ -96,6 +106,7 @@ describe('ConversationThread', () => {
           textPlain: 'A正文',
           html: null,
           isOwn: false,
+          hasAttachment: false,
         } as never,
         {
           id: 'b',
@@ -106,6 +117,7 @@ describe('ConversationThread', () => {
           textPlain: 'B正文',
           html: null,
           isOwn: false,
+          hasAttachment: false,
         } as never,
         {
           id: 'c',
@@ -116,6 +128,7 @@ describe('ConversationThread', () => {
           textPlain: 'C正文',
           html: null,
           isOwn: false,
+          hasAttachment: false,
         } as never,
       ],
     };
@@ -129,5 +142,81 @@ describe('ConversationThread', () => {
     expect(screen.getByText('A正文')).toBeInTheDocument();
     expect(screen.queryByText('B正文')).not.toBeInTheDocument();
     expect(screen.getByText('C正文')).toBeInTheDocument();
+  });
+
+  it('MessageBlock 展开且 hasAttachment 时调 messageAttachments 渲染附件、折叠态不调', async () => {
+    // 构造 view：m3 有附件（首块，倒序后展开），m4 有附件（第二块，折叠）
+    vi.mocked(tauri.messageAttachments).mockResolvedValue([
+      { filename: 'doc.pdf', contentType: 'application/pdf', size: 1024 },
+    ]);
+    const v: ConversationView = {
+      threadId: 'tx',
+      sentSyncOk: true,
+      messages: [
+        {
+          id: 'm3',
+          accountId: 'acc1',
+          fromAddr: 'a@x.com',
+          sentAt: '2026-06-25T09:00:00',
+          snippet: 'm3预览',
+          textPlain: 'm3正文',
+          html: null,
+          isOwn: false,
+          hasAttachment: true,
+          category: 'inbox',
+        } as never,
+        {
+          id: 'm4',
+          accountId: 'acc1',
+          fromAddr: 'b@x.com',
+          sentAt: '2026-06-25T10:00:00',
+          snippet: 'm4预览',
+          textPlain: 'm4正文',
+          html: null,
+          isOwn: false,
+          hasAttachment: true,
+          category: 'inbox',
+        } as never,
+      ],
+    };
+    render(<ConversationThread view={v} />);
+    // 倒序后 m4 在最上、展开 → messageAttachments 被以 m4.id 调用，doc.pdf 出现
+    await waitFor(() => {
+      expect(tauri.messageAttachments).toHaveBeenCalledWith('m4');
+      expect(screen.getByText(/doc\.pdf/)).toBeInTheDocument();
+    });
+    // m3 折叠 → messageAttachments 未以 m3.id 调用
+    expect(tauri.messageAttachments).not.toHaveBeenCalledWith('m3');
+  });
+
+  it('展开块调 messageAttachments 但不调 messageBody（正文预填，无 body 懒拉）', async () => {
+    vi.mocked(tauri.messageAttachments).mockResolvedValue([
+      { filename: 'img.png', contentType: 'image/png', size: 2048 },
+    ]);
+    const v: ConversationView = {
+      threadId: 'ty',
+      sentSyncOk: true,
+      messages: [
+        {
+          id: 'm5',
+          accountId: 'acc1',
+          fromAddr: 'c@x.com',
+          sentAt: '2026-06-25T12:00:00',
+          snippet: 'm5预览',
+          textPlain: 'm5正文',
+          html: null,
+          isOwn: false,
+          hasAttachment: true,
+          category: 'inbox',
+        } as never,
+      ],
+    };
+    render(<ConversationThread view={v} />);
+    // 单封 → 默认展开，应拉 attachments
+    await waitFor(() => {
+      expect(tauri.messageAttachments).toHaveBeenCalledWith('m5');
+    });
+    // 正文已预填（textPlain），不应触发 messageBody
+    expect(tauri.messageBody).not.toHaveBeenCalled();
   });
 });
