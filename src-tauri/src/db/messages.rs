@@ -325,9 +325,9 @@ pub async fn mailbox_mark_seen(pool: &Pool, mailbox_id: Uuid) -> AppResult<()> {
     mark_seen_where(pool, "mailbox_id = ?1", mailbox_id).await
 }
 
-/// 账户级收件箱「全部已读」：把账户下所有 inbox 类信箱（`special_use IS NULL` 或 `'inbox'`，
-/// 排除 Sent 等）内的消息标 `\Seen`（纯本地，见 [`mark_seen_where`]）。
-/// scope 谓词与折叠列表共享 [`crate::db::INBOX_KIND_PRED`]，保证「收件箱范围」口径一致。
+/// 账户级收件箱「全部已读」：把账户的真正 INBOX（不含服务端自定义归类目录、Sent 等）内的消息标
+/// `\Seen`（纯本地，见 [`mark_seen_where`]）。
+/// scope 谓词与折叠列表共享 [`crate::db::INBOX_KIND_PRED`]，保证「聚合收件箱范围」口径一致。
 pub async fn account_inbox_mark_seen(pool: &Pool, account_id: Uuid) -> AppResult<()> {
     let pred = format!(
         "mailbox_id IN (SELECT id FROM mailboxes WHERE account_id = ?1 AND {})",
@@ -470,8 +470,11 @@ pub async fn list_in_mailbox(
 
 /// 返回存量中需要重跑分类的消息 ID 列表。
 ///
-/// 条件：属于收件箱类型（special_use IS NULL 或 'inbox'）、已有分类（category IS NOT NULL）、
-/// 未被用户锁定（category_locked=0）。按 sent_at DESC 排序，最多取 `cap` 条。
+/// 条件：已有分类（category IS NOT NULL）、未被用户锁定（category_locked=0）、
+/// 位于收件箱或服务端自定义归类目录（`special_use IS NULL OR ='inbox'`）。按 sent_at DESC，最多 `cap` 条。
+///
+/// 注意：此谓词**刻意比** [`crate::db::INBOX_KIND_PRED`]（仅真正 INBOX）**更宽**——后台重分类也覆盖
+/// 自定义归类目录（单选时可见、需保持分类新鲜），故仍含 `special_use IS NULL`。**勿与 INBOX_KIND_PRED 对齐统一**。
 pub async fn reclassify_candidates(pool: &Pool, cap: i64) -> AppResult<Vec<Uuid>> {
     let rows: Vec<(Uuid,)> = sqlx::query_as(
         "SELECT m.id FROM messages m JOIN mailboxes b ON m.mailbox_id=b.id \

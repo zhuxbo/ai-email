@@ -119,7 +119,7 @@ SELECT * FROM ranked WHERE rn=1 ORDER BY sent_at DESC, imap_uid DESC LIMIT ?2
     )
 }
 
-/// 账户级收件箱折叠：汇聚账户下所有 inbox 类信箱（`special_use IS NULL` 或 `'inbox'`），排除 Sent。
+/// 账户级收件箱折叠：仅汇聚真正的 INBOX（见 [`crate::db::INBOX_KIND_PRED`]），排除 Sent 及服务端自定义归类目录。
 /// `thread_counts` 与 scope 同账户，故跨信箱 thread 的成员数仍正确。
 pub async fn account_inbox_folded(
     pool: &Pool,
@@ -402,8 +402,7 @@ mod tests {
         assert!(find(&items, "sender:mix@x.com").has_unread, "含未读应 true");
     }
 
-    // 账户级命令：account_inbox_folded 汇聚所有 inbox 类信箱（special_use NULL 或 'inbox'），
-    // 排除 Sent。沿用类 1 场景：thread_size 仍账户级 = 2。
+    // 账户级命令：account_inbox_folded 仅汇聚真正的 INBOX，排除 Sent。沿用类 1 场景：thread_size 仍账户级 = 2。
     #[tokio::test]
     async fn account_inbox_folded_excludes_sent_but_counts_account_thread() {
         let pool = crate::db::test_pool().await;
@@ -440,6 +439,39 @@ mod tests {
         let it = find(&items, "thread:T1");
         assert!(matches!(it.fold_kind, FoldKind::Thread));
         assert_eq!(it.count, 2);
+    }
+
+    // 服务端自定义归类目录（special_use=NULL、名非 INBOX）不进聚合收件箱视图。
+    // 旧谓词含 `special_use IS NULL` → 自定义目录被误纳入；改「仅真正 INBOX」后应排除。
+    // 退回旧谓词（INBOX_KIND_PRED 含 IS NULL）→ 此测试 FAIL。
+    #[tokio::test]
+    async fn account_inbox_folded_excludes_custom_null_special_use_folder() {
+        let pool = crate::db::test_pool().await;
+        let acc = seed_account(&pool).await;
+        let inbox = seed_mailbox(&pool, acc, "INBOX", None).await;
+        // 服务端按规则归类的自定义目录：special_use=NULL、名非 INBOX
+        let custom = seed_mailbox(&pool, acc, "订单", None).await;
+        seed_msg(&pool, acc, inbox, 1, "real@x.com", None, NOTIF, false, "[]").await;
+        seed_msg(
+            &pool,
+            acc,
+            custom,
+            2,
+            "order@x.com",
+            None,
+            NOTIF,
+            false,
+            "[]",
+        )
+        .await;
+
+        let items = account_inbox_folded(&pool, acc, 50).await.unwrap();
+        assert_eq!(items.len(), 1, "自定义目录邮件不应进聚合收件箱 {items:#?}");
+        assert_eq!(
+            items[0].representative.from_addr.as_deref(),
+            Some("real@x.com"),
+            "仅 INBOX 的邮件应保留"
+        );
     }
 
     // 跨账户对抗：thread_counts 的 `WHERE account_id=?1`（账户级 thread_size）是承重谓词。

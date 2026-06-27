@@ -37,10 +37,12 @@ use crate::error::AppResult;
 /// Shared connection pool. Cloning is cheap (it's an `Arc`).
 pub type Pool = sqlx::SqlitePool;
 
-/// 收件箱类信箱谓词（对 `mailboxes` 行）：`special_use IS NULL`（普通收件箱）或 `'inbox'`。
-/// 排除 Sent/Drafts/Trash 等。`folded`（折叠列表）与 `messages`（全部已读）共享，
-/// 保证「收件箱范围」口径一致。用在子查询里时以 `mailboxes` 列名直接出现，无表别名。
-pub(crate) const INBOX_KIND_PRED: &str = "(special_use IS NULL OR special_use = 'inbox')";
+/// 聚合收件箱谓词（对 `mailboxes` 行）：仅**真正的 INBOX** —— `special_use = 'inbox'`，
+/// 或按 IMAP 规范恒名为 INBOX 的信箱（`upper(name) = 'INBOX'`，兜底 special_use 未检出的旧行）。
+/// **不含** `special_use IS NULL` 的服务端自定义归类目录（订单/通知等）—— 它们不进聚合收件箱视图，
+/// 仅在单独选中该目录时（`mailbox_folded`）显示。`folded`（折叠列表）、`messages`（全部已读 /
+/// 同发件人组）共享，保证「聚合收件箱范围」口径一致。用在子查询里以 `mailboxes` 列名直接出现，无表别名。
+pub(crate) const INBOX_KIND_PRED: &str = "(special_use = 'inbox' OR upper(name) = 'INBOX')";
 
 /// Embeds every `.sql` file under `migrations/` at compile time, then applies any that the
 /// target DB hasn't seen. Idempotent.
