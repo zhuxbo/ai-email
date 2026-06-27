@@ -15,6 +15,7 @@ import { useMailStore } from '../lib/store/mail';
 import type { AttachmentMeta, MessageHeader } from '../lib/types';
 import { MessageActions } from './message-actions';
 import { ConversationThread } from './conversation-thread';
+import { SenderGroupView } from './sender-group-view';
 
 function selectedMessage(messages: MessageHeader[], id: string | null): MessageHeader | null {
   if (id === null) return null;
@@ -33,6 +34,8 @@ export function MessageDetail() {
   const conversation = useMailStore((s) => s.conversation);
   const loadingConversation = useMailStore((s) => s.loadingConversation);
   const loadConversation = useMailStore((s) => s.loadConversation);
+  const detailMode = useMailStore((s) => s.detailMode);
+  const senderGroup = useMailStore((s) => s.senderGroup);
 
   const msg = useMemo(
     () => selectedMessage(messages, selectedMessageId),
@@ -80,6 +83,26 @@ export function MessageDetail() {
 
   function scrollToAttachments() {
     attachmentsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  // 同发件人组视图：与单封会话详情互斥，按 detailMode 单独渲染（不走下方按 msg 的单封分支）。
+  if (detailMode === 'senderGroup') {
+    return (
+      <section className="flex h-full flex-1 flex-col bg-slate-50 dark:bg-slate-950">
+        <header className="border-b border-slate-200 bg-white px-6 py-4 dark:border-slate-700 dark:bg-slate-900">
+          <h3 className="min-w-0 truncate text-lg font-semibold text-slate-900 dark:text-slate-100">
+            {senderGroup?.messages[0]?.fromAddr ?? '同发件人'}
+          </h3>
+        </header>
+        <div className="flex-1 overflow-auto p-6">
+          {senderGroup ? (
+            <SenderGroupView view={senderGroup} />
+          ) : (
+            <div className="text-sm text-slate-500">加载邮件…</div>
+          )}
+        </div>
+      </section>
+    );
   }
 
   if (!msg) {

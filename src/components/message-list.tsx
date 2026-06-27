@@ -9,6 +9,9 @@ import { decodeModifiedUtf7 } from '../lib/utils';
 import type { Mailbox } from '../lib/types';
 import { CATEGORY_OPTIONS, MessageRow } from './message-row';
 
+// sender 折叠组 foldKey 形如 'sender:<from_addr>'（后端 db/folded.rs 拼装），剥前缀得发件人地址。
+const SENDER_PREFIX = 'sender:';
+
 // 列表标题：标准信箱用中文名，自定义文件夹用解码后的叶子名。
 const MAILBOX_LABELS: Record<string, string> = {
   inbox: '收件箱',
@@ -32,6 +35,7 @@ export function MessageList() {
   const selectedMailboxId = useMailStore((s) => s.selectedMailboxId);
   const selectedMessageId = useMailStore((s) => s.selectedMessageId);
   const selectMessage = useMailStore((s) => s.selectMessage);
+  const openSenderGroup = useMailStore((s) => s.openSenderGroup);
   const categoryFilter = useMailStore((s) => s.categoryFilter);
   const sortByPriority = useMailStore((s) => s.sortByPriority);
   const unreadOnly = useMailStore((s) => s.unreadOnly);
@@ -208,7 +212,14 @@ export function MessageList() {
               count={m.count}
               hasUnread={m.hasUnread}
               active={m.id === selectedMessageId}
-              onClick={() => void selectMessage(m.id)}
+              onClick={() => {
+                // sender 折叠组 → 详情区展示该发件人组视图；其余（single/thread）→ 单封会话详情。
+                if (m.foldKind === 'sender') {
+                  void openSenderGroup(m.accountId, m.foldKey.slice(SENDER_PREFIX.length), m.count);
+                } else {
+                  void selectMessage(m.id);
+                }
+              }}
             />
           ))
         )}

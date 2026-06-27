@@ -61,6 +61,7 @@ vi.mock('../tauri', () => ({
   messageDelete: vi.fn().mockResolvedValue(undefined),
   messagesMarkSeenBulk: vi.fn().mockResolvedValue(undefined),
   conversationThread: vi.fn(),
+  senderGroupThread: vi.fn(),
   mailboxFolded: vi.fn().mockResolvedValue([]),
   mailboxMarkSeen: vi.fn().mockResolvedValue(undefined),
   accountInboxMarkSeen: vi.fn().mockResolvedValue(undefined),
@@ -854,5 +855,232 @@ describe('mail store updateAccount', () => {
       }),
     ).rejects.toThrow('boom');
     expect(useMailStore.getState().error).toContain('boom');
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// B6: detailMode 详情态机 + openSenderGroup + clearDetail 统一清理矩阵
+// 关键不变量：每个切换/清理入口都必须清掉**另一种**详情态，杜绝串台。
+// 若某入口漏调 clearDetail，对应测试应 FAIL（判别力）。
+// ────────────────────────────────────────────────────────────────────────────
+
+const SENDER_VIEW: ConversationView = {
+  threadId: null,
+  sentSyncOk: true,
+  messages: [
+    {
+      ...mkFoldedMock('sg1', 'a1'),
+      fromAddr: 'ad@x.com',
+      textPlain: 'hi',
+      html: null,
+      isOwn: false,
+    },
+  ],
+};
+
+describe('B6 detailMode 状态机 + openSenderGroup', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useMailStore.setState({
+      accounts: [{ id: 'a1' }, { id: 'a2' }] as never,
+      selectedAccountId: null,
+      selectedMailboxId: null,
+      mailboxes: [],
+      messages: [{ id: 'm1', accountId: 'a1', flags: [] }] as never,
+      selectedMessageId: null,
+      body: null,
+      conversation: null,
+      senderGroup: null,
+      senderGroupKey: null,
+      senderGroupCount: 0,
+      detailMode: 'none',
+      error: null,
+      accountErrors: {},
+    } as never);
+  });
+
+  it('openSenderGroup 设 detailMode=senderGroup 且清 conversation/selectedMessageId', async () => {
+    // 先制造单封会话详情态，验证被清掉
+    useMailStore.setState({
+      detailMode: 'message',
+      selectedMessageId: 'm1',
+      body: { messageId: 'm1', textPlain: 'x', html: null, fetchedAt: '' } as never,
+      conversation: { threadId: 't1', sentSyncOk: true, messages: [] } as never,
+    } as never);
+    vi.mocked(tauri.senderGroupThread).mockResolvedValue(SENDER_VIEW);
+
+    await useMailStore.getState().openSenderGroup('a1', 'ad@x.com', 12);
+
+    const s = useMailStore.getState();
+    expect(s.detailMode).toBe('senderGroup');
+    expect(s.senderGroupKey).toBe('ad@x.com');
+    expect(s.senderGroupCount).toBe(12);
+    expect(s.senderGroup?.messages.length).toBe(1);
+    // 互斥：单封会话态被清
+    expect(s.selectedMessageId).toBeNull();
+    expect(s.conversation).toBeNull();
+    expect(s.body).toBeNull();
+    expect(tauri.senderGroupThread).toHaveBeenCalledWith('a1', 'ad@x.com');
+  });
+
+  it('openSenderGroup 迟到守卫：组键已变时不覆盖新组', async () => {
+    let resolveA!: (v: ConversationView) => void;
+    vi.mocked(tauri.senderGroupThread).mockImplementationOnce(
+      () =>
+        new Promise<ConversationView>((r) => {
+          resolveA = r;
+        }),
+    );
+    // A：发起 ad@x.com（挂起）
+    const pendingA = useMailStore.getState().openSenderGroup('a1', 'ad@x.com', 5);
+    // 用户切到 B：bd@x.com
+    useMailStore.setState({ senderGroupKey: 'bd@x.com' } as never);
+    // A 迟到 resolve — 守卫 senderGroupKey==='ad@x.com' 不成立 → 不写入
+    resolveA(SENDER_VIEW);
+    await pendingA;
+    expect(useMailStore.getState().senderGroup).toBeNull();
+    expect(useMailStore.getState().senderGroupKey).toBe('bd@x.com');
+  });
+
+  it('openSenderGroup 失败设 error 且不残留 senderGroup', async () => {
+    vi.mocked(tauri.senderGroupThread).mockRejectedValueOnce(new Error('sg boom'));
+    await useMailStore.getState().openSenderGroup('a1', 'ad@x.com', 3);
+    const s = useMailStore.getState();
+    expect(s.error).toContain('sg boom');
+    expect(s.senderGroup).toBeNull();
+  });
+
+  it('selectMessage 设 detailMode=message 且清 senderGroup（保留设 selectedMessageId）', async () => {
+    // 先制造 senderGroup 详情态，验证被清掉
+    useMailStore.setState({
+      detailMode: 'senderGroup',
+      senderGroup: SENDER_VIEW,
+      senderGroupKey: 'ad@x.com',
+      senderGroupCount: 9,
+    } as never);
+
+    await useMailStore.getState().selectMessage('m1');
+
+    const s = useMailStore.getState();
+    expect(s.detailMode).toBe('message');
+    // selectMessage 不能机械替换成 clearDetail：它要设 selectedMessageId
+    expect(s.selectedMessageId).toBe('m1');
+    // 互斥：senderGroup 态被清
+    expect(s.senderGroup).toBeNull();
+    expect(s.senderGroupKey).toBeNull();
+    expect(s.senderGroupCount).toBe(0);
+  });
+
+  it('setFilter(切回聚合) 调 clearDetail 清所有详情态', async () => {
+    useMailStore.setState({
+      selectedAccountId: 'a1',
+      detailMode: 'senderGroup',
+      senderGroup: SENDER_VIEW,
+      senderGroupKey: 'ad@x.com',
+      senderGroupCount: 4,
+      selectedMessageId: 'm1',
+      conversation: { threadId: 't', sentSyncOk: true, messages: [] } as never,
+      body: { messageId: 'm1', textPlain: 'x', html: null, fetchedAt: '' } as never,
+    } as never);
+
+    await useMailStore.getState().setFilter(null);
+
+    const s = useMailStore.getState();
+    expect(s.selectedAccountId).toBeNull(); // setFilter 自身逻辑保留
+    expect(s.detailMode).toBe('none');
+    expect(s.senderGroup).toBeNull();
+    expect(s.senderGroupKey).toBeNull();
+    expect(s.senderGroupCount).toBe(0);
+    expect(s.conversation).toBeNull();
+    expect(s.selectedMessageId).toBeNull();
+    expect(s.body).toBeNull();
+  });
+
+  it('setFilter(切单账户) 调 clearDetail 清所有详情态', async () => {
+    useMailStore.setState({
+      detailMode: 'senderGroup',
+      senderGroup: SENDER_VIEW,
+      senderGroupKey: 'ad@x.com',
+      senderGroupCount: 4,
+      conversation: { threadId: 't', sentSyncOk: true, messages: [] } as never,
+    } as never);
+
+    await useMailStore.getState().setFilter('a1');
+
+    const s = useMailStore.getState();
+    expect(s.selectedAccountId).toBe('a1'); // setFilter 自身逻辑保留
+    expect(s.detailMode).toBe('none');
+    expect(s.senderGroup).toBeNull();
+    expect(s.conversation).toBeNull();
+  });
+
+  it('selectMailbox 调 clearDetail 清所有详情态', async () => {
+    useMailStore.setState({
+      accounts: [{ id: 'a1' }] as never,
+      selectedAccountId: 'a1',
+      mailboxes: [SENT_BOX] as never,
+      selectedMailboxId: INBOX_BOX.id,
+      detailMode: 'senderGroup',
+      senderGroup: SENDER_VIEW,
+      senderGroupKey: 'ad@x.com',
+      senderGroupCount: 4,
+      conversation: { threadId: 't', sentSyncOk: true, messages: [] } as never,
+    } as never);
+    vi.mocked(tauri.mailboxFolded).mockResolvedValue([]);
+    vi.mocked(tauri.mailboxSync).mockResolvedValue({ newMessageCount: 0, totalInMailbox: 0 });
+
+    await useMailStore.getState().selectMailbox(SENT_BOX.id);
+
+    const s = useMailStore.getState();
+    expect(s.selectedMailboxId).toBe(SENT_BOX.id); // selectMailbox 自身逻辑保留
+    expect(s.detailMode).toBe('none');
+    expect(s.senderGroup).toBeNull();
+    expect(s.conversation).toBeNull();
+  });
+
+  it('【高风险格】senderGroup 态下 deleteMessage 不残留 senderGroup', async () => {
+    useMailStore.setState({
+      messages: [{ id: 'm1', accountId: 'a1', flags: [] }] as never,
+      selectedAccountId: null,
+      selectedMailboxId: null,
+      detailMode: 'senderGroup',
+      senderGroup: SENDER_VIEW,
+      senderGroupKey: 'ad@x.com',
+      senderGroupCount: 4,
+      conversation: { threadId: 't', sentSyncOk: true, messages: [] } as never,
+      selectedMessageId: null,
+      error: null,
+    } as never);
+
+    await useMailStore.getState().deleteMessage('m1');
+
+    const s = useMailStore.getState();
+    expect(s.messages.find((m) => m.id === 'm1')).toBeUndefined();
+    expect(s.detailMode).toBe('none');
+    expect(s.senderGroup).toBeNull();
+    expect(s.senderGroupKey).toBeNull();
+    expect(s.conversation).toBeNull();
+  });
+
+  it('【高风险格】senderGroup 态下 removeAccount 不残留 senderGroup', async () => {
+    useMailStore.setState({
+      accounts: [{ id: 'a1' }, { id: 'a2' }] as never,
+      selectedAccountId: 'a1',
+      detailMode: 'senderGroup',
+      senderGroup: SENDER_VIEW,
+      senderGroupKey: 'ad@x.com',
+      senderGroupCount: 4,
+      conversation: { threadId: 't', sentSyncOk: true, messages: [] } as never,
+    } as never);
+
+    await useMailStore.getState().removeAccount('a1');
+
+    const s = useMailStore.getState();
+    expect(s.accounts.find((a) => a.id === 'a1')).toBeUndefined();
+    expect(s.selectedAccountId).toBeNull(); // removeAccount 自身逻辑保留
+    expect(s.detailMode).toBe('none');
+    expect(s.senderGroup).toBeNull();
+    expect(s.senderGroupKey).toBeNull();
+    expect(s.conversation).toBeNull();
   });
 });

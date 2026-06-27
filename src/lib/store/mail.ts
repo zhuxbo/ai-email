@@ -91,6 +91,23 @@ interface MailState {
   loadingConversation: boolean;
   loadConversation: (messageId: string) => Promise<void>;
 
+  /**
+   * 详情区当前展示哪种态（单一判别联合，渲染按它 switch，禁止 conversation ?? senderGroup 回退）：
+   * - 'none'        → 空态（未选任何邮件 / 已被清理）。
+   * - 'message'     → 单封会话详情（conversation）。
+   * - 'senderGroup' → 同发件人组视图（senderGroup）。
+   * 两态同型 ConversationView，必须靠 detailMode 区分，否则清理遗漏会渲染错。
+   */
+  detailMode: 'none' | 'message' | 'senderGroup';
+  /** senderGroup 态下展示的会话视图（后端 sender_group_thread 返回，至多物化 50 封）。 */
+  senderGroup: ConversationView | null;
+  /** 迟到守卫键：当前组的发件人地址；迟到响应回写前比对，组已切走则丢弃。 */
+  senderGroupKey: string | null;
+  /** 真实组大小（来自被点 FoldedItem.count，ConversationView 无 count 字段故单独存）。 */
+  senderGroupCount: number;
+  /** 打开同发件人组视图：清单封态 → 设 senderGroup 态 → 拉线索（迟到守卫）。 */
+  openSenderGroup: (accountId: string, fromAddr: string, count: number) => Promise<void>;
+
   syncing: boolean;
   loadingBody: boolean;
   error: string | null;
@@ -133,6 +150,12 @@ interface MailState {
    */
   classifiedAffectsCurrentView: () => boolean;
 
+  /**
+   * 统一清空所有详情态（单封会话 + 同发件人组）。在每个切换/清理入口调用，
+   * 杜绝 conversation/senderGroup 跨态残留串台。注意 selectMessage 不调它（它要设 selectedMessageId）。
+   */
+  clearDetail: () => void;
+
   clearError: () => void;
 }
 
@@ -158,6 +181,11 @@ export const useMailStore = create<MailState>((set, get) => ({
 
   conversation: null,
   loadingConversation: false,
+
+  detailMode: 'none',
+  senderGroup: null,
+  senderGroupKey: null,
+  senderGroupCount: 0,
 
   syncing: false,
   loadingBody: false,
@@ -196,13 +224,12 @@ export const useMailStore = create<MailState>((set, get) => ({
   removeAccount: async (id) => {
     try {
       await tauri.accountRemove(id);
-      // 清掉选中（被删账户的邮件可能正选中），过滤回退聚合，再重载聚合列表。
+      // 被删账户的邮件可能正选中/正展示其发件人组 → clearDetail 统一清所有详情态。
       set((s) => ({
         accounts: s.accounts.filter((a) => a.id !== id),
         selectedAccountId: s.selectedAccountId === id ? null : s.selectedAccountId,
-        selectedMessageId: null,
-        body: null,
       }));
+      get().clearDetail();
       await get().reloadMessages();
     } catch (e) {
       set({ error: errMsg(e) });
@@ -244,11 +271,16 @@ export const useMailStore = create<MailState>((set, get) => ({
     // AI summary/translation live in the ai store and reset per message id below.
     // #16 compose 草稿仅在切换到**不同**邮件时才 reset，避免点击已选中行时清空正在编辑的草稿。
     const prevId = get().selectedMessageId;
+    // 切到单封会话态：不调 clearDetail（它会清 selectedMessageId），仅清互斥的 senderGroup 态。
     set({
       selectedMessageId: id,
       body: null,
       loadingBody: true,
       messageOpenSeq: get().messageOpenSeq + 1,
+      detailMode: 'message',
+      senderGroup: null,
+      senderGroupKey: null,
+      senderGroupCount: 0,
     });
     useAiStore.getState().resetForMessage(id);
     if (prevId !== id) {
@@ -285,6 +317,19 @@ export const useMailStore = create<MailState>((set, get) => ({
     }
   },
 
+  openSenderGroup: async (accountId, fromAddr, count) => {
+    // 先统一清掉单封会话态（互斥），再切到 senderGroup 态并设迟到守卫键 + 真实组大小。
+    get().clearDetail();
+    set({ detailMode: 'senderGroup', senderGroupKey: fromAddr, senderGroupCount: count });
+    try {
+      const view = await tauri.senderGroupThread(accountId, fromAddr);
+      // 迟到守卫：组键已切走（用户点了别的组）则丢弃本次响应。
+      if (get().senderGroupKey === fromAddr) set({ senderGroup: view });
+    } catch (e) {
+      if (get().senderGroupKey === fromAddr) set({ error: errMsg(e) });
+    }
+  },
+
   reloadMessages: async () => {
     const { selectedAccountId: filter, selectedMailboxId: mailboxId } = get();
 
@@ -318,20 +363,16 @@ export const useMailStore = create<MailState>((set, get) => ({
   setFilter: async (accountId: string | null) => {
     if (accountId === null) {
       // 切回聚合视图：清信箱列表和选中信箱，回统一 INBOX。
-      set({
-        selectedAccountId: null,
-        selectedMailboxId: null,
-        mailboxes: [],
-        selectedMessageId: null,
-        body: null,
-      });
+      set({ selectedAccountId: null, selectedMailboxId: null, mailboxes: [] });
+      get().clearDetail();
       useAiStore.getState().resetForMessage('');
       await get().reloadMessages();
       return;
     }
 
     // 切换到单账户：拉取该账户信箱列表，默认选中 INBOX。
-    set({ selectedAccountId: accountId, selectedMessageId: null, body: null });
+    set({ selectedAccountId: accountId });
+    get().clearDetail();
     useAiStore.getState().resetForMessage('');
 
     try {
@@ -356,7 +397,8 @@ export const useMailStore = create<MailState>((set, get) => ({
     const { selectedAccountId, mailboxes } = get();
     if (selectedAccountId === null) return;
 
-    set({ selectedMailboxId: mailboxId, selectedMessageId: null, body: null });
+    set({ selectedMailboxId: mailboxId });
+    get().clearDetail();
     useAiStore.getState().resetForMessage('');
 
     // 触发按需同步（非 INBOX 信箱首次访问时拉取新邮件），不阻塞 UI。
@@ -451,21 +493,17 @@ export const useMailStore = create<MailState>((set, get) => ({
   },
 
   deleteMessage: async (id) => {
-    const { messages: prev, selectedMessageId } = get();
+    const { messages: prev, selectedMessageId, detailMode } = get();
     const wasSelected = selectedMessageId === id;
     // 开始新操作即清旧错误（与 setFlagOptimistic 对齐）；乐观移除目标行；
     // 不 bump messageOpenSeq（同切筛选约定）。
     const nextMessages = prev.filter((m) => m.id !== id);
-    const next: Partial<MailState> = {
-      messages: nextMessages,
-      error: null,
-    };
-    if (wasSelected) {
-      next.selectedMessageId = null;
-      // 清 body 避免详情区残留已删邮件（同 removeAccount 的既有惯例）
-      next.body = null;
+    set({ messages: nextMessages, error: null });
+    // 详情区正展示被删邮件（wasSelected）或正展示某发件人组（senderGroup 态无 selectedMessageId
+    // 可比对）时，统一 clearDetail 清掉所有详情态，避免残留已删邮件 / senderGroup 串台。
+    if (wasSelected || detailMode === 'senderGroup') {
+      get().clearDetail();
     }
-    set(next);
     try {
       await tauri.messageDelete(id);
     } catch (e) {
@@ -482,6 +520,18 @@ export const useMailStore = create<MailState>((set, get) => ({
     // 选中具体信箱：按 specialUse 判断是否为 inbox。
     const box = mailboxes.find((m) => m.id === selectedMailboxId);
     return box?.specialUse === 'inbox';
+  },
+
+  clearDetail: () => {
+    set({
+      selectedMessageId: null,
+      body: null,
+      conversation: null,
+      senderGroup: null,
+      senderGroupKey: null,
+      senderGroupCount: 0,
+      detailMode: 'none',
+    });
   },
 
   clearError: () => {

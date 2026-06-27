@@ -6,7 +6,7 @@ import { formatDateTimeCN } from '../lib/utils';
 import { colorForSeed } from './ui/avatar';
 import { BodyView } from './body-view';
 
-function MessageBlock({
+export function MessageBlock({
   msg,
   defaultOpen,
   ownColor,
