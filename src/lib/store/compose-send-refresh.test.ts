@@ -62,6 +62,7 @@ const enMsg: MessageHeader = {
   bodyFetchedAt: null,
   referencesHeader: null,
   filterDisabled: false,
+  categoryLocked: false,
 };
 
 describe('#24 runSend 成功后刷新列表与队列', () => {

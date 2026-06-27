@@ -35,6 +35,7 @@ function mh(
     bodyFetchedAt: null,
     referencesHeader: null,
     filterDisabled: false,
+    categoryLocked: false,
   };
 }
 

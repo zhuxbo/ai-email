@@ -21,7 +21,7 @@ async fn fetch_candidates(pool: &Pool, ids: &[Uuid]) -> AppResult<Vec<MatchCandi
     for chunk in ids.chunks(IN_CHUNK_SIZE) {
         let placeholders = vec!["?"; chunk.len()].join(", ");
         let sql = format!(
-            "SELECT id, from_addr, category, priority FROM messages WHERE id IN ({placeholders})"
+            "SELECT id, from_addr, category, priority FROM messages WHERE id IN ({placeholders}) AND category_locked = 0"
         );
         let mut q = sqlx::query_as::<_, MatchCandidate>(&sql);
         for id in chunk {

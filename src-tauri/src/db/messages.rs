@@ -53,6 +53,8 @@ pub struct MessageHeader {
     pub references_header: Option<String>,
     /// 若为 true，AI 管道跳过签名/引用剥离，直接用原文。由用户或规则引擎设置。
     pub filter_disabled: bool,
+    /// 若为 true，用户已手动锁定分类，AI 分类/自动回复候选跳过此消息。
+    pub category_locked: bool,
 }
 
 /// Owned struct passed to `insert`. Separate from `MessageHeader` so callers don't need to
@@ -87,7 +89,7 @@ const SELECT_COLUMNS: &str = r#"
     m.subject, m.from_addr, m.to_addrs, m.cc_addrs, m.sent_at, m.internal_date,
     m.flags, m.size_bytes, m.has_attachment, m.snippet, m.priority, m.category,
     COALESCE(json_group_array(t.tag) FILTER (WHERE t.tag IS NOT NULL), '[]') AS tags,
-    m.body_fetched_at, m.references_header, m.filter_disabled
+    m.body_fetched_at, m.references_header, m.filter_disabled, m.category_locked
 "#;
 
 /// `INSERT … ON CONFLICT DO NOTHING RETURNING id`. Returns `Some(id)` iff a row was
@@ -325,7 +327,7 @@ pub async fn fetch_for_classify(pool: &Pool, ids: &[Uuid]) -> AppResult<Vec<Clas
     for chunk in ids.chunks(IN_CHUNK_SIZE) {
         let placeholders = vec!["?"; chunk.len()].join(", ");
         let sql = format!(
-            "SELECT id, subject, from_addr, snippet FROM messages WHERE id IN ({placeholders})"
+            "SELECT id, subject, from_addr, snippet FROM messages WHERE id IN ({placeholders}) AND category_locked = 0"
         );
         let mut query = sqlx::query_as::<_, ClassifyInput>(&sql);
         for id in chunk {
@@ -506,5 +508,31 @@ mod tests {
             flags.contains(&"\\Flagged".to_string()),
             "\\Flagged missing: {flags:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn fetch_for_classify_excludes_locked() {
+        use crate::db::test_seed::*;
+        let pool = crate::db::test_pool().await;
+        let acc = seed_account(&pool).await;
+        let mb = seed_mailbox(&pool, acc, "INBOX", None).await;
+        let unlocked = seed_msg(
+            &pool,
+            acc,
+            mb,
+            1,
+            "a@x.com",
+            None,
+            Some("spam"),
+            false,
+            "[]",
+        )
+        .await;
+        let locked = seed_msg(&pool, acc, mb, 2, "b@x.com", None, Some("spam"), true, "[]").await;
+        let got = fetch_for_classify(&pool, &[unlocked, locked])
+            .await
+            .unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, unlocked);
     }
 }

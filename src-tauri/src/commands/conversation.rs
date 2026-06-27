@@ -76,6 +76,7 @@ mod tests {
             body_fetched_at: None,
             references_header: None,
             filter_disabled: false,
+            category_locked: false,
         }
     }
     #[test]

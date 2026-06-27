@@ -55,6 +55,8 @@ export interface MessageHeader {
   bodyFetchedAt: string | null;
   referencesHeader: string | null;
   filterDisabled: boolean;
+  /** 若为 true，用户已手动锁定分类，AI 分类不覆写。 */
+  categoryLocked: boolean;
 }
 
 export interface ConversationMessage extends MessageHeader {
