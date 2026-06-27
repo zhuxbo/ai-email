@@ -3,10 +3,6 @@ import type { Category, MessageHeader } from '../lib/types';
 import { formatDateTimeCN } from '../lib/utils';
 import { colorForSeed } from './ui/avatar';
 
-function isUnread(m: MessageHeader): boolean {
-  return !m.flags.includes('\\Seen');
-}
-
 export const CATEGORY_OPTIONS: { value: Category; label: string; cls: string }[] = [
   {
     value: 'personal',
@@ -61,23 +57,30 @@ function priorityBadge(p: number | null): { label: string; cls: string } | null 
 
 export function MessageRow({
   m,
+  count,
+  hasUnread,
   active,
   onClick,
 }: {
   m: MessageHeader;
+  /** 折叠组内邮件数；single 行传 1。必填，避免 exactOptionalPropertyTypes 下 undefined 漏入。 */
+  count: number;
+  /** 折叠组是否含未读（组级口径，不依赖代表封 flags）。 */
+  hasUnread: boolean;
   active: boolean;
   onClick: () => void;
 }) {
   const accounts = useMailStore((s) => s.accounts);
   const account = accounts.find((a) => a.id === m.accountId);
   const dotColor = colorForSeed(account?.email ?? m.accountId);
-  const unread = isUnread(m);
   const badge = priorityBadge(m.priority);
+  const ariaLabel = count > 1 ? `${String(count)} 封${hasUnread ? '，含未读' : ''}` : undefined;
   return (
     <li>
       <button
         type="button"
         onClick={onClick}
+        aria-label={ariaLabel}
         style={{ borderLeftColor: dotColor }}
         className={`block w-full border-b border-l-4 border-slate-100 px-3 py-2 text-left transition-colors dark:border-slate-800 ${
           active ? 'bg-blue-50 dark:bg-blue-950' : 'hover:bg-slate-50 dark:hover:bg-slate-800'
@@ -85,7 +88,7 @@ export function MessageRow({
       >
         <div className="flex items-baseline justify-between gap-2">
           <span className="flex min-w-0 items-center gap-1.5">
-            {unread && (
+            {hasUnread && (
               <span
                 data-testid="unread-dot"
                 aria-label="未读"
@@ -94,7 +97,7 @@ export function MessageRow({
             )}
             <span
               className={`truncate text-xs ${
-                unread
+                hasUnread
                   ? 'font-semibold text-slate-900 dark:text-slate-100'
                   : 'text-slate-600 dark:text-slate-400'
               }`}
@@ -106,6 +109,14 @@ export function MessageRow({
             {m.flags.includes('\\Flagged') && (
               <span aria-label="已加星" title="已加星" className="text-amber-500">
                 ★
+              </span>
+            )}
+            {count > 1 && (
+              <span
+                data-testid="count-badge"
+                className="rounded-full bg-slate-200 px-1.5 py-0.5 text-[9px] font-semibold leading-none text-slate-600 dark:bg-slate-700 dark:text-slate-300"
+              >
+                {count}
               </span>
             )}
             <span className="whitespace-nowrap text-xs text-slate-400">
@@ -124,7 +135,7 @@ export function MessageRow({
           )}
           <div
             className={`min-w-0 flex-1 truncate text-sm ${
-              unread
+              hasUnread
                 ? 'font-semibold text-slate-900 dark:text-slate-100'
                 : 'text-slate-700 dark:text-slate-300'
             }`}

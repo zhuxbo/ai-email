@@ -3,18 +3,36 @@ import { render, screen, fireEvent } from '@testing-library/react';
 
 import { MessageList } from './message-list';
 import { useMailStore } from '../lib/store/mail';
+import type { FoldedItem } from '../lib/types';
 
-const mkRow = (over: Record<string, unknown>) => ({
+const mkRow = (over: Partial<FoldedItem>): FoldedItem => ({
   id: 'm1',
   accountId: 'a1',
+  mailboxId: 'mb1',
+  imapUid: 1,
+  rfcMessageId: null,
+  threadId: null,
   subject: null,
   fromAddr: null,
+  toAddrs: [],
+  ccAddrs: [],
   sentAt: null,
+  internalDate: null,
+  flags: [],
+  sizeBytes: null,
+  hasAttachment: false,
   snippet: null,
   priority: null,
   category: null,
-  flags: [],
   tags: [],
+  bodyFetchedAt: null,
+  referencesHeader: null,
+  filterDisabled: false,
+  categoryLocked: false,
+  foldKind: 'single',
+  foldKey: 'm1',
+  count: 1,
+  hasUnread: false,
   ...over,
 });
 
@@ -68,7 +86,10 @@ describe('MessageList 全部已读按钮', () => {
 
   it('有未读时「全部已读」按钮可用并带计数', () => {
     useMailStore.setState({
-      messages: [mkRow({ id: 'm1', flags: [] }), mkRow({ id: 'm2', flags: ['\\Seen'] })] as never,
+      messages: [
+        mkRow({ id: 'm1', hasUnread: true }),
+        mkRow({ id: 'm2', hasUnread: false }),
+      ] as never,
     } as never);
     render(<MessageList />);
     const btn = screen.getByRole('button', { name: /全部已读/ });
@@ -78,7 +99,7 @@ describe('MessageList 全部已读按钮', () => {
 
   it('无未读时按钮常驻但禁用', () => {
     useMailStore.setState({
-      messages: [mkRow({ id: 'm1', flags: ['\\Seen'] })] as never,
+      messages: [mkRow({ id: 'm1', hasUnread: false })] as never,
     } as never);
     render(<MessageList />);
     expect(screen.getByRole('button', { name: /全部已读/ })).toBeDisabled();
@@ -87,7 +108,7 @@ describe('MessageList 全部已读按钮', () => {
   it('点击「全部已读」调用 markAllSeen', () => {
     const markAllSeen = vi.fn().mockResolvedValue(undefined);
     useMailStore.setState({
-      messages: [mkRow({ id: 'm1', flags: [] })] as never,
+      messages: [mkRow({ id: 'm1', hasUnread: true })] as never,
       markAllSeen,
     } as never);
     render(<MessageList />);
@@ -114,8 +135,8 @@ describe('MessageList 未读筛选', () => {
   it('开启未读只显示未读邮件', () => {
     useMailStore.setState({
       messages: [
-        mkRow({ id: 'm1', subject: '未读邮件', flags: [] }),
-        mkRow({ id: 'm2', subject: '已读邮件', flags: ['\\Seen'] }),
+        mkRow({ id: 'm1', subject: '未读邮件', hasUnread: true }),
+        mkRow({ id: 'm2', subject: '已读邮件', hasUnread: false }),
       ] as never,
       unreadOnly: true,
     } as never);
@@ -127,7 +148,7 @@ describe('MessageList 未读筛选', () => {
   it('点「未读」按钮切换 unreadOnly', () => {
     const setUnreadOnly = vi.fn();
     useMailStore.setState({
-      messages: [mkRow({ id: 'm1', flags: [] })] as never,
+      messages: [mkRow({ id: 'm1', hasUnread: true })] as never,
       setUnreadOnly,
     } as never);
     render(<MessageList />);

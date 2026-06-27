@@ -59,7 +59,7 @@ export function MessageList() {
       categoryFilter.length === 0
         ? searched
         : searched.filter((m) => m.category !== null && categoryFilter.includes(m.category));
-    const base = unreadOnly ? byCategory.filter((m) => !m.flags.includes('\\Seen')) : byCategory;
+    const base = unreadOnly ? byCategory.filter((m) => m.hasUnread) : byCategory;
     if (!sortByPriority) return base;
     // Stable-sort by priority ascending (1=high first); null priority sorts last.
     return [...base].sort((a, b) => {
@@ -86,10 +86,8 @@ export function MessageList() {
     [accountErrors, accounts],
   );
 
-  const unreadCount = useMemo(
-    () => messages.filter((m) => !m.flags.includes('\\Seen')).length,
-    [messages],
-  );
+  // 用组级 hasUnread 计数（与 store 口径一致），而非代表封 flags。
+  const unreadCount = useMemo(() => messages.filter((m) => m.hasUnread).length, [messages]);
 
   const hasFilter = categoryFilter.length > 0 || query.trim() !== '';
 
@@ -207,6 +205,8 @@ export function MessageList() {
             <MessageRow
               key={m.id}
               m={m}
+              count={m.count}
+              hasUnread={m.hasUnread}
               active={m.id === selectedMessageId}
               onClick={() => void selectMessage(m.id)}
             />
