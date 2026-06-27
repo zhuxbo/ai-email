@@ -112,7 +112,7 @@ git status --short | grep '^??'
 
 按分类列出：
 
-**安全**：新命令是否暴露未授权操作；凭据是否只在 secrecy ↔ keychain 间流转、未 log/未明文落库；HTML 邮件正文是否仍走沙箱 iframe（禁脚本/同源）；AI 调用是否把邮件内容发往非预期端点。
+**安全**：新命令是否暴露未授权操作；凭据是否只在 secrecy ↔ keychain 间流转、未 log/未明文落库；HTML 邮件正文是否经 DOMPurify 清洗（去 script/on\*/javascript:）后注入 Shadow DOM，远程图片按分类策略（仅 personal/work 默认放行，其余拦截到 data-blocked-src）；AI 调用是否把邮件内容发往非预期端点。
 
 **数据**：迁移是否丢数据 / 能否在线平滑执行；`send_log` 审计行只增不删；缓存键（`prompt_hash`）是否含必要区分量（target/intent），防碰撞串味。
 
