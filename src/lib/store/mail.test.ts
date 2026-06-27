@@ -38,7 +38,7 @@ const { mkFoldedMock } = vi.hoisted(() => {
   return { mkFoldedMock };
 });
 
-import { useMailStore } from './mail';
+import { useMailStore, readIntervalMin } from './mail';
 import { useComposeStore } from './compose';
 import type { ConversationView, FoldedItem } from '../types';
 
@@ -1217,5 +1217,51 @@ describe('B6 detailMode 状态机 + openSenderGroup', () => {
     expect(s.senderGroup).toBeNull();
     expect(s.senderGroupKey).toBeNull();
     expect(s.conversation).toBeNull();
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// 自动收信：间隔配置 + lastSyncAt 时间戳 + syncAllInbox（runSync 重构）
+// ────────────────────────────────────────────────────────────────────────────
+describe('mail store 自动收信状态', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+  });
+
+  it('syncAllInbox 同步全部账户，无视 selectedAccountId', async () => {
+    const inboxSync = vi.mocked(tauri.inboxSync);
+    inboxSync.mockResolvedValue(undefined as never);
+    useMailStore.setState({
+      accounts: [{ id: 'a' }, { id: 'b' }] as never,
+      selectedAccountId: 'a',
+    } as never);
+    await useMailStore.getState().syncAllInbox();
+    const synced = inboxSync.mock.calls.map((c) => c[0]).sort();
+    expect(synced).toEqual(['a', 'b']); // 对抗：若误用 selectedAccountId 只会同步 'a'
+  });
+
+  it('runSync 完成后写 lastSyncAt', async () => {
+    vi.mocked(tauri.inboxSync).mockResolvedValue(undefined as never);
+    useMailStore.setState({ accounts: [{ id: 'a' }] as never, lastSyncAt: null } as never);
+    await useMailStore.getState().syncAllInbox();
+    expect(useMailStore.getState().lastSyncAt).toBeTypeOf('number');
+  });
+
+  it('setAutoSyncInterval clamp 非法值到 5，写 localStorage', () => {
+    useMailStore.getState().setAutoSyncInterval(7); // 非法
+    expect(useMailStore.getState().autoSyncIntervalMin).toBe(5);
+    useMailStore.getState().setAutoSyncInterval(15);
+    expect(useMailStore.getState().autoSyncIntervalMin).toBe(15);
+    expect(localStorage.getItem('ai-email-auto-sync-min')).toBe('15');
+  });
+
+  it('readIntervalMin clamp 非法持久值到 5', () => {
+    localStorage.setItem('ai-email-auto-sync-min', '7');
+    expect(readIntervalMin()).toBe(5);
+    localStorage.setItem('ai-email-auto-sync-min', '30');
+    expect(readIntervalMin()).toBe(30);
+    localStorage.removeItem('ai-email-auto-sync-min');
+    expect(readIntervalMin()).toBe(5); // 缺省回 5
   });
 });

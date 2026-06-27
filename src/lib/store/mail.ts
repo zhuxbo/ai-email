@@ -2,7 +2,7 @@
 // state. AI state (summary / translation / models / role defaults) lives in the ai store;
 // this store only owns mail data + the front-end aggregation filter.
 
-import { create } from 'zustand';
+import { create, type StoreApi } from 'zustand';
 
 import * as tauri from '../tauri';
 import type {
@@ -60,6 +60,49 @@ async function setFlagOptimistic(
   }
 }
 
+const AUTO_SYNC_KEY = 'ai-email-auto-sync-min';
+const VALID_INTERVALS: readonly number[] = [0, 1, 5, 15, 30];
+
+/**
+ * 读取持久化的自动收信间隔（分钟）。非法/缺省/localStorage 不可用时回落 5。
+ * 同 theme：纯前端 localStorage，无后端参与。
+ */
+export function readIntervalMin(): number {
+  try {
+    const raw = localStorage.getItem(AUTO_SYNC_KEY);
+    if (raw === null) return 5;
+    const n = parseInt(raw, 10);
+    return VALID_INTERVALS.includes(n) ? n : 5;
+  } catch {
+    return 5;
+  }
+}
+
+/**
+ * 同步内核：被 syncInbox（按筛选）与 syncAllInbox（全部账户）共用。
+ * 步骤序锁死：syncing:true → allSettled（保留 targets[i]??''）→ syncing:false →
+ * reloadMessages → 合并 syncErrs 到 accountErrors（必须在 reload 之后，否则
+ * reloadMessages 的失败路径会覆盖/清空 accountErrors）→ 写 lastSyncAt。
+ */
+async function runSync(
+  set: StoreApi<MailState>['setState'],
+  get: StoreApi<MailState>['getState'],
+  targets: string[],
+): Promise<void> {
+  set({ syncing: true, error: null });
+  const results = await Promise.allSettled(targets.map((id) => tauri.inboxSync(id)));
+  const syncErrs: Record<string, string> = {};
+  results.forEach((r, i) => {
+    if (r.status === 'rejected') syncErrs[targets[i] ?? ''] = errMsg(r.reason);
+  });
+  set({ syncing: false });
+  await get().reloadMessages();
+  if (Object.keys(syncErrs).length > 0) {
+    set((s) => ({ accountErrors: { ...s.accountErrors, ...syncErrs } }));
+  }
+  set({ lastSyncAt: Date.now() });
+}
+
 interface MailState {
   accounts: Account[];
   selectedAccountId: string | null;
@@ -112,6 +155,15 @@ interface MailState {
   syncing: boolean;
   loadingBody: boolean;
   error: string | null;
+
+  /** 自动收信间隔（分钟）：0=关闭，合法值见 VALID_INTERVALS；持久化在 localStorage。 */
+  autoSyncIntervalMin: number;
+  /** 最近一次同步完成的时间戳（ms）；null=本会话尚未同步。 */
+  lastSyncAt: number | null;
+  /** 设置自动收信间隔：clamp 非法值到 5，写内存 + localStorage。 */
+  setAutoSyncInterval: (min: number) => void;
+  /** 同步全部账户收件箱（无视 selectedAccountId）：自动收信轮询专用入口。 */
+  syncAllInbox: () => Promise<void>;
 
   loadAccounts: () => Promise<void>;
   addAccount: (form: AddAccountForm) => Promise<Account>;
@@ -198,6 +250,9 @@ export const useMailStore = create<MailState>((set, get) => ({
   loadingBody: false,
   error: null,
 
+  autoSyncIntervalMin: readIntervalMin(),
+  lastSyncAt: null,
+
   loadAccounts: async () => {
     try {
       const accounts = await tauri.accountsList();
@@ -257,20 +312,27 @@ export const useMailStore = create<MailState>((set, get) => ({
   syncInbox: async (accountId?: string) => {
     const filter = accountId ?? get().selectedAccountId;
     const targets = filter == null ? get().accounts.map((a) => a.id) : [filter];
-    set({ syncing: true, error: null });
-    const results = await Promise.allSettled(targets.map((id) => tauri.inboxSync(id)));
-    const syncErrs: Record<string, string> = {};
-    results.forEach((r, i) => {
-      if (r.status === 'rejected') syncErrs[targets[i] ?? ''] = errMsg(r.reason);
-    });
-    set({ syncing: false });
-    await get().reloadMessages();
-    // 同步阶段失败叠加在加载失败之上 —— 两类失败汇入同一个 accountErrors 通道。
-    if (Object.keys(syncErrs).length > 0) {
-      set((s) => ({ accountErrors: { ...s.accountErrors, ...syncErrs } }));
-    }
+    await runSync(set, get, targets);
     // 后台 classify 写回 category/priority 后会 emit mail://classified，
     // App.tsx 订阅该事件后刷新列表，不再需要固定延迟计时器。
+  },
+
+  syncAllInbox: async () => {
+    await runSync(
+      set,
+      get,
+      get().accounts.map((a) => a.id),
+    );
+  },
+
+  setAutoSyncInterval: (min: number) => {
+    const clamped = VALID_INTERVALS.includes(min) ? min : 5;
+    set({ autoSyncIntervalMin: clamped });
+    try {
+      localStorage.setItem(AUTO_SYNC_KEY, String(clamped));
+    } catch {
+      // localStorage 不可用：内存值仍生效，仅不持久化。
+    }
   },
 
   selectMessage: async (id) => {
