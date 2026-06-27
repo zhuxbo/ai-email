@@ -38,7 +38,7 @@ use crate::error::{AppError, AppResult};
 use crate::keychain;
 
 /// prompt 实质变更时 +1，驱动 A5 一次性后台重跑。
-pub const CLASSIFY_PROMPT_VERSION: i64 = 2;
+pub const CLASSIFY_PROMPT_VERSION: i64 = 3;
 
 const ROLE: &str = "classify";
 const KIND: &str = "classify";

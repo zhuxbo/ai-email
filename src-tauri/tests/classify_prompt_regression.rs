@@ -1,6 +1,8 @@
 //! 防误导 opt-in 回归测试
 //!
-//! 守卫：标题含反垃圾标记（如 `[SPAM]`）的正常业务邮件不应被分类为 spam。
+//! 守卫两类误判：
+//!   - 标题含反垃圾标记（如 `[SPAM]`）的正常业务邮件不应被分类为 spam；
+//!   - 商业服务商的事务性通知（如「Certificate has been created」）应判 notification、不误判 promotion。
 //!
 //! 默认跳过（`#[ignore]`），不打 Anthropic API。
 //! 手动真实 API 运行：
@@ -129,5 +131,65 @@ async fn antispam_label_in_subject_should_not_classify_as_spam() {
         cat, "spam",
         "标题含 [SPAM] 的合法账单邮件不应被判为 spam（实际分类: {cat}）\n\
          期望: notification 或 promotion"
+    );
+}
+
+/// 通知 vs 推广 区分回归：来自商业服务商的事务性「证书已签发」邮件应判为 notification，
+/// 不应因发件方是付费服务商而误判为 promotion / spam。
+///
+/// 默认跳过；真实 API 时手动运行：
+///   ANTHROPIC_API_KEY=sk-ant-... cargo test --test classify_prompt_regression -- --ignored
+#[tokio::test]
+#[ignore]
+async fn certificate_created_should_classify_as_notification() {
+    let api_key_str = match std::env::var("ANTHROPIC_API_KEY") {
+        Ok(k) if !k.is_empty() => k,
+        _ => {
+            eprintln!("缺 ANTHROPIC_API_KEY 环境变量，跳过真实 API 测试");
+            return;
+        }
+    };
+
+    let (pool, _dir) = temp_db().await;
+
+    let model = ai_models::insert(
+        &pool,
+        &AiModelInput {
+            display_name: "Haiku (regression test)".into(),
+            provider: "anthropic".into(),
+            model_id: "claude-haiku-4-5".into(),
+            base_url: None,
+        },
+    )
+    .await
+    .expect("insert ai_model");
+
+    ai_role_defaults::set(&pool, "classify", model.id)
+        .await
+        .expect("set ai_role_default");
+
+    let secret = SecretString::from(api_key_str);
+    keychain::store_ai_key(model.id, &secret).expect("store_ai_key");
+
+    // 典型 SSL 服务商签发通知：商业发件方 + 产品名，但主旨是告知一个已发生的事务
+    let msg_id = seed_message(
+        &pool,
+        "Certificate has been created - *.example.com",
+        "noreply@cnssl.cn",
+        "Your SSL certificate for *.example.com has been issued and is ready to download.",
+    )
+    .await;
+
+    let results = classify::classify_message_ids(&pool, &[msg_id])
+        .await
+        .expect("classify_message_ids");
+
+    let _ = keychain::delete_ai_key(model.id);
+
+    assert_eq!(results.len(), 1, "应返回恰好一条分类结果");
+    let cat = &results[0].classification.category;
+    assert_eq!(
+        cat, "notification",
+        "商业服务商的事务性证书签发邮件应判为 notification（实际分类: {cat}）"
     );
 }

@@ -22,7 +22,7 @@ export const CATEGORY_OPTIONS: { value: Category; label: string; cls: string }[]
   {
     value: 'promotion',
     label: '推广',
-    cls: 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300',
+    cls: 'bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-300',
   },
   {
     value: 'spam',
