@@ -481,6 +481,17 @@ fn preview_from_result(
     }
 }
 
+/// 从邮件的 text_plain / html 字段中取纯文本原文，供过滤剥离管道使用。
+///
+/// 优先级：text_plain → html（先转纯文本）→ 空串。
+fn original_text(text_plain: &Option<String>, html: &Option<String>) -> String {
+    match (text_plain.as_deref(), html.as_deref()) {
+        (Some(t), _) => t.to_string(),
+        (None, Some(h)) => crate::imap::html_text::html_to_text(h),
+        (None, None) => String::new(),
+    }
+}
+
 /// 实时预览当前规则会如何剥离该封邮件。固定用 summary 默认（三类全剥）展示最大剥离效果；
 /// disabled 态时仍实时重算（预览态：让用户看到"若启用会剥成什么"），disabled 字段仅供 UI 标注。
 #[tauri::command]
@@ -494,11 +505,7 @@ pub async fn message_filter_preview(
         .members
         .get(ctx.current_index)
         .ok_or_else(|| AppError::Ai("会话上下文缺当前封".into()))?;
-    let original = current
-        .text_plain
-        .clone()
-        .or_else(|| current.html.clone())
-        .unwrap_or_default();
+    let original = original_text(&current.text_plain, &current.html);
     let msg = messages::get(pool, message_id).await?;
     let disabled = msg.as_ref().map(|m| m.filter_disabled).unwrap_or(false);
 
@@ -755,5 +762,40 @@ mod tests {
         assert_eq!(p.removed[0].kind, "signature");
         assert!(p.disabled);
         assert_eq!(p.original, "完整原文");
+    }
+
+    /// filter_preview_html: 纯 HTML 邮件（text_plain=None）喂入 original_text 后
+    /// 不应含 HTML 标签，且应保留正文中文字。
+    #[test]
+    fn filter_preview_html_strips_tags_keeps_content() {
+        let text_plain: Option<String> = None;
+        let html: Option<String> = Some("<div>正文<br>签名分隔</div>".into());
+        let result = super::original_text(&text_plain, &html);
+        assert!(
+            !result.contains('<'),
+            "原文不应含 HTML 标签，实际：{result:?}"
+        );
+        assert!(
+            result.contains("正文"),
+            "原文应保留正文内容，实际：{result:?}"
+        );
+    }
+
+    /// filter_preview_html: text_plain 有值时直接用之，不解析 html。
+    #[test]
+    fn filter_preview_html_prefers_text_plain() {
+        let text_plain: Option<String> = Some("纯文本正文".into());
+        let html: Option<String> = Some("<div>HTML正文</div>".into());
+        let result = super::original_text(&text_plain, &html);
+        assert_eq!(result, "纯文本正文");
+    }
+
+    /// filter_preview_html: 两者均为 None 返回空串。
+    #[test]
+    fn filter_preview_html_both_none_returns_empty() {
+        let text_plain: Option<String> = None;
+        let html: Option<String> = None;
+        let result = super::original_text(&text_plain, &html);
+        assert!(result.is_empty(), "两者均无时应返回空串，实际：{result:?}");
     }
 }
