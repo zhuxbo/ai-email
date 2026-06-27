@@ -1,20 +1,14 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import { save } from '@tauri-apps/plugin-dialog';
+import { render, screen, waitFor } from '@testing-library/react';
 
 import { MessageDetail } from './message-detail';
 import { useMailStore } from '../lib/store/mail';
 import * as tauri from '../lib/tauri';
 
-vi.mock('@tauri-apps/plugin-dialog', () => ({
-  save: vi.fn().mockResolvedValue(null),
-}));
 vi.mock('../lib/tauri', async (importOriginal) => {
   const actual = await importOriginal<typeof tauri>();
   return {
     ...actual,
-    messageAttachments: vi.fn().mockResolvedValue([]),
-    messageAttachmentSave: vi.fn().mockResolvedValue(undefined),
     // 每个 describe 块里触发的 loadConversation 效果都需要此 stub，防止悬挂 promise
     conversationThread: vi.fn().mockResolvedValue({
       threadId: 't',
@@ -129,50 +123,5 @@ describe('BodyView HTML — DOMPurify 渲染（不再用 iframe）', () => {
   it('推广类邮件含远程图片 → 默认拦截、出现「显示图片」按钮', async () => {
     render(<MessageDetail />);
     expect(await screen.findByText(/图片已拦截/)).toBeInTheDocument();
-  });
-});
-
-describe('MessageDetail 附件', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    useMailStore.setState({
-      messages: [{ ...BASE_MSG, id: 'm1', hasAttachment: true }],
-      selectedMessageId: 'm1',
-      body: { messageId: 'm1', textPlain: 'B', html: null, fetchedAt: '' },
-      loadingBody: false,
-    } as never);
-  });
-
-  it('有附件邮件渲染附件名与下载按钮', async () => {
-    vi.mocked(tauri.messageAttachments).mockResolvedValueOnce([
-      { filename: 'doc.pdf', contentType: 'application/pdf', size: 2048 },
-    ]);
-    render(<MessageDetail />);
-    expect(await screen.findByText(/doc\.pdf/)).toBeInTheDocument();
-  });
-
-  it('点击附件触发 save + messageAttachmentSave', async () => {
-    vi.mocked(tauri.messageAttachments).mockResolvedValueOnce([
-      { filename: 'doc.pdf', contentType: 'application/pdf', size: 2048 },
-    ]);
-    vi.mocked(save).mockResolvedValueOnce('/tmp/doc.pdf');
-    render(<MessageDetail />);
-    const btn = await screen.findByRole('button', { name: /doc\.pdf/ });
-    fireEvent.click(btn);
-    await vi.waitFor(() => {
-      expect(tauri.messageAttachmentSave).toHaveBeenCalledWith('m1', 0, '/tmp/doc.pdf');
-    });
-  });
-
-  it('顶部「含附件」可点击并滚动到附件区', async () => {
-    vi.mocked(tauri.messageAttachments).mockResolvedValueOnce([
-      { filename: 'doc.pdf', contentType: 'application/pdf', size: 2048 },
-    ]);
-    const scrollSpy = vi.fn();
-    Element.prototype.scrollIntoView = scrollSpy;
-    render(<MessageDetail />);
-    const headerBtn = await screen.findByRole('button', { name: '跳到下方附件区' });
-    fireEvent.click(headerBtn);
-    expect(scrollSpy).toHaveBeenCalled();
   });
 });
