@@ -18,15 +18,15 @@ function MessageBlock({
   const [open, setOpen] = useState(defaultOpen);
   const who = msg.fromAddr ?? '(未知)';
   const when = formatDateTimeCN(msg.sentAt);
-  // 自己发的：账号图标色的极浅底（8 位 hex 末尾 14 ≈ 8% alpha）。
-  const ownStyle = ownColor ? { backgroundColor: `${ownColor}14` } : undefined;
+  // 自己发的：账号图标色 3% 极浅底（8 位 hex 末尾 08 ≈ 3% alpha），填满整个外框内。
+  const ownStyle = ownColor ? { backgroundColor: `${ownColor}08` } : undefined;
 
   if (!open) {
     return (
       <button
         type="button"
         style={ownStyle}
-        className="mb-2 flex w-full items-center gap-2 rounded-lg border border-[var(--color-border)] bg-panel px-3 py-2 text-left text-sm"
+        className="mb-2 flex w-full items-center gap-2 rounded-lg border border-[var(--color-border)] px-3 py-2 text-left text-sm"
         onClick={() => {
           setOpen(true);
         }}
@@ -42,13 +42,11 @@ function MessageBlock({
   }
 
   return (
-    <div
-      style={ownStyle}
-      className="mb-3 rounded-lg border border-[var(--color-border)] bg-panel p-3 shadow-sm"
-    >
+    <div style={ownStyle} className="mb-3 rounded-lg border border-[var(--color-border)] px-3 py-2">
+      {/* 发件人 + 时间一行，下面分割线与正文分开 */}
       <button
         type="button"
-        className="mb-2 flex w-full items-baseline justify-between gap-2 text-left"
+        className="flex w-full items-baseline justify-between gap-2 border-b border-[var(--color-border)] pb-1.5 text-left"
         onClick={() => {
           setOpen(false);
         }}
@@ -57,7 +55,9 @@ function MessageBlock({
         <span className="min-w-0 truncate text-sm font-medium text-text-1">{who}</span>
         <span className="shrink-0 whitespace-nowrap text-xs text-text-3">{when}</span>
       </button>
-      <BodyView html={msg.html} textPlain={msg.textPlain} />
+      <div className="pt-2">
+        <BodyView html={msg.html} textPlain={msg.textPlain} category={msg.category} />
+      </div>
     </div>
   );
 }

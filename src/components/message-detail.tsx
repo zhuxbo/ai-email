@@ -1,8 +1,9 @@
 // Right pane: header + conversation thread + actions bar.
 //
-// Body area renders ConversationThread (Task 13). Each ConversationMessage uses BodyView
-// internally, which renders HTML via an iframe with srcDoc + sandbox (no allow-same-origin,
-// no allow-scripts) plus an injected CSP meta tag. Remote images load by default; scripts blocked.
+// Body area renders ConversationThread. Each ConversationMessage uses BodyView internally,
+// which sanitizes HTML with DOMPurify and renders it inside a Shadow DOM (isolates the email's
+// CSS; height auto-fits the content). Scripts / on* / javascript: are stripped; remote images
+// load by default only for personal/work mail, otherwise blocked until the user opts in.
 // selectMessage still fetches store.body so the AI drawer (summary/translate/actions) keeps working.
 // AI 摘要/翻译/写信通过操作条触发右侧抽屉展示。
 

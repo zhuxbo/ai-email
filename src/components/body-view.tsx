@@ -1,35 +1,88 @@
-// CSP injected into every HTML email srcdoc:
-// - default-src 'none' 兜底屏蔽脚本 / 字体 / frame / XHR 等远程资源
-// - style-src 'unsafe-inline' allows inline CSS (needed for most HTML email layouts)
-// - img-src data: https: http: 默认下载远程图片（含 data 内嵌图）。取舍：放开图片即允许
-//   tracking pixel 加载（暴露已读 + IP）；脚本仍由 sandbox(无 allow-scripts) + default-src
-//   'none' 双重屏蔽，放开图片不影响 XSS 防护。
-// Links to external sites are handled by allow-popups on the sandbox (Tauri intercepts them).
-export const EMAIL_CSP =
-  `<meta http-equiv="Content-Security-Policy" ` +
-  `content="default-src 'none'; style-src 'unsafe-inline'; img-src data: https: http:;">`;
+import { useEffect, useRef, useState } from 'react';
+import DOMPurify from 'dompurify';
 
-export function buildSrcdoc(html: string): string {
-  return `${EMAIL_CSP}${html}`;
+import type { Category } from '../lib/types';
+
+// 私人/工作默认显示远程图片；其余（通知/推广/垃圾/未分类）默认拦截，防 tracking pixel 暴露已读+IP。
+export function imagesAllowedByDefault(category: Category | null): boolean {
+  return category === 'personal' || category === 'work';
 }
 
-export function BodyView({ html, textPlain }: { html: string | null; textPlain: string | null }) {
+// 清洗 hook（全局注册一次）：拦截图片时把 src 移到 data-blocked-src（渲染不发请求）；
+// 外链强制新窗口 + noopener（Tauri 拦截 _blank 导航到系统浏览器）。
+// blockImages 为模块级标志，由 sanitizeEmail 在同步 sanitize 前设置（JS 单线程，无并发竞态）。
+let blockImages = false;
+DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+  if (node.nodeName === 'IMG' && blockImages) {
+    const src = node.getAttribute('src');
+    if (src !== null) {
+      node.setAttribute('data-blocked-src', src);
+      node.removeAttribute('src');
+    }
+  }
+  if (node.nodeName === 'A') {
+    node.setAttribute('target', '_blank');
+    node.setAttribute('rel', 'noopener noreferrer');
+  }
+});
+
+// DOMPurify 默认即移除 <script> / 事件处理器(on*) / javascript: 等危险协议；
+// 额外禁掉表单类与可嵌套浏览上下文的标签，缩小邮件可用的交互面。
+export function sanitizeEmail(html: string, allowImages: boolean): string {
+  blockImages = !allowImages;
+  return DOMPurify.sanitize(html, {
+    ADD_ATTR: ['target'],
+    FORBID_TAGS: ['iframe', 'object', 'embed', 'form', 'input', 'button', 'textarea'],
+  });
+}
+
+function HtmlBody({ html, category }: { html: string; category: Category | null }) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const [showImages, setShowImages] = useState(imagesAllowedByDefault(category));
+  const [hasBlocked, setHasBlocked] = useState(false);
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    // Shadow DOM 隔离邮件自带 CSS，避免污染 app 界面；容器高度由内容自然撑开（不固定、不滚动）。
+    const root = host.shadowRoot ?? host.attachShadow({ mode: 'open' });
+    root.innerHTML = sanitizeEmail(html, showImages);
+    setHasBlocked(root.querySelector('[data-blocked-src]') !== null);
+  }, [html, showImages]);
+
+  return (
+    <div>
+      {hasBlocked && !showImages && (
+        <button
+          type="button"
+          onClick={() => {
+            setShowImages(true);
+          }}
+          className="mb-2 rounded border border-[var(--color-border)] bg-panel px-2 py-1 text-xs text-text-2 hover:opacity-90"
+        >
+          🖼 图片已拦截（防追踪），点击显示
+        </button>
+      )}
+      <div ref={hostRef} />
+    </div>
+  );
+}
+
+export function BodyView({
+  html,
+  textPlain,
+  category = null,
+}: {
+  html: string | null;
+  textPlain: string | null;
+  category?: Category | null;
+}) {
   if (html) {
-    return (
-      <iframe
-        // sandbox without allow-same-origin: scripts are blocked and the iframe cannot
-        // access parent-frame cookies or storage. allow-popups lets link clicks open in
-        // the system browser (Tauri intercepts navigation requests).
-        sandbox="allow-popups"
-        srcDoc={buildSrcdoc(html)}
-        title="message body"
-        className="h-full min-h-[300px] w-full rounded border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900"
-      />
-    );
+    return <HtmlBody html={html} category={category} />;
   }
   if (textPlain) {
     return (
-      <pre className="whitespace-pre-wrap break-words rounded border border-slate-200 bg-white p-4 font-sans text-sm text-slate-800 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
+      <pre className="whitespace-pre-wrap break-words font-sans text-sm text-slate-800 dark:text-slate-200">
         {textPlain}
       </pre>
     );

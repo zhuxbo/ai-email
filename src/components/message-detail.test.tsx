@@ -90,13 +90,15 @@ describe('MessageDetail', () => {
   });
 });
 
-describe('BodyView HTML iframe — 默认下载图片 + 脚本仍屏蔽', () => {
+describe('BodyView HTML — DOMPurify 渲染（不再用 iframe）', () => {
   const HTML_CONVERSATION = {
     threadId: 't',
     sentSyncOk: true,
     messages: [
       {
         id: 'm1',
+        accountId: 'a1',
+        category: 'promotion',
         isOwn: false,
         html: '<p>Hello <img src="https://tracker.example.com/pixel.gif"></p>',
         textPlain: null,
@@ -107,9 +109,7 @@ describe('BodyView HTML iframe — 默认下载图片 + 脚本仍屏蔽', () => 
   };
 
   beforeEach(() => {
-    // conversationThread mock 返回含 HTML 的会话（覆盖文件级 stub）
     vi.mocked(tauri.conversationThread).mockResolvedValue(HTML_CONVERSATION);
-    // 通过 conversation 驱动 HTML 渲染（Task 13 后 body 区渲染 ConversationThread）
     useMailStore.setState({
       messages: [BASE_MSG],
       selectedMessageId: 'm1',
@@ -120,53 +120,15 @@ describe('BodyView HTML iframe — 默认下载图片 + 脚本仍屏蔽', () => 
     } as never);
   });
 
-  // loadConversation 先 set conversation=null 再回填，所以需要等 iframe 出现后再断言
-  async function getIframe() {
-    return waitFor(() => {
-      const el = document.querySelector('iframe');
-      if (el === null) throw new Error('iframe not found');
-      return el;
-    });
-  }
-
-  it('iframe 设置了 sandbox 属性', async () => {
+  it('html 邮件用 DOMPurify 渲染、不再出现 iframe', async () => {
     render(<MessageDetail />);
-    const iframe = await getIframe();
-    expect(iframe.hasAttribute('sandbox')).toBe(true);
+    await screen.findByText(/p@x\.com/);
+    expect(document.querySelector('iframe')).toBeNull();
   });
 
-  it('iframe sandbox 不含 allow-same-origin（防止绕过 CSP）', async () => {
+  it('推广类邮件含远程图片 → 默认拦截、出现「显示图片」按钮', async () => {
     render(<MessageDetail />);
-    const sandbox = (await getIframe()).getAttribute('sandbox') ?? '';
-    expect(sandbox).not.toContain('allow-same-origin');
-  });
-
-  it('srcdoc 注入 CSP meta，并以 default-src none 兜底屏蔽脚本等远程资源', async () => {
-    render(<MessageDetail />);
-    const srcdoc = (await getIframe()).getAttribute('srcdoc') ?? '';
-    expect(srcdoc.toLowerCase()).toContain('content-security-policy');
-    // 仍以 default-src 'none' 兜底：脚本 / 字体 / connect 等远程资源默认屏蔽
-    expect(srcdoc).toMatch(/default-src\s+'none'/i);
-  });
-
-  it('默认下载远程图片：img-src 允许 https（同时保留 data 内嵌图）', async () => {
-    render(<MessageDetail />);
-    const srcdoc = (await getIframe()).getAttribute('srcdoc') ?? '';
-    // 「默认下载图片」：放开 img-src 到远程源，tracking 防护让位于显示便利
-    expect(srcdoc).toMatch(/img-src[^;]*\bhttps:/i);
-    expect(srcdoc).toMatch(/img-src[^;]*\bdata:/i);
-  });
-
-  it('放开图片不放开脚本：sandbox 不含 allow-scripts', async () => {
-    render(<MessageDetail />);
-    const sandbox = (await getIframe()).getAttribute('sandbox') ?? '';
-    expect(sandbox).not.toContain('allow-scripts');
-  });
-
-  it('原始 HTML 内容仍被包含在 srcdoc 中', async () => {
-    render(<MessageDetail />);
-    const srcdoc = (await getIframe()).getAttribute('srcdoc') ?? '';
-    expect(srcdoc).toContain('<p>Hello');
+    expect(await screen.findByText(/图片已拦截/)).toBeInTheDocument();
   });
 });
 
