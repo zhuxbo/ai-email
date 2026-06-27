@@ -136,7 +136,8 @@ interface MailState {
   markSeenSilent: (id: string) => Promise<void>;
   /**
    * 手动修改分类：乐观更新三切片（列表代表 / conversation 成员 / senderGroup 成员），
-   * 调 message_set_category 并 reloadMessages；失败全量回滚。
+   * 调 message_set_category 并 reloadMessages；失败时**精准回滚**——只反转该条的
+   * category/categoryLocked、基于当前 state，不抹掉飞行期内并发对其它字段/其它条的更新。
    */
   setCategoryLocal: (messageId: string, category: Category) => Promise<void>;
   /** 全部已读：把当前视图所有未读批量标 \Seen（乐观 + 失败 reload 恢复）。 */
@@ -458,32 +459,43 @@ export const useMailStore = create<MailState>((set, get) => ({
   },
 
   setCategoryLocal: async (messageId, category) => {
+    // #10 精准回滚：失败时只反转该条的 category/categoryLocked、基于**当前** state（非旧快照），
+    // 故飞行期内并发对同一条消息其它字段（如 markSeenSilent 的 \Seen）或对其它消息的乐观更新
+    // 都不会被本次回滚抹掉。参照 setFlagOptimistic 的按粒度回滚。
+    //
     // 泛型 patch 保子类型：非泛型 (m:MessageHeader) map over ConversationMessage[] 会把元素
     // 拓宽回 MessageHeader 丢 textPlain/html/isOwn → TS2322。
-    const patch = <T extends MessageHeader>(m: T): T =>
-      m.id === messageId ? { ...m, category, categoryLocked: true } : m;
-    const prev = {
-      messages: get().messages,
-      conversation: get().conversation,
-      senderGroup: get().senderGroup,
+    // cat 容许 null：忠实回滚到该条原本可能为 null 的 category。
+    const applyCategory = (cat: Category | null, locked: boolean): void => {
+      const patch = <T extends MessageHeader>(m: T): T =>
+        m.id === messageId ? { ...m, category: cat, categoryLocked: locked } : m;
+      const conv = get().conversation;
+      const sg = get().senderGroup;
+      set({
+        messages: get().messages.map(patch),
+        conversation: conv !== null ? { ...conv, messages: conv.messages.map(patch) } : null,
+        senderGroup: sg !== null ? { ...sg, messages: sg.messages.map(patch) } : null,
+      });
     };
-    const curConv = get().conversation;
-    const curSg = get().senderGroup;
-    set({
-      messages: get().messages.map(patch),
-      conversation: curConv !== null ? { ...curConv, messages: curConv.messages.map(patch) } : null,
-      senderGroup: curSg !== null ? { ...curSg, messages: curSg.messages.map(patch) } : null,
-    });
+
+    // 从当前 state 找该条的原 category/locked（messages 代表或 conversation/senderGroup 成员任一，
+    // 同一条故任取其一即可）；用于失败时精准回滚。
+    const findById = (m: MessageHeader): boolean => m.id === messageId;
+    const prevMsg =
+      get().messages.find(findById) ??
+      get().conversation?.messages.find(findById) ??
+      get().senderGroup?.messages.find(findById);
+    const prevCategory = prevMsg?.category;
+    const prevLocked = prevMsg?.categoryLocked;
+
+    applyCategory(category, true);
     try {
       await tauri.messageSetCategory(messageId, category);
       await get().reloadMessages();
     } catch (e) {
-      set({
-        messages: prev.messages,
-        conversation: prev.conversation,
-        senderGroup: prev.senderGroup,
-        error: errMsg(e),
-      });
+      // 只回滚该条的 category/locked（基于当前 state），保留并发对同条其它字段 / 其它条的更新。
+      if (prevCategory !== undefined) applyCategory(prevCategory, prevLocked ?? false);
+      set({ error: errMsg(e) });
     }
   },
 

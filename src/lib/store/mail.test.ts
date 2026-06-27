@@ -967,6 +967,50 @@ describe('B7 setCategoryLocal 乐观更新三切片', () => {
 
     expect(s.error).toContain('set-cat boom');
   });
+
+  it('#10 失败时只回滚该消息 category，保留并发对同消息 flags 的更新（精准回滚）', async () => {
+    // 这是整快照回滚的致命边界：旧实现 catch 时把 prev.messages（含旧 flags）整体写回，
+    // 会抹掉飞行期内并发对同一条消息其它字段（如 markSeenSilent 写入的 \\Seen）的更新。
+    // 精准回滚只反转该条 category/categoryLocked、基于当前 state spread 其它字段，故 flags 保留。
+    useMailStore.setState({
+      messages: [{ ...mkFoldedMock('m1', 'a1'), category: 'spam', flags: [] }] as never,
+      conversation: null,
+      senderGroup: null,
+      error: null,
+    } as never);
+
+    // setCategory 挂起，之后失败 —— 留出窗口模拟并发 flags 更新。
+    let rejectCat!: (e: Error) => void;
+    vi.mocked(tauri.messageSetCategory).mockImplementationOnce(
+      () =>
+        new Promise((_res, rej) => {
+          rejectCat = rej;
+        }),
+    );
+
+    const pending = useMailStore.getState().setCategoryLocal('m1', 'personal');
+
+    // 飞行期内并发：对同一条消息标 \\Seen（模拟 markSeenSilent / setFlagOptimistic）。
+    useMailStore.setState({
+      messages: useMailStore
+        .getState()
+        .messages.map((m) => (m.id === 'm1' ? { ...m, flags: ['\\Seen'] } : m)),
+    } as never);
+
+    // 此刻乐观写已把 category 改为 personal、且并发写已把 flags 设为 [\\Seen]
+    expect(useMailStore.getState().messages.find((m) => m.id === 'm1')?.category).toBe('personal');
+    expect(useMailStore.getState().messages.find((m) => m.id === 'm1')?.flags).toContain('\\Seen');
+
+    rejectCat(new Error('set-cat boom'));
+    await pending;
+
+    const m1 = useMailStore.getState().messages.find((m) => m.id === 'm1');
+    // category 回滚到 spam（本次操作失败）
+    expect(m1?.category).toBe('spam');
+    // 并发写入的 \\Seen 仍保留（整快照回滚会丢 → 测试 FAIL，证判别力）
+    expect(m1?.flags).toContain('\\Seen');
+    expect(useMailStore.getState().error).toContain('set-cat boom');
+  });
 });
 
 describe('B6 detailMode 状态机 + openSenderGroup', () => {

@@ -40,17 +40,26 @@ pub async fn run_once_if_needed(pool: &Pool) {
     };
 
     if ids.is_empty() {
-        let _ = app_meta::set(pool, KEY_VERSION, &CLASSIFY_PROMPT_VERSION.to_string()).await;
+        if let Err(e) = app_meta::set(pool, KEY_VERSION, &CLASSIFY_PROMPT_VERSION.to_string()).await
+        {
+            tracing::warn!(error = %e, "reclassify: 写 app_meta 版本号失败（无候选）");
+        }
         return;
     }
 
     match classify_message_ids(pool, &ids).await {
         Ok(_) => {
-            let _ = app_meta::set(pool, KEY_VERSION, &CLASSIFY_PROMPT_VERSION.to_string()).await;
+            if let Err(e) =
+                app_meta::set(pool, KEY_VERSION, &CLASSIFY_PROMPT_VERSION.to_string()).await
+            {
+                tracing::warn!(error = %e, "reclassify: 写 app_meta 版本号失败");
+            }
         }
         Err(e) => {
             tracing::warn!(error = %e, "reclassify 失败，记尝试次数");
-            let _ = app_meta::set(pool, KEY_ATTEMPTS, &(attempts + 1).to_string()).await;
+            if let Err(e) = app_meta::set(pool, KEY_ATTEMPTS, &(attempts + 1).to_string()).await {
+                tracing::warn!(error = %e, "reclassify: 写 app_meta 尝试次数失败");
+            }
         }
     }
 }

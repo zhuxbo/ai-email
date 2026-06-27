@@ -441,4 +441,71 @@ mod tests {
         assert!(matches!(it.fold_kind, FoldKind::Thread));
         assert_eq!(it.count, 2);
     }
+
+    // 跨账户对抗：thread_counts 的 `WHERE account_id=?1`（账户级 thread_size）是承重谓词。
+    // 账户 A 一封 notification thread_id="T-shared"，账户 B 两封 notification 同字符串 thread_id
+    // （模拟跨账户碰撞）。A 的账户级 thread_size 只数 A 自己=1 → 孤立通知走 sender 分支 →
+    // single、count=1，不被 B 的 2 封污染成 thread/count=3。删 `WHERE account_id=?1` → 此测试 FAIL。
+    #[tokio::test]
+    async fn cross_account_thread_size_isolated() {
+        let pool = crate::db::test_pool().await;
+        let acc_a = seed_account(&pool).await;
+        let acc_b = seed_account(&pool).await;
+        let inbox_a = seed_mailbox(&pool, acc_a, "INBOX", None).await;
+        let inbox_b = seed_mailbox(&pool, acc_b, "INBOX", None).await;
+
+        // 账户 A：INBOX 一封 notification，thread_id="T-shared"。
+        let a_id = seed_msg(
+            &pool,
+            acc_a,
+            inbox_a,
+            1,
+            "n@x.com",
+            Some("T-shared"),
+            NOTIF,
+            false,
+            "[]",
+        )
+        .await;
+        // 账户 B：INBOX 两封 notification，同字符串 thread_id（跨账户碰撞）。
+        seed_msg(
+            &pool,
+            acc_b,
+            inbox_b,
+            2,
+            "n@x.com",
+            Some("T-shared"),
+            NOTIF,
+            false,
+            "[]",
+        )
+        .await;
+        seed_msg(
+            &pool,
+            acc_b,
+            inbox_b,
+            3,
+            "n@x.com",
+            Some("T-shared"),
+            NOTIF,
+            false,
+            "[]",
+        )
+        .await;
+
+        let items = mailbox_folded(&pool, inbox_a, 50).await.unwrap();
+        assert_eq!(items.len(), 1, "A 只有一封 {items:#?}");
+        // A 的账户级 thread_size=1 → 孤立 notification 折成 sender 组、single、count=1。
+        let it = find(&items, "sender:n@x.com");
+        assert!(
+            matches!(it.fold_kind, FoldKind::Single),
+            "A 的 thread_size 应只数 A 自己=1（孤立）→ single，不被 B 污染：{:?}",
+            it.fold_kind
+        );
+        assert_eq!(
+            it.count, 1,
+            "账户级 thread_size 隔离：A 自己=1，不被 B 的 2 封污染成 3"
+        );
+        assert_eq!(it.representative.id, a_id);
+    }
 }
