@@ -46,6 +46,11 @@ describe('MessageList 空态', () => {
       sortByPriority: false,
       query: '',
       accountErrors: {},
+      // AutoSyncIndicator 渲染会读这些字段；缺则读到 undefined。
+      error: null,
+      lastSyncAt: null,
+      autoSyncIntervalMin: 5,
+      syncAllInbox: vi.fn().mockResolvedValue(undefined),
     } as never);
   });
   it('0 账户引导添加', () => {
@@ -55,7 +60,12 @@ describe('MessageList 空态', () => {
   it('有账户空列表提示同步', () => {
     useMailStore.setState({ accounts: [{ id: 'a1' }] as never } as never);
     render(<MessageList />);
-    expect(screen.getByText('收件箱为空，点左侧 🔄 同步。')).toBeInTheDocument();
+    expect(screen.getByText('收件箱为空，点右上角同步。')).toBeInTheDocument();
+  });
+  it('空状态文案不含「点左侧」', () => {
+    useMailStore.setState({ accounts: [{ id: 'a1' }] as never } as never);
+    render(<MessageList />);
+    expect(screen.queryByText(/点左侧/)).toBeNull();
   });
   it('部分账户加载失败时显示提示并映射邮箱', () => {
     useMailStore.setState({
@@ -81,6 +91,9 @@ describe('MessageList 全部已读按钮', () => {
       query: '',
       accountErrors: {},
       error: null,
+      lastSyncAt: null,
+      autoSyncIntervalMin: 5,
+      syncAllInbox: vi.fn().mockResolvedValue(undefined),
     } as never);
   });
 
@@ -129,6 +142,9 @@ describe('MessageList 未读筛选', () => {
       query: '',
       accountErrors: {},
       error: null,
+      lastSyncAt: null,
+      autoSyncIntervalMin: 5,
+      syncAllInbox: vi.fn().mockResolvedValue(undefined),
     } as never);
   });
 
