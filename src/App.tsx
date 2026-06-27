@@ -12,6 +12,7 @@ import { useAiStore } from './lib/store/ai';
 import { useAutoReplyStore } from './lib/store/auto-reply';
 import { useComposeStore } from './lib/store/compose';
 import { useDbStore } from './lib/store/db';
+import { useAutoSync } from './lib/hooks/use-auto-sync';
 import { useMailStore } from './lib/store/mail';
 import { applyTheme, useUiStore } from './lib/store/ui';
 import {
@@ -34,10 +35,8 @@ function App() {
   const selectedMailboxId = useMailStore((s) => s.selectedMailboxId);
   const selectMailbox = useMailStore((s) => s.selectMailbox);
   const messageOpenSeq = useMailStore((s) => s.messageOpenSeq);
-  const syncing = useMailStore((s) => s.syncing);
   const setFilter = useMailStore((s) => s.setFilter);
   const setQuery = useMailStore((s) => s.setQuery);
-  const syncInbox = useMailStore((s) => s.syncInbox);
   const error = useMailStore((s) => s.error);
   const clearError = useMailStore((s) => s.clearError);
   const aiError = useAiStore((s) => s.error);
@@ -48,6 +47,9 @@ function App() {
   const [addOpen, setAddOpen] = useState(false);
   const [autoReplyOpen, setAutoReplyOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+
+  // 自动收信：按设置间隔周期同步全部账户（间隔=0 时停用）。
+  useAutoSync();
 
   // 把 store 初始主题（可能跟随系统）同步到 <html>。
   useEffect(() => {
@@ -206,16 +208,10 @@ function App() {
           selectedAccountId,
           mailboxes,
           selectedMailboxId,
-          syncing,
           onSelectAccount: (id) => void setFilter(id),
           onSelectMailbox: (mailboxId) => void selectMailbox(mailboxId),
           onAddAccount: () => {
             setAddOpen(true);
-          },
-          onSync: () => {
-            void syncInbox();
-            // 队列/列表刷新由后台任务完成后 emit 的事件驱动（autoreply://updated、
-            // mail://classified），不再需要固定延迟计时器。
           },
           onOpenSettings: () => {
             setSettingsOpen(true);

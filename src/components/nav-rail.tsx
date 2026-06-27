@@ -69,11 +69,9 @@ interface Props {
   selectedAccountId: string | null;
   mailboxes: Mailbox[];
   selectedMailboxId: string | null;
-  syncing: boolean;
   onSelectAccount: (id: string | null) => void;
   onSelectMailbox: (mailboxId: string) => void;
   onAddAccount: () => void;
-  onSync: () => void;
   onOpenSettings: () => void;
   onOpenAutoReply: () => void;
   autoReplyCount: number;
@@ -84,11 +82,9 @@ export function NavRail({
   selectedAccountId,
   mailboxes,
   selectedMailboxId,
-  syncing,
   onSelectAccount,
   onSelectMailbox,
   onAddAccount,
-  onSync,
   onOpenSettings,
   onOpenAutoReply,
   autoReplyCount,
@@ -182,15 +178,6 @@ export function NavRail({
         </>
       )}
 
-      <div className="h-px w-6 bg-slate-700" />
-      <IconButton
-        label="同步收件箱"
-        onClick={onSync}
-        disabled={syncing || accounts.length === 0}
-        className="h-8 w-8 text-slate-200 hover:bg-slate-700"
-      >
-        {syncing ? '⟳' : '🔄'}
-      </IconButton>
       <div className="relative">
         <IconButton
           label="自动回复中心"

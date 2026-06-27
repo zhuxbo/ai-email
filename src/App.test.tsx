@@ -54,6 +54,8 @@ const mailState = {
   selectedAccountId: null as string | null,
   messageOpenSeq: 0,
   syncing: false,
+  // useAutoSync 读此值；0=停用，避免在事件订阅测试里启动定时器。
+  autoSyncIntervalMin: 0,
   error: null as string | null,
   syncInbox: vi.fn().mockResolvedValue(undefined),
   removeAccount: vi.fn().mockResolvedValue(undefined),

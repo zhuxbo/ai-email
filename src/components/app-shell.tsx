@@ -13,11 +13,9 @@ interface NavProps {
   selectedAccountId: string | null;
   mailboxes: Mailbox[];
   selectedMailboxId: string | null;
-  syncing: boolean;
   onSelectAccount: (id: string | null) => void;
   onSelectMailbox: (mailboxId: string) => void;
   onAddAccount: () => void;
-  onSync: () => void;
   onOpenSettings: () => void;
   onOpenAutoReply: () => void;
   autoReplyCount: number;

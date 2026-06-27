@@ -34,11 +34,9 @@ function baseProps() {
     selectedAccountId: 'a',
     mailboxes: [] as Mailbox[],
     selectedMailboxId: null as string | null,
-    syncing: false,
     onSelectAccount: vi.fn(),
     onSelectMailbox: vi.fn(),
     onAddAccount: vi.fn(),
-    onSync: vi.fn(),
     onOpenSettings: vi.fn(),
     onOpenAutoReply: vi.fn(),
     autoReplyCount: 0,
@@ -53,36 +51,11 @@ describe('NavRail', () => {
     expect(p.onSelectAccount).toHaveBeenCalledWith('b');
   });
 
-  it('fires sync', async () => {
-    const p = baseProps();
-    render(<NavRail {...p} />);
-    await userEvent.click(screen.getByRole('button', { name: '同步收件箱' }));
-    expect(p.onSync).toHaveBeenCalledOnce();
-  });
-
-  it('disables sync while syncing', () => {
-    const p = { ...baseProps(), syncing: true };
-    render(<NavRail {...p} />);
-    expect(screen.getByRole('button', { name: '同步收件箱' })).toBeDisabled();
-  });
-
   it('fires open-settings on the settings button', async () => {
     const p = baseProps();
     render(<NavRail {...p} />);
     await userEvent.click(screen.getByRole('button', { name: '设置' }));
     expect(p.onOpenSettings).toHaveBeenCalledOnce();
-  });
-
-  it('disables sync only when no accounts', () => {
-    const p = { ...baseProps(), accounts: [], selectedAccountId: null };
-    render(<NavRail {...p} />);
-    expect(screen.getByRole('button', { name: '同步收件箱' })).toBeDisabled();
-  });
-
-  it('keeps sync enabled in 全部 view (accounts present, none selected)', () => {
-    const p = { ...baseProps(), selectedAccountId: null };
-    render(<NavRail {...p} />);
-    expect(screen.getByRole('button', { name: '同步收件箱' })).toBeEnabled();
   });
 
   it('fires select(null) on 全部 click and marks it pressed while aggregating', async () => {
