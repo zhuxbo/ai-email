@@ -304,6 +304,17 @@ pub async fn remove(pool: &Pool, id: Uuid) -> AppResult<()> {
     Ok(())
 }
 
+/// 手动设置消息分类并锁定（category_locked = 1），AI 后续不再覆写。
+/// 返回受影响行数：1 = 成功，0 = 消息已删（调用方可按需 warn）。
+pub async fn set_category_locked(pool: &Pool, id: Uuid, category: &str) -> AppResult<u64> {
+    let res = sqlx::query("UPDATE messages SET category = ?2, category_locked = 1 WHERE id = ?1")
+        .bind(id)
+        .bind(category)
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected())
+}
+
 /// Header subset used by the classifier prompt builder. Pulls just what the prompt sees
 /// (id + subject + from + snippet) so we don't waste tokens on internal_date / flags.
 #[derive(Debug, Clone, FromRow)]
@@ -534,5 +545,58 @@ mod tests {
             .unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].id, unlocked);
+    }
+
+    #[tokio::test]
+    async fn set_category_locked_updates_and_locks() {
+        use crate::db::test_seed::*;
+        let pool = crate::db::test_pool().await;
+        let acc = seed_account(&pool).await;
+        let mb = seed_mailbox(&pool, acc, "INBOX", None).await;
+        let id = seed_msg(
+            &pool,
+            acc,
+            mb,
+            1,
+            "a@x.com",
+            None,
+            Some("spam"),
+            false,
+            "[]",
+        )
+        .await;
+        assert_eq!(set_category_locked(&pool, id, "personal").await.unwrap(), 1);
+        assert_eq!(
+            category_of(&pool, id).await.unwrap().as_deref(),
+            Some("personal")
+        );
+        // 锁定后不进分类
+        assert!(fetch_for_classify(&pool, &[id]).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn set_category_locked_deleted_is_zero_rows() {
+        use crate::db::test_seed::*;
+        let pool = crate::db::test_pool().await;
+        let acc = seed_account(&pool).await;
+        let mb = seed_mailbox(&pool, acc, "INBOX", None).await;
+        let id = seed_msg(
+            &pool,
+            acc,
+            mb,
+            1,
+            "a@x.com",
+            None,
+            Some("spam"),
+            false,
+            "[]",
+        )
+        .await;
+        sqlx::query("DELETE FROM messages WHERE id=?1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(set_category_locked(&pool, id, "work").await.unwrap(), 0);
     }
 }

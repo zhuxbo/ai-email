@@ -530,6 +530,27 @@ pub async fn message_set_filter_disabled(
     messages::set_filter_disabled(state.pool().await?, message_id, disabled).await
 }
 
+const SETTABLE_CATEGORIES: &[&str] = &["personal", "work", "notification", "promotion", "spam"];
+
+/// 手动设置邮件类别并锁定，AI 后续不再覆写。
+/// 消息已删（0 行）时记 warn 后正常返回，与既有删除容错惯例一致。
+#[tauri::command]
+pub async fn message_set_category(
+    state: State<'_, AppState>,
+    message_id: Uuid,
+    category: String,
+) -> Result<(), AppError> {
+    if !SETTABLE_CATEGORIES.contains(&category.as_str()) {
+        return Err(AppError::Config(format!("非法类别: {category}")));
+    }
+    let pool = state.pool().await?;
+    let rows = crate::db::messages::set_category_locked(pool, message_id, &category).await?;
+    if rows == 0 {
+        tracing::warn!(%message_id, "set_category 目标已删（0 行），跳过");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
