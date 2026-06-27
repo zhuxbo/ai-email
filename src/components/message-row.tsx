@@ -124,30 +124,28 @@ export function MessageRow({
             </span>
           </span>
         </div>
-        <div className="flex items-center gap-2">
-          {badge && (
-            <span
-              className={`shrink-0 rounded px-1 text-[9px] font-bold leading-3 ${badge.cls}`}
-              title={`priority ${String(m.priority)}`}
-            >
-              {badge.label}
-            </span>
-          )}
-          <div
-            className={`min-w-0 flex-1 truncate text-sm ${
-              hasUnread
-                ? 'font-semibold text-slate-900 dark:text-slate-100'
-                : 'text-slate-700 dark:text-slate-300'
-            }`}
-          >
-            {m.subject ?? '(无主题)'}
-          </div>
+        <div
+          className={`truncate text-sm ${
+            hasUnread
+              ? 'font-semibold text-slate-900 dark:text-slate-100'
+              : 'text-slate-700 dark:text-slate-300'
+          }`}
+        >
+          {m.subject ?? '(无主题)'}
         </div>
         {m.snippet && (
           <div className="truncate text-xs text-slate-500 dark:text-slate-400">{m.snippet}</div>
         )}
-        {(m.category !== null || m.tags.length > 0) && (
+        {(badge !== null || m.category !== null || m.tags.length > 0) && (
           <div className="mt-1 flex flex-wrap items-center gap-1">
+            {badge && (
+              <span
+                className={`rounded px-1 py-0.5 text-[9px] font-bold ${badge.cls}`}
+                title={`priority ${String(m.priority)}`}
+              >
+                {badge.label}
+              </span>
+            )}
             {m.category !== null && (
               <span
                 className={`rounded px-1 py-0.5 text-[9px] font-medium ${categoryClass(m.category)}`}

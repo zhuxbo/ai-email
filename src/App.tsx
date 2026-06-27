@@ -5,6 +5,7 @@ import { AddAccountDialog } from './components/add-account-dialog';
 import { AiDrawer } from './components/ai-drawer';
 import { SettingsDialog } from './components/settings-dialog';
 import { AutoReplyDialog } from './components/auto-reply-dialog';
+import { ErrorToasts, type ErrorToastItem } from './components/error-toasts';
 import { MessageDetail } from './components/message-detail';
 import { MessageList } from './components/message-list';
 import { useAiStore } from './lib/store/ai';
@@ -148,7 +149,7 @@ function App() {
   }, [dbStatus, loadAccounts]);
 
   // mail / ai / compose / autoReply 四路错误各自成条，互不掩盖；各自独立关闭，不连带清掉对方未读的错误。
-  const errorToasts: { key: string; text: string; clear: () => void }[] = [];
+  const errorToasts: ErrorToastItem[] = [];
   if (error !== null) errorToasts.push({ key: 'mail', text: error, clear: clearError });
   if (aiError !== null)
     errorToasts.push({
@@ -251,29 +252,7 @@ function App() {
           setAutoReplyOpen(false);
         }}
       />
-      {errorToasts.length > 0 && (
-        <div className="fixed bottom-4 left-4 z-50 flex max-w-md flex-col gap-2">
-          {errorToasts.map((t) => (
-            <div
-              key={t.key}
-              role="alert"
-              className="rounded bg-danger px-3 py-2 text-xs text-white shadow-lg"
-            >
-              <div className="flex items-start gap-2">
-                <span className="flex-1 break-words">{t.text}</span>
-                <button
-                  type="button"
-                  onClick={t.clear}
-                  aria-label="关闭错误提示"
-                  className="text-white/70 transition-colors hover:text-white"
-                >
-                  ×
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+      <ErrorToasts toasts={errorToasts} />
     </>
   );
 }

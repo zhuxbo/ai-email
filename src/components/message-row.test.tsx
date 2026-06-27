@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 
 import { MessageRow } from './message-row';
@@ -137,5 +137,69 @@ describe('MessageRow 星标指示', () => {
       />,
     );
     expect(screen.queryByLabelText('已加星')).toBeNull();
+  });
+});
+
+describe('MessageRow 优先级标签', () => {
+  beforeEach(() => {
+    useMailStore.setState({ accounts: [{ id: 'a1', email: 'acc@x.com' }] as never } as never);
+  });
+
+  it('priority=3 的「低」与分类/AI 标签同处底部标签行（非主题行）', () => {
+    render(
+      <MessageRow
+        m={{ ...m, priority: 3, category: 'notification', tags: ['订单验证'] }}
+        count={1}
+        hasUnread={false}
+        active={false}
+        onClick={vi.fn()}
+      />,
+    );
+    const low = screen.getByText('低');
+    // 优先级标签的父容器即底部标签行——必须与分类/AI 标签同处一行（而非主题行）。
+    // 若 badge 仍在主题行，其父容器只含主题、不含「通知」，断言即失败。
+    const tagRow = low.parentElement;
+    expect(tagRow?.textContent).toContain('通知');
+    expect(tagRow?.textContent).toContain('订单验证');
+  });
+
+  it('priority=1 渲染「高」', () => {
+    render(
+      <MessageRow
+        m={{ ...m, priority: 1 }}
+        count={1}
+        hasUnread={false}
+        active={false}
+        onClick={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('高')).toBeInTheDocument();
+  });
+
+  it('priority=2 不渲染优先级标签', () => {
+    render(
+      <MessageRow
+        m={{ ...m, priority: 2, category: null, tags: [] }}
+        count={1}
+        hasUnread={false}
+        active={false}
+        onClick={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText('高')).toBeNull();
+    expect(screen.queryByText('低')).toBeNull();
+  });
+
+  it('仅有优先级标签（无分类、无 tag）也渲染标签行', () => {
+    render(
+      <MessageRow
+        m={{ ...m, priority: 3, category: null, tags: [] }}
+        count={1}
+        hasUnread={false}
+        active={false}
+        onClick={vi.fn()}
+      />,
+    );
+    expect(screen.getByText('低')).toBeInTheDocument();
   });
 });
