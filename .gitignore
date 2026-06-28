@@ -68,3 +68,6 @@ coverage/
 
 # Superpowers (process docs / brainstorm artifacts — never committed)
 .superpowers/
+
+# dev 构建的明文凭据旁路文件（debug-only，实落 app 数据目录、本不在仓库；此为兜底）
+dev-credentials.json

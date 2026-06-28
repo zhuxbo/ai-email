@@ -214,7 +214,10 @@ pub fn run() {
             move |app| {
                 // db_path 解析必须在 setup 里做（需要 app.path()），失败属于配置错误，
                 // 仍同步返回 Err——此时窗口还没显示，给 Builder 一个明确的失败信号。
-                let db_path = app.path().app_data_dir()?.join("ai-email.db");
+                let app_data = app.path().app_data_dir()?;
+                let db_path = app_data.join("ai-email.db");
+                #[cfg(debug_assertions)]
+                crate::keychain::set_dev_cred_path(app_data.join("dev-credentials.json"));
 
                 let db_cell: Arc<OnceCell<Pool>> = Arc::new(OnceCell::new());
                 // 初始化为 Initializing，run_db_init 完成后更新为 Ready/Failed。
