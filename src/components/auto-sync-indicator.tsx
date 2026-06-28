@@ -6,7 +6,7 @@ function fmtTime(ts: number): string {
   return new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
 }
 
-export function AutoSyncIndicator() {
+export function AutoSyncIndicator({ className = '' }: { className?: string }) {
   const syncing = useMailStore((s) => s.syncing);
   const lastSyncAt = useMailStore((s) => s.lastSyncAt);
   const intervalMin = useMailStore((s) => s.autoSyncIntervalMin);
@@ -73,12 +73,12 @@ export function AutoSyncIndicator() {
       disabled={disabled}
       title={title}
       aria-label="自动收信状态，点击立即同步"
-      className={`flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-medium hover:bg-slate-100 disabled:opacity-60 dark:hover:bg-slate-800 ${toneCls[tone]}`}
+      className={`flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium hover:bg-slate-100 disabled:opacity-60 dark:hover:bg-slate-800 ${toneCls[tone]} ${className}`}
     >
       <span aria-hidden="true" className={syncing ? 'animate-spin' : ''}>
         {tone === 'fail' ? '⚠' : syncing ? '⟳' : '🔄'}
       </span>
-      <span>{label}</span>
+      <span className="hidden sm:inline">{label}</span>
     </button>
   );
 }

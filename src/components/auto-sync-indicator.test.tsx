@@ -76,4 +76,9 @@ describe('AutoSyncIndicator', () => {
     render(<AutoSyncIndicator />);
     expect(screen.getByRole('button')).toBeDisabled();
   });
+
+  it('透传 className 到根 button', () => {
+    render(<AutoSyncIndicator className="ml-auto" />);
+    expect(screen.getByRole('button')).toHaveClass('ml-auto');
+  });
 });
