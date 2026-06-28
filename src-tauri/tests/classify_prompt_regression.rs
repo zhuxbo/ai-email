@@ -20,6 +20,18 @@ use ai_email_lib::{ai::classify, keychain};
 use secrecy::SecretString;
 use uuid::Uuid;
 
+/// debug 构建下 keychain 走文件态：两个 #[ignore] 例共用同一固定 dev 凭据文件
+/// （不同 model UUID 天然隔离、env 恒同值 → `--ignored` 并行也无 race）。release 为 no-op。
+#[cfg(debug_assertions)]
+fn ensure_dev_cred_env() {
+    use std::sync::OnceLock;
+    static DEV_CRED: OnceLock<std::path::PathBuf> = OnceLock::new();
+    let path = DEV_CRED.get_or_init(|| std::env::temp_dir().join("ai-email-itest-dev-creds.json"));
+    std::env::set_var("AI_EMAIL_DEV_CRED_FILE", path);
+}
+#[cfg(not(debug_assertions))]
+fn ensure_dev_cred_env() {}
+
 /// 创建临时 on-disk DB，返回 (Pool, TempDir guard)。
 async fn temp_db() -> (Pool, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("create tempdir");
@@ -106,6 +118,7 @@ async fn antispam_label_in_subject_should_not_classify_as_spam() {
 
     // 把 env key 写入 OS keychain（classify_message_ids 从 keychain 取 key）
     let secret = SecretString::from(api_key_str);
+    ensure_dev_cred_env();
     keychain::store_ai_key(model.id, &secret).expect("store_ai_key");
 
     // Seed 一封看起来是合法账单通知、但标题含 [SPAM] 标记的邮件
@@ -169,6 +182,7 @@ async fn certificate_created_should_classify_as_notification() {
         .expect("set ai_role_default");
 
     let secret = SecretString::from(api_key_str);
+    ensure_dev_cred_env();
     keychain::store_ai_key(model.id, &secret).expect("store_ai_key");
 
     // 典型 SSL 服务商签发通知：商业发件方 + 产品名，但主旨是告知一个已发生的事务
