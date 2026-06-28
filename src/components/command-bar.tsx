@@ -1,4 +1,5 @@
 import { IconButton } from './ui/icon-button';
+import { AutoSyncIndicator } from './auto-sync-indicator';
 import { useUiStore } from '../lib/store/ui';
 
 interface Props {
@@ -13,8 +14,8 @@ export function CommandBar({ onQueryChange, onAiCommand }: Props) {
 
   return (
     <header className="flex items-center gap-2.5 border-b border-[var(--color-border)] bg-panel px-3.5 py-2">
-      <span className="text-[13px] font-bold text-text-1">统一收件箱</span>
-      <div className="flex max-w-md flex-1 items-center gap-2 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-app px-2.5 py-1.5">
+      <span className="hidden text-[13px] font-bold text-text-1 sm:inline">统一收件箱</span>
+      <div className="flex min-w-0 max-w-md flex-1 items-center gap-2 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-app px-2.5 py-1.5">
         <span className="text-text-3">🔍</span>
         <input
           type="text"
@@ -29,12 +30,13 @@ export function CommandBar({ onQueryChange, onAiCommand }: Props) {
           ⌘K
         </kbd>
       </div>
+      <AutoSyncIndicator className="ml-auto" />
       <button
         type="button"
         onClick={onAiCommand}
         aria-pressed={drawerOpen}
         title={drawerOpen ? '关闭 AI 指令面板' : '打开 AI 指令面板'}
-        className={`ml-auto rounded-[var(--radius-md)] px-2.5 py-1.5 text-xs font-medium text-white ${
+        className={`rounded-[var(--radius-md)] px-2.5 py-1.5 text-xs font-medium text-white ${
           drawerOpen ? 'bg-accent' : 'bg-ink'
         }`}
       >
