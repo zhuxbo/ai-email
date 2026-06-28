@@ -43,6 +43,8 @@ pnpm tauri build                                   # macOS 桌面 .app / .dmg
 pnpm build:android    # Android arm64 APK
 ```
 
+> 可选(macOS):用**自签名代码签名证书**签构建,可避免每次重建后系统钥匙串重复授权(ad-hoc 签名每次变、「始终允许」存不住)。先在钥匙串访问建一张「代码签名」自签名证书、对其设「代码签名: 始终信任」,再 `APPLE_SIGNING_IDENTITY="<证书名>" pnpm tauri build`。dev(`tauri dev`)的重复授权由 debug 文件态旁路自动解决,无需签名。
+
 ## 平台
 
 macOS(arm64)+ Android(arm64-v8a)。
