@@ -7,7 +7,6 @@ import { useMemo } from 'react';
 import { useMailStore } from '../lib/store/mail';
 import { decodeModifiedUtf7 } from '../lib/utils';
 import type { Mailbox } from '../lib/types';
-import { AutoSyncIndicator } from './auto-sync-indicator';
 import { CATEGORY_OPTIONS, MessageRow } from './message-row';
 
 // sender 折叠组 foldKey 形如 'sender:<from_addr>'（后端 db/folded.rs 拼装），剥前缀得发件人地址。
@@ -108,7 +107,6 @@ export function MessageList() {
             </span>
           </h2>
           <div className="flex items-center gap-1">
-            <AutoSyncIndicator />
             <button
               type="button"
               onClick={() => void markAllSeen()}
@@ -200,7 +198,7 @@ export function MessageList() {
           </li>
         ) : messages.length === 0 ? (
           <li className="px-3 py-6 text-center text-xs text-slate-500 dark:text-slate-400">
-            {title}为空，点右上角同步。
+            {title}为空，点顶部同步。
           </li>
         ) : filtered.length === 0 ? (
           <li className="px-3 py-6 text-center text-xs text-slate-500 dark:text-slate-400">
