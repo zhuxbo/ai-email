@@ -111,7 +111,8 @@ mod tests {
         let p = dir.path().join("c.json");
         write(&p, Namespace::Mail, "same", "mail-val").unwrap();
         write(&p, Namespace::Ai, "same", "ai-val").unwrap();
-        // 变异验证：bucket() 把 Mail/Ai 写反 → 此两断言 FAIL
+        // 变异验证：bucket() 让一个命名空间单向塌缩到另一桶（如 `Ai => &mut creds.mail`）
+        // → 此两断言 FAIL。（对称互换 Mail↔Ai 因读写共用 bucket 而自洽、测不出，勿用）
         assert_eq!(
             read(&p, Namespace::Mail, "same").unwrap().as_deref(),
             Some("mail-val")
