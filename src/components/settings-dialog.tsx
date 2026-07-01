@@ -39,7 +39,7 @@ export function SettingsDialog({ open, onClose }: Props) {
         onClick={(e) => {
           e.stopPropagation();
         }}
-        className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-lg bg-white shadow-xl dark:bg-slate-900"
+        className="flex h-[600px] max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-lg bg-white shadow-xl dark:bg-slate-900"
       >
         <header className="flex items-center justify-between border-b border-slate-200 px-6 py-3 dark:border-slate-700">
           <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">设置中心</h2>
