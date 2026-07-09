@@ -7,6 +7,7 @@ import { AccountsPanel } from './account-settings-dialog';
 import { AiModelsPanel } from './ai-settings-dialog';
 import { AutoSyncPanel } from './auto-sync-panel';
 import { FilterRulesPanel } from './filter-rules-dialog';
+import { MaintenancePanel } from './maintenance-panel';
 import { SenderFiltersPanel } from './sender-filters-dialog';
 
 interface Props {
@@ -20,6 +21,7 @@ const TABS = [
   { key: 'filters', label: '黑白名单' },
   { key: 'ai-filters', label: 'AI 过滤规则' },
   { key: 'auto-sync', label: '收信' },
+  { key: 'maintenance', label: '维护' },
 ] as const;
 type TabKey = (typeof TABS)[number]['key'];
 
@@ -79,6 +81,7 @@ export function SettingsDialog({ open, onClose }: Props) {
           {tab === 'filters' && <SenderFiltersPanel />}
           {tab === 'ai-filters' && <FilterRulesPanel />}
           {tab === 'auto-sync' && <AutoSyncPanel />}
+          {tab === 'maintenance' && <MaintenancePanel />}
         </div>
       </div>
     </div>

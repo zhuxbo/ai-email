@@ -33,6 +33,16 @@ describe('sanitizeEmail（DOMPurify 清洗 — 安全核心）', () => {
     expect(out).not.toContain('<input');
   });
 
+  it('移除 style 属性，阻断 CSS url() 追踪', () => {
+    const out = sanitizeEmail(
+      '<p style="background:url(https://tracker.example/pixel);position:fixed">hi</p>',
+      false,
+    );
+    expect(out).toContain('hi');
+    expect(out).not.toContain('style=');
+    expect(out).not.toContain('tracker.example');
+  });
+
   it('allowImages=true 保留 img src', () => {
     const out = sanitizeEmail('<img src="https://example.com/a.png">', true);
     expect(out).toContain('src="https://example.com/a.png"');
@@ -80,6 +90,53 @@ describe('BodyView', () => {
     fireEvent.click(screen.getByText(/图片已拦截/));
     await waitFor(() => {
       expect(screen.queryByText(/图片已拦截/)).toBeNull();
+    });
+  });
+
+  it('点击显示后恢复 data URL 内联图片 src', async () => {
+    const dataUrl = 'data:image/png;base64,iVBORw0KGgo=';
+    const { container } = render(
+      <BodyView html={`<img src="${dataUrl}">`} textPlain={null} category="promotion" />,
+    );
+    const shadowHost = (): HTMLDivElement => {
+      const host = Array.from(container.querySelectorAll('div')).find(
+        (node): node is HTMLDivElement => node.shadowRoot !== null,
+      );
+      if (host === undefined) throw new Error('BodyView shadow host not found');
+      return host;
+    };
+
+    await waitFor(() => {
+      expect(screen.getByText(/图片已拦截/)).toBeInTheDocument();
+      expect(shadowHost().shadowRoot?.querySelector('img')).toBeTruthy();
+    });
+    const host = shadowHost();
+    expect(host.shadowRoot?.querySelector('img')?.getAttribute('src')).toBeNull();
+
+    fireEvent.click(screen.getByText(/图片已拦截/));
+
+    await waitFor(() => {
+      expect(host.shadowRoot?.querySelector('img')?.getAttribute('src')).toBe(dataUrl);
+    });
+  });
+
+  it('Shadow DOM 注入邮件基础样式，限制图片和表格撑宽', async () => {
+    const { container } = render(
+      <BodyView
+        html='<table><tr><td><img src="data:image/png;base64,iVBORw0KGgo=" width="2000"></td></tr></table>'
+        textPlain={null}
+        category="work"
+      />,
+    );
+
+    await waitFor(() => {
+      const host = Array.from(container.querySelectorAll('div')).find(
+        (node): node is HTMLDivElement => node.shadowRoot !== null,
+      );
+      const style = host?.shadowRoot?.querySelector('style')?.textContent ?? '';
+      expect(style).toContain('img');
+      expect(style).toContain('max-width: 100%');
+      expect(style).toContain('table');
     });
   });
 });

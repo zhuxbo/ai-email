@@ -19,7 +19,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::ai::{extract_json, prompts, AiClient, CompletionRequest, SystemBlock, UserMessage};
+use crate::ai::{
+    extract_json, prompts, safe_model_json_error, AiClient, CompletionRequest, SystemBlock,
+    UserMessage,
+};
 use crate::db::ai_results::{self, AiResultInsert};
 use crate::db::messages::MessageHeader;
 use crate::db::{ai_role_defaults, Pool};
@@ -104,12 +107,8 @@ pub async fn summarize_message(pool: &Pool, message_id: Uuid) -> AppResult<Summa
         })
         .await?;
 
-    let summary: Summary = serde_json::from_str(extract_json(&response.text)).map_err(|e| {
-        AppError::Ai(format!(
-            "模型未返回合法 JSON：{e}\n原文：{}",
-            truncate_for_log(&response.text)
-        ))
-    })?;
+    let summary: Summary = serde_json::from_str(extract_json(&response.text))
+        .map_err(|e| safe_model_json_error("摘要模型", &e))?;
 
     let input_tokens = i32::try_from(response.usage.input_tokens).ok();
     let output_tokens = i32::try_from(response.usage.output_tokens).ok();
@@ -166,16 +165,6 @@ fn compute_prompt_hash(system: &str, user: &str) -> String {
     hasher.update(b"\n---\n");
     hasher.update(user.as_bytes());
     hex::encode(hasher.finalize())
-}
-
-fn truncate_for_log(s: &str) -> String {
-    let limit = 500;
-    if s.chars().count() <= limit {
-        s.to_string()
-    } else {
-        let cut: String = s.chars().take(limit).collect();
-        format!("{cut}…")
-    }
 }
 
 /// 取当前封净增量并截断。filter_disabled=1 时跳过剥离用原文。无 thread 上下文时退化为当前封原文。

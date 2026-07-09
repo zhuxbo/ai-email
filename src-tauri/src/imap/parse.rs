@@ -3,7 +3,9 @@
 //! Body parsing (text/plain extraction, snippet, attachments) is Sprint 1.4 — this module
 //! only touches the metadata we persist on first sync.
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use mail_parser::{Address, HeaderValue, MessageParser, MimeHeaders, PartType};
+use regex::Regex;
 use time::OffsetDateTime;
 
 #[derive(Debug, Default)]
@@ -170,7 +172,8 @@ pub fn parse_body(raw: &[u8]) -> ParsedBody {
     let html = msg.html_body.iter().find_map(|&idx| {
         let part = &msg.parts[idx as usize];
         if matches!(part.body, PartType::Html(_)) {
-            part.text_contents().map(str::to_string)
+            part.text_contents()
+                .map(|html| inline_cid_images(html, &msg))
         } else {
             None
         }
@@ -181,6 +184,79 @@ pub fn parse_body(raw: &[u8]) -> ParsedBody {
         html,
         has_attachment: msg.attachment_count() > 0,
     }
+}
+
+fn inline_cid_images(html: &str, msg: &mail_parser::Message<'_>) -> String {
+    let mut out = html.to_string();
+    for part in &msg.parts {
+        let Some(cid) = part.content_id().map(normalize_content_id) else {
+            continue;
+        };
+        if cid.is_empty() || !contains_cid_url(&out) {
+            continue;
+        }
+        let Some(content_type) = inline_image_content_type(part) else {
+            continue;
+        };
+        let data_url = format!(
+            "data:{content_type};base64,{}",
+            BASE64_STANDARD.encode(part.contents())
+        );
+        out = replace_cid_url(&out, &cid, &data_url);
+    }
+    neutralize_unmatched_cid_image_sources(&out)
+}
+
+fn contains_cid_url(value: &str) -> bool {
+    value
+        .as_bytes()
+        .windows(4)
+        .any(|window| window.eq_ignore_ascii_case(b"cid:"))
+}
+
+fn normalize_content_id(content_id: &str) -> String {
+    content_id
+        .trim()
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+        .trim()
+        .to_string()
+}
+
+fn inline_image_content_type(part: &mail_parser::MessagePart<'_>) -> Option<String> {
+    let content_type = part.content_type()?;
+    if !content_type.ctype().eq_ignore_ascii_case("image") {
+        return None;
+    }
+    let subtype = content_type.subtype()?;
+    Some(format!(
+        "{}/{}",
+        content_type.ctype().to_ascii_lowercase(),
+        subtype.to_ascii_lowercase()
+    ))
+}
+
+fn replace_cid_url(html: &str, cid: &str, data_url: &str) -> String {
+    let pattern = format!(r"(?i:cid:)<?(?i:{})>?", regex::escape(cid));
+    Regex::new(&pattern)
+        .expect("escaped cid must produce a valid regex")
+        .replace_all(html, data_url)
+        .into_owned()
+}
+
+pub(crate) fn contains_cid_image_src(html: &str) -> bool {
+    cid_image_src_attr_regex().is_match(html)
+}
+
+fn neutralize_unmatched_cid_image_sources(html: &str) -> String {
+    cid_image_src_attr_regex()
+        .replace_all(html, "<img$attrs")
+        .into_owned()
+}
+
+fn cid_image_src_attr_regex() -> Regex {
+    Regex::new(r#"(?is)<img\b(?P<attrs>[^>]*)\s+src\s*=\s*(?:"cid:[^"]*"|'cid:[^']*'|cid:[^\s>]+)"#)
+        .expect("cid image src regex must be valid")
 }
 
 /// 附件元信息（不含内容）。`size` 为解码后字节数。供前端「附件列表」展示与下载。
@@ -437,6 +513,57 @@ iVBORw0KGgo=\r\n\
             "multipart/related 应提取 html，实际 html={:?}",
             p.html
         );
+    }
+
+    #[test]
+    fn parses_multipart_related_html_inlines_cid_image() {
+        const MAIL: &[u8] = b"\
+From: a@x\r\n\
+Subject: cid image\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: multipart/related; boundary=\"R\"\r\n\
+\r\n\
+--R\r\n\
+Content-Type: text/html\r\n\
+\r\n\
+<p>proof</p><img src=\"CID:logo\">\r\n\
+--R\r\n\
+Content-Type: image/png\r\n\
+Content-ID: <logo>\r\n\
+Content-Transfer-Encoding: base64\r\n\
+\r\n\
+iVBORw0KGgo=\r\n\
+--R--\r\n";
+        let p = parse_body(MAIL);
+        let html = p.html.as_deref().unwrap_or("");
+        assert!(
+            html.contains("src=\"data:image/png;base64,iVBORw0KGgo=\""),
+            "cid 图片应转成浏览器可加载的 data URL，实际 html={html:?}"
+        );
+        assert!(
+            !html.contains("CID:logo"),
+            "渲染层无法直接加载 cid: URL，实际 html={html:?}"
+        );
+    }
+
+    #[test]
+    fn parses_html_neutralizes_unmatched_cid_image_src() {
+        const MAIL: &[u8] = b"\
+From: a@x\r\n\
+Subject: missing cid image\r\n\
+MIME-Version: 1.0\r\n\
+Content-Type: text/html; charset=utf-8\r\n\
+\r\n\
+<p><img src=\"cid:missing@example.com\" width=\"533\" height=\"123\"></p>\r\n";
+
+        let p = parse_body(MAIL);
+        let html = p.html.as_deref().unwrap_or("");
+
+        assert!(!html.to_ascii_lowercase().contains("src=\"cid:"));
+        assert!(!html
+            .to_ascii_lowercase()
+            .contains("cid:missing@example.com"));
+        assert!(html.contains("width=\"533\""));
     }
 
     // 带附件的 HTML 邮件：multipart/mixed { multipart/alternative { text, html }, attachment }。

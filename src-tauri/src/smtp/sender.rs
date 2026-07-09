@@ -6,6 +6,7 @@ use lettre::transport::smtp::client::{Tls, TlsParameters};
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use uuid::Uuid;
 
 use crate::db::accounts::Account;
@@ -13,6 +14,12 @@ use crate::db::send_log::{self, SendLog, SendLogInsert};
 use crate::db::{accounts, messages, Pool};
 use crate::error::{AppError, AppResult};
 use crate::keychain;
+
+const SMTP_TIMEOUT: Duration = Duration::from_secs(120);
+
+fn smtp_timeout() -> Duration {
+    SMTP_TIMEOUT
+}
 
 /// What the UI sends across the FFI.
 #[derive(Debug, Clone, Deserialize)]
@@ -422,6 +429,7 @@ fn build_transport(
         .port(port)
         .tls(Tls::Wrapper(tls))
         .credentials(creds)
+        .timeout(Some(smtp_timeout()))
         .build();
     Ok(mailer)
 }
@@ -457,6 +465,15 @@ mod tests {
             in_reply_to: None,
             ai_assisted: false,
         }
+    }
+
+    #[test]
+    fn smtp_timeout_is_bounded_for_release_sends() {
+        let secs = smtp_timeout().as_secs();
+        assert!(
+            (30..=180).contains(&secs),
+            "SMTP timeout should be bounded for production sends, got {secs}s"
+        );
     }
 
     // ── #35: recipient validation & dedup ─────────────────────────────────────

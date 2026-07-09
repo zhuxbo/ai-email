@@ -2,9 +2,12 @@
 //!
 //! AI commands move into separate command modules in Sprints 2+.
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use tauri::State;
+use tauri_plugin_dialog::{DialogExt, FilePath};
 use uuid::Uuid;
 
 use crate::db::bodies::{self, MessageBody};
@@ -19,12 +22,82 @@ use crate::keychain;
 use crate::smtp::{self, SendDraft, SendReceipt};
 use crate::AppState;
 
+const MAX_PAGE_LIMIT: i64 = 200;
+const MAX_BULK_SEEN_IDS: usize = 500;
+const DEFAULT_ATTACHMENT_FILENAME: &str = "attachment.bin";
+
+fn normalize_page_limit(limit: i64) -> AppResult<i64> {
+    if limit <= 0 {
+        return Err(AppError::Config(format!(
+            "limit must be positive, got {limit}"
+        )));
+    }
+    Ok(limit.min(MAX_PAGE_LIMIT))
+}
+
+fn normalize_page_offset(offset: i64) -> AppResult<i64> {
+    if offset < 0 {
+        return Err(AppError::Config(format!(
+            "offset must not be negative, got {offset}"
+        )));
+    }
+    Ok(offset)
+}
+
+fn validate_bulk_seen_ids(ids: &[Uuid]) -> AppResult<()> {
+    if ids.len() > MAX_BULK_SEEN_IDS {
+        return Err(AppError::Config(format!(
+            "too many message ids: {} (max {MAX_BULK_SEEN_IDS})",
+            ids.len()
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct AccountSyncGuard<'a> {
+    account_id: Uuid,
+    sync_in_flight: &'a StdMutex<HashSet<Uuid>>,
+}
+
+impl Drop for AccountSyncGuard<'_> {
+    fn drop(&mut self) {
+        match self.sync_in_flight.lock() {
+            Ok(mut set) => {
+                set.remove(&self.account_id);
+            }
+            Err(e) => {
+                tracing::error!(error = %e, account_id = %self.account_id, "sync guard lock poisoned");
+            }
+        }
+    }
+}
+
+fn try_acquire_account_sync(
+    sync_in_flight: &StdMutex<HashSet<Uuid>>,
+    account_id: Uuid,
+) -> AppResult<AccountSyncGuard<'_>> {
+    let mut set = sync_in_flight
+        .lock()
+        .map_err(|e| AppError::Other(anyhow::anyhow!("sync guard lock poisoned: {e}")))?;
+    if !set.insert(account_id) {
+        return Err(AppError::Config(
+            "该账户正在同步，请等待当前同步完成".into(),
+        ));
+    }
+    Ok(AccountSyncGuard {
+        account_id,
+        sync_in_flight,
+    })
+}
+
 #[tauri::command]
 pub async fn inbox_sync(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     account_id: Uuid,
 ) -> AppResult<SyncReport> {
+    let _guard = try_acquire_account_sync(&state.sync_in_flight, account_id)?;
     let pool = state.pool().await?;
     let account = db::accounts::get(pool, account_id)
         .await?
@@ -61,6 +134,7 @@ pub async fn mailbox_sync(
     account_id: Uuid,
     mailbox_name: String,
 ) -> AppResult<SyncReport> {
+    let _guard = try_acquire_account_sync(&state.sync_in_flight, account_id)?;
     let pool = state.pool().await?;
     let account = db::accounts::get(pool, account_id)
         .await?
@@ -80,6 +154,8 @@ pub async fn messages_list(
     limit: i64,
     offset: i64,
 ) -> AppResult<Vec<MessageHeader>> {
+    let limit = normalize_page_limit(limit)?;
+    let offset = normalize_page_offset(offset)?;
     messages::list_in_mailbox(state.pool().await?, mailbox_id, limit, offset).await
 }
 
@@ -118,7 +194,10 @@ async fn message_body_impl(
 ) -> AppResult<MessageBody> {
     // 快路径：缓存命中直接返回。
     if let Some(body) = bodies::get(pool, id).await? {
-        return Ok(body);
+        if !body_cache_needs_refetch(&body) {
+            return Ok(body);
+        }
+        tracing::info!(message_id = %id, "cached message body contains cid image; refetching");
     }
 
     // 检查是否已有并发请求在取此 id 的 body。
@@ -162,6 +241,12 @@ async fn message_body_impl(
     // 成功则返回正文，失败则透传真实的 IMAP/网络错误，而非误导性的 "not in cache"。多个迟到者
     // 各自重取属罕见的错误恢复路径，可接受（不重新竞选 leader，避免逻辑复杂化）。
     fetch_and_cache_body(pool, id).await
+}
+
+fn body_cache_needs_refetch(body: &MessageBody) -> bool {
+    body.html
+        .as_deref()
+        .is_some_and(parse::contains_cid_image_src)
 }
 
 /// RAII guard：在 drop 时从 single-flight map 移除条目，并通过 watch sender 通知所有等待者。
@@ -248,22 +333,73 @@ pub async fn message_attachments(
     Ok(parse::parse_attachments(&raw))
 }
 
-/// 把某邮件第 `index` 个附件写入用户「另存为」选定的 `dest` 路径。用户主动下载到自选位置
-/// （dialog 已授权），故允许写出 app 数据目录之外。越界返回错误。
-#[tauri::command]
-pub async fn message_attachment_save(
-    state: State<'_, AppState>,
-    id: Uuid,
-    index: usize,
-    dest: String,
-) -> AppResult<()> {
-    let raw = fetch_raw_body(state.pool().await?, id).await?;
-    let bytes = parse::extract_attachment_bytes(&raw, index)
-        .ok_or_else(|| AppError::Config(format!("attachment {index} not found")))?;
-    tokio::task::spawn_blocking(move || std::fs::write(&dest, bytes))
+fn attachment_default_filename(filename: Option<&str>) -> String {
+    let Some(filename) = filename else {
+        return DEFAULT_ATTACHMENT_FILENAME.to_string();
+    };
+    let candidate = filename
+        .trim()
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .trim();
+    let sanitized: String = candidate.chars().filter(|c| !c.is_control()).collect();
+    if sanitized.is_empty() || sanitized == "." || sanitized == ".." {
+        DEFAULT_ATTACHMENT_FILENAME.to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn file_path_to_native_path(file_path: FilePath) -> AppResult<PathBuf> {
+    file_path.into_path().map_err(|_| {
+        AppError::Config("当前平台暂不支持向该目标保存附件，请选择本机文件路径".into())
+    })
+}
+
+async fn write_attachment_to_path(path: PathBuf, bytes: Vec<u8>) -> AppResult<()> {
+    tokio::task::spawn_blocking(move || std::fs::write(path, bytes))
         .await
         .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?
         .map_err(|e| AppError::Config(format!("写入附件失败：{e}")))?;
+    Ok(())
+}
+
+/// 把某邮件第 `index` 个附件写入用户在后端原生保存框中选择的位置。
+/// 前端只传 message id + 附件序号，不再把任意文件路径穿过命令边界。
+#[tauri::command]
+pub async fn message_attachment_save(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: Uuid,
+    index: usize,
+) -> AppResult<()> {
+    let raw = fetch_raw_body(state.pool().await?, id).await?;
+    let default_name = attachment_default_filename(
+        parse::parse_attachments(&raw)
+            .get(index)
+            .map(|attachment| attachment.filename.as_str()),
+    );
+    let bytes = parse::extract_attachment_bytes(&raw, index)
+        .ok_or_else(|| AppError::Config(format!("attachment {index} not found")))?;
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_title("保存附件")
+        .set_file_name(default_name)
+        .save_file(move |file_path| {
+            let _ = tx.send(file_path);
+        });
+
+    let Some(file_path) = rx
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!("save dialog failed: {e}")))?
+    else {
+        return Ok(());
+    };
+    let path = file_path_to_native_path(file_path)?;
+    write_attachment_to_path(path, bytes).await?;
     Ok(())
 }
 
@@ -326,6 +462,7 @@ pub async fn message_set_flagged(
 pub async fn messages_mark_seen_bulk(state: State<'_, AppState>, ids: Vec<Uuid>) -> AppResult<()> {
     use std::collections::HashMap;
 
+    validate_bulk_seen_ids(&ids)?;
     let pool = state.pool().await?;
     if ids.is_empty() {
         return Ok(());
@@ -382,6 +519,7 @@ pub async fn mailbox_folded(
     mailbox_id: Uuid,
     limit: i64,
 ) -> AppResult<Vec<db::folded::FoldedItem>> {
+    let limit = normalize_page_limit(limit)?;
     db::folded::mailbox_folded(state.pool().await?, mailbox_id, limit).await
 }
 
@@ -392,6 +530,7 @@ pub async fn account_inbox_folded(
     account_id: Uuid,
     limit: i64,
 ) -> AppResult<Vec<db::folded::FoldedItem>> {
+    let limit = normalize_page_limit(limit)?;
     db::folded::account_inbox_folded(state.pool().await?, account_id, limit).await
 }
 
@@ -599,12 +738,17 @@ pub async fn message_set_category(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Mutex as StdMutex;
     use std::time::Duration;
 
     use tokio::sync::{watch, Mutex};
     use uuid::Uuid;
 
+    use super::{
+        normalize_page_limit, normalize_page_offset, try_acquire_account_sync,
+        validate_bulk_seen_ids, MAX_BULK_SEEN_IDS, MAX_PAGE_LIMIT,
+    };
     use crate::error::AppError;
 
     #[test]
@@ -630,6 +774,30 @@ mod tests {
         assert!(!super::imap_msg_already_gone(&AppError::Config(
             "not found".into()
         )));
+    }
+
+    #[test]
+    fn cached_body_with_cid_image_is_stale() {
+        let body = crate::db::bodies::MessageBody {
+            message_id: Uuid::new_v4(),
+            text_plain: None,
+            html: Some(r#"<img src="cid:logo">"#.into()),
+            fetched_at: time::OffsetDateTime::UNIX_EPOCH,
+        };
+
+        assert!(super::body_cache_needs_refetch(&body));
+    }
+
+    #[test]
+    fn cached_body_with_non_image_cid_text_is_not_stale() {
+        let body = crate::db::bodies::MessageBody {
+            message_id: Uuid::new_v4(),
+            text_plain: None,
+            html: Some(r#"<a href="cid:note">cid link</a>"#.into()),
+            fetched_at: time::OffsetDateTime::UNIX_EPOCH,
+        };
+
+        assert!(!super::body_cache_needs_refetch(&body));
     }
 
     /// 测试专用内存 SQLite pool（单连接、迁移已跑、外键启用）。
@@ -782,6 +950,68 @@ mod tests {
             msg.contains("not found"),
             "应透传回退自取的真实失败原因（message not found），实际：{msg}"
         );
+    }
+
+    #[test]
+    fn page_limit_is_clamped_and_offset_is_validated() {
+        assert_eq!(normalize_page_limit(50).unwrap(), 50);
+        assert_eq!(normalize_page_limit(10_000).unwrap(), MAX_PAGE_LIMIT);
+        assert!(matches!(normalize_page_limit(0), Err(AppError::Config(_))));
+        assert_eq!(normalize_page_offset(0).unwrap(), 0);
+        assert!(matches!(
+            normalize_page_offset(-1),
+            Err(AppError::Config(_))
+        ));
+    }
+
+    #[test]
+    fn bulk_seen_ids_have_a_command_layer_cap() {
+        let ids: Vec<Uuid> = (0..=MAX_BULK_SEEN_IDS).map(|_| Uuid::new_v4()).collect();
+        assert!(matches!(
+            validate_bulk_seen_ids(&ids),
+            Err(AppError::Config(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn account_sync_guard_rejects_same_account_until_released() {
+        let in_flight: StdMutex<HashSet<Uuid>> = StdMutex::new(HashSet::new());
+        let account_id = Uuid::new_v4();
+
+        let first = try_acquire_account_sync(&in_flight, account_id)
+            .expect("first sync should acquire guard");
+        let same = try_acquire_account_sync(&in_flight, account_id)
+            .expect_err("same account should be rejected while sync is in flight");
+        assert!(
+            same.to_string().contains("正在同步"),
+            "error should be user-actionable, got: {same}"
+        );
+
+        let other = try_acquire_account_sync(&in_flight, Uuid::new_v4())
+            .expect("different account should not be blocked");
+        drop(other);
+        drop(first);
+
+        let reacquired = try_acquire_account_sync(&in_flight, account_id)
+            .expect("guard drop should release the account");
+        drop(reacquired);
+    }
+
+    #[test]
+    fn attachment_default_filename_strips_path_segments_and_blanks() {
+        assert_eq!(
+            super::attachment_default_filename(Some("../secret.pdf")),
+            "secret.pdf"
+        );
+        assert_eq!(
+            super::attachment_default_filename(Some("C:\\Users\\alice\\report.xlsx")),
+            "report.xlsx"
+        );
+        assert_eq!(
+            super::attachment_default_filename(Some("   ")),
+            "attachment.bin"
+        );
+        assert_eq!(super::attachment_default_filename(None), "attachment.bin");
     }
 
     #[test]

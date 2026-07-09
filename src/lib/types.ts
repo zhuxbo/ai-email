@@ -126,6 +126,11 @@ export interface SyncReport {
   totalInMailbox: number;
 }
 
+export interface CacheClearReport {
+  messageBodiesDeleted: number;
+  aiResultsDeleted: number;
+}
+
 export type AiProvider = 'anthropic' | 'openai';
 
 export type AiRole = 'summary' | 'classify' | 'translate' | 'draft';

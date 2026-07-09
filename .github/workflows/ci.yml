@@ -31,7 +31,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v3
         with:
-          version: 11
+          version: 11.2.2
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -62,7 +62,7 @@ jobs:
         run: pnpm exec tsc --noEmit
 
       - name: Vitest
-        run: pnpm exec vitest run --coverage --passWithNoTests
+        run: pnpm test:coverage
 
       - name: Rust format
         working-directory: src-tauri
@@ -88,7 +88,7 @@ jobs:
         run: rm -f .cargo/config.toml
       - uses: pnpm/action-setup@v3
         with:
-          version: 11
+          version: 11.2.2
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -102,7 +102,15 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build
-        run: pnpm tauri build
+        run: pnpm build:macos
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-email-macos
+          path: |
+            src-tauri/target/release/bundle/macos/ai-email.app
+            src-tauri/target/release/bundle/dmg/*.dmg
 
   build-android:
     name: Build Android
@@ -118,7 +126,7 @@ jobs:
 
       - uses: pnpm/action-setup@v3
         with:
-          version: 11
+          version: 11.2.2
 
       - uses: actions/setup-node@v4
         with:
@@ -160,4 +168,14 @@ jobs:
         env:
           NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
           ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: pnpm tauri android build --apk --target aarch64
+          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: pnpm build:android
+
+      - name: Upload Android artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-email-android
+          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk

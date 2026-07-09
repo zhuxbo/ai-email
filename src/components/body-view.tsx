@@ -33,8 +33,33 @@ export function sanitizeEmail(html: string, allowImages: boolean): string {
   return DOMPurify.sanitize(html, {
     ADD_ATTR: ['target'],
     FORBID_TAGS: ['iframe', 'object', 'embed', 'form', 'input', 'button', 'textarea'],
+    FORBID_ATTR: ['style'],
   });
 }
+
+const EMAIL_BASE_CSS = `
+  :host {
+    display: block;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+    color: inherit;
+    font: inherit;
+  }
+  *, *::before, *::after {
+    box-sizing: border-box;
+  }
+  img, video {
+    max-width: 100%;
+    height: auto;
+  }
+  table {
+    max-width: 100%;
+  }
+  pre {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+`;
 
 function HtmlBody({ html, category }: { html: string; category: Category | null }) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -46,7 +71,7 @@ function HtmlBody({ html, category }: { html: string; category: Category | null 
     if (!host) return;
     // Shadow DOM 隔离邮件自带 CSS，避免污染 app 界面；容器高度由内容自然撑开（不固定、不滚动）。
     const root = host.shadowRoot ?? host.attachShadow({ mode: 'open' });
-    root.innerHTML = sanitizeEmail(html, showImages);
+    root.innerHTML = `<style>${EMAIL_BASE_CSS}</style>${sanitizeEmail(html, showImages)}`;
     setHasBlocked(root.querySelector('[data-blocked-src]') !== null);
   }, [html, showImages]);
 

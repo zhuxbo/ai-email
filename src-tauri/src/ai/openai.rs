@@ -90,15 +90,14 @@ fn parse_completion(
     bytes: &[u8],
     fallback_model: &str,
 ) -> AppResult<CompletionResponse> {
-    // Parse from slice; on non-2xx fall back to the raw body so we never lose the upstream
-    // error text even when it isn't JSON.
+    // Parse from slice so success handling can inspect JSON. Non-2xx responses intentionally
+    // return only status/category to the frontend; raw provider text may contain secrets.
     let payload: serde_json::Value =
         serde_json::from_slice(bytes).unwrap_or(serde_json::Value::Null);
 
     if !status.is_success() {
         return Err(AppError::Ai(format!(
-            "HTTP {status}: {}",
-            error_message(&payload, bytes)
+            "AI provider request failed (HTTP {status})"
         )));
     }
 
@@ -133,38 +132,6 @@ fn parse_completion(
     );
 
     Ok(CompletionResponse { text, model, usage })
-}
-
-/// Best-effort error message from a non-2xx body. Fallback chain covers the spread of
-/// (non-)standard vendor error shapes:
-///   1. `{ error: { message } }`            — standard OpenAI
-///   2. `{ error: "..." }`                  — `error` as a bare string (some compatible servers)
-///   3. `{ message: "...", code: 401 }`     — error flattened at top level, no `error` wrapper
-///   4. raw body snippet                    — anything else (HTML gateway page, plain text)
-fn error_message(payload: &serde_json::Value, bytes: &[u8]) -> String {
-    payload["error"]["message"]
-        .as_str()
-        .or_else(|| payload["error"].as_str())
-        .or_else(|| payload["message"].as_str())
-        .map(str::to_string)
-        .unwrap_or_else(|| body_snippet(bytes))
-}
-
-/// A short, lossy-UTF-8 snippet of the raw body for error messages — used when a non-2xx
-/// response has no parseable error message (HTML gateway pages, plain-text rate limits).
-fn body_snippet(bytes: &[u8]) -> String {
-    const LIMIT: usize = 500;
-    let text = String::from_utf8_lossy(bytes);
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return "(empty response body)".to_string();
-    }
-    if trimmed.chars().count() <= LIMIT {
-        trimmed.to_string()
-    } else {
-        let cut: String = trimmed.chars().take(LIMIT).collect();
-        format!("{cut}…")
-    }
 }
 
 /// OpenAI's usage shape:
@@ -203,17 +170,15 @@ mod tests {
         }
     }
 
-    // ── #4: non-2xx with non-JSON body keeps status + raw text ──────────────────
+    // ── provider errors are user-safe: keep status/category, do not surface raw body ──
 
     #[test]
-    fn non_json_error_body_reports_status_and_snippet() {
+    fn non_json_error_body_reports_status_without_raw_snippet() {
         let html = b"<html>503 upstream timeout</html>";
         let msg = err_string(parse_completion(StatusCode::SERVICE_UNAVAILABLE, html, "m"));
         assert!(msg.contains("503"), "status preserved: {msg}");
-        assert!(
-            msg.contains("upstream timeout"),
-            "raw body preserved: {msg}"
-        );
+        assert!(!msg.contains("upstream timeout"), "raw body hidden: {msg}");
+        assert!(msg.contains("provider"), "safe category present: {msg}");
     }
 
     #[test]
@@ -228,25 +193,34 @@ mod tests {
     fn standard_error_object_message() {
         let body = br#"{"error":{"message":"rate limit exceeded","type":"rate_limit"}}"#;
         let msg = err_string(parse_completion(StatusCode::TOO_MANY_REQUESTS, body, "m"));
-        assert!(msg.contains("rate limit exceeded"), "{msg}");
+        assert!(msg.contains("429"), "status preserved: {msg}");
+        assert!(
+            !msg.contains("rate limit exceeded"),
+            "raw provider message hidden: {msg}"
+        );
     }
 
     #[test]
     fn error_as_bare_string() {
         let body = br#"{"error":"invalid token"}"#;
         let msg = err_string(parse_completion(StatusCode::UNAUTHORIZED, body, "m"));
-        assert!(msg.contains("invalid token"), "{msg}");
+        assert!(msg.contains("401"), "status preserved: {msg}");
+        assert!(
+            !msg.contains("invalid token"),
+            "raw provider message hidden: {msg}"
+        );
     }
 
     #[test]
     fn top_level_message_without_error_wrapper() {
         // Non-standard vendor: error flattened at top level with no `error` key. The raw
-        // cause must survive instead of degrading to "(no message)".
+        // provider text must not cross the command boundary.
         let body = br#"{"message":"api key disabled","code":401}"#;
         let msg = err_string(parse_completion(StatusCode::UNAUTHORIZED, body, "m"));
+        assert!(msg.contains("401"), "status preserved: {msg}");
         assert!(
-            msg.contains("api key disabled"),
-            "top-level message kept: {msg}"
+            !msg.contains("api key disabled"),
+            "raw provider message hidden: {msg}"
         );
     }
 

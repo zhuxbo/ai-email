@@ -29,7 +29,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::ai::{extract_json, prompts, AiClient, CompletionRequest, SystemBlock, UserMessage};
+use crate::ai::{
+    extract_json, prompts, safe_model_json_error, AiClient, CompletionRequest, SystemBlock,
+    UserMessage,
+};
 use crate::db::ai_results::{self, AiResultInsert};
 use crate::db::messages::{self, ClassifyInput};
 use crate::db::sender_filters::{self, SenderFilter, Verdict};
@@ -252,12 +255,7 @@ async fn classify_chunk(
         .await?;
 
     let items: Vec<ModelClassifyItem> = serde_json::from_str(extract_json(&response.text))
-        .map_err(|e| {
-            AppError::Ai(format!(
-                "分类模型未返回合法 JSON 数组：{e}\n原文：{}",
-                truncate_for_log(&response.text)
-            ))
-        })?;
+        .map_err(|e| safe_model_json_error("分类模型", &e))?;
 
     // Keep the first item per id. A duplicate id means the model echoed one input twice
     // (or hallucinated a collision); silently letting the later one win would discard the
@@ -425,16 +423,6 @@ fn normalize_category(raw: &str) -> String {
 
 fn clamp_priority(p: i32) -> i32 {
     p.clamp(1, 3)
-}
-
-fn truncate_for_log(s: &str) -> String {
-    let limit = 500;
-    if s.chars().count() <= limit {
-        s.to_string()
-    } else {
-        let cut: String = s.chars().take(limit).collect();
-        format!("{cut}…")
-    }
 }
 
 #[cfg(test)]

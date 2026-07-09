@@ -13,14 +13,17 @@ pub mod imap;
 pub mod keychain;
 pub mod smtp;
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use tauri::{Emitter, Manager};
 use tokio::sync::{watch, Mutex, OnceCell};
 use tokio_util::sync::CancellationToken;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{fmt::MakeWriter, EnvFilter};
 use uuid::Uuid;
 
 use crate::db::Pool;
@@ -28,6 +31,9 @@ use crate::error::{AppError, AppResult};
 
 /// DB 连接+迁移的超时时限。慢盘/大库下防止后台任务永久挂起。
 const DB_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const LOG_MAX_BYTES: usize = 10 * 1024 * 1024;
+const LOG_BACKUPS: usize = 3;
+const LOG_FILE_NAME: &str = "ai-email.log";
 
 /// Payload for `db://ready` event.
 #[derive(Clone, serde::Serialize)]
@@ -95,6 +101,9 @@ pub struct AppState {
     /// 避免写入已删除的 mailbox（外键冲突）并浪费 AI 调用配额。
     /// 父令牌 `cancel` 退出时级联取消所有子令牌，不变量不变。
     pub account_tokens: Arc<Mutex<HashMap<Uuid, CancellationToken>>>,
+    /// 账户级同步互斥。INBOX 手动同步和单信箱同步共用同一把账户锁，
+    /// 避免同一账户同时打开多个 IMAP 同步流程并互相覆盖后台任务 token。
+    pub sync_in_flight: StdMutex<HashSet<Uuid>>,
 }
 
 impl AppState {
@@ -195,12 +204,11 @@ pub fn run() {
     android_keyring::set_android_keyring_credential_builder()
         .expect("failed to register Android keyring credential builder");
 
-    init_tracing();
     // Dev convenience: load .env so `DATABASE_URL` etc. are available. Failure is non-fatal —
     // in release builds env vars come from the OS / launchd.
     if let Err(e) = dotenvy::dotenv() {
         if !e.not_found() {
-            tracing::warn!(error = %e, "failed to load .env");
+            eprintln!("failed to load .env: {e}");
         }
     }
 
@@ -215,6 +223,10 @@ pub fn run() {
                 // db_path 解析必须在 setup 里做（需要 app.path()），失败属于配置错误，
                 // 仍同步返回 Err——此时窗口还没显示，给 Builder 一个明确的失败信号。
                 let app_data = app.path().app_data_dir()?;
+                let log_path = init_tracing(&app_data);
+                if let Some(path) = log_path.as_ref() {
+                    tracing::info!(path = %path.display(), "file logging initialized");
+                }
                 let db_path = app_data.join("ai-email.db");
                 #[cfg(debug_assertions)]
                 crate::keychain::set_dev_cred_path(app_data.join("dev-credentials.json"));
@@ -230,6 +242,7 @@ pub fn run() {
                     body_in_flight: Mutex::new(HashMap::new()),
                     cancel: app_cancel,
                     account_tokens: Arc::new(Mutex::new(HashMap::new())),
+                    sync_in_flight: StdMutex::new(HashSet::new()),
                 });
 
                 // 窗口已可显示（manage 完成后 Tauri 会渲染主窗口）；
@@ -251,6 +264,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::system::db_status,
+            commands::system::cache_clear,
             commands::accounts::accounts_list,
             commands::accounts::account_add,
             commands::accounts::account_remove,
@@ -320,12 +334,107 @@ pub fn run() {
         });
 }
 
-fn init_tracing() {
+fn init_tracing(app_data: &Path) -> Option<PathBuf> {
+    let log_path = log_file_path(app_data);
+    if let Err(e) = prepare_log_file(&log_path) {
+        eprintln!("failed to prepare log file {}: {e}", log_path.display());
+    }
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let writer = AppLogWriter {
+        path: Arc::new(log_path.clone()),
+    };
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
+        .with_ansi(false)
+        .with_writer(writer)
         .try_init();
+    Some(log_path)
+}
+
+fn log_file_path(app_data: &Path) -> PathBuf {
+    app_data.join("logs").join(LOG_FILE_NAME)
+}
+
+fn prepare_log_file(log_path: &Path) -> io::Result<()> {
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    rotate_log_file(log_path)
+}
+
+fn rotate_log_file(log_path: &Path) -> io::Result<()> {
+    let Ok(metadata) = fs::metadata(log_path) else {
+        return Ok(());
+    };
+    if metadata.len() <= u64::try_from(LOG_MAX_BYTES).unwrap_or(u64::MAX) {
+        return Ok(());
+    }
+
+    for index in (1..=LOG_BACKUPS).rev() {
+        let from = log_backup_path(log_path, index);
+        let to = log_backup_path(log_path, index + 1);
+        if from.exists() {
+            if index == LOG_BACKUPS {
+                fs::remove_file(&from)?;
+            } else {
+                if to.exists() {
+                    fs::remove_file(&to)?;
+                }
+                fs::rename(&from, &to)?;
+            }
+        }
+    }
+    fs::rename(log_path, log_backup_path(log_path, 1))?;
+    Ok(())
+}
+
+fn log_backup_path(log_path: &Path, index: usize) -> PathBuf {
+    log_path.with_extension(format!("log.{index}"))
+}
+
+#[derive(Clone)]
+struct AppLogWriter {
+    path: Arc<PathBuf>,
+}
+
+struct AppLogLineWriter {
+    file: Option<File>,
+    stderr: io::Stderr,
+}
+
+impl Write for AppLogLineWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if let Some(file) = self.file.as_mut() {
+            let _ = file.write_all(buf);
+        }
+        let _ = self.stderr.write_all(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if let Some(file) = self.file.as_mut() {
+            let _ = file.flush();
+        }
+        let _ = self.stderr.flush();
+        Ok(())
+    }
+}
+
+impl<'a> MakeWriter<'a> for AppLogWriter {
+    type Writer = AppLogLineWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.path.as_ref())
+            .ok();
+        AppLogLineWriter {
+            file,
+            stderr: io::stderr(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -372,6 +481,7 @@ mod tests {
             body_in_flight: Mutex::new(HashMap::new()),
             cancel: CancellationToken::new(),
             account_tokens: Arc::new(Mutex::new(HashMap::new())),
+            sync_in_flight: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -426,6 +536,30 @@ mod tests {
             crate::db_init_status_to_payload(crate::DbInitStatus::Failed(err_msg.clone()));
         assert_eq!(payload.status, "error");
         assert_eq!(payload.message.as_deref(), Some(err_msg.as_str()));
+    }
+
+    #[test]
+    fn log_path_lives_under_app_data_logs() {
+        let app_data = std::path::Path::new("/tmp/ai-email-app-data");
+        assert_eq!(
+            crate::log_file_path(app_data),
+            app_data.join("logs").join("ai-email.log")
+        );
+    }
+
+    #[test]
+    fn rotate_log_file_moves_large_current_log_to_first_backup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_path = dir.path().join("ai-email.log");
+        std::fs::write(&log_path, vec![b'x'; crate::LOG_MAX_BYTES + 1]).expect("seed log");
+
+        crate::rotate_log_file(&log_path).expect("rotate log");
+
+        assert!(
+            !log_path.exists(),
+            "current log should be moved before reopening"
+        );
+        assert!(log_path.with_extension("log.1").exists());
     }
 
     /// run_db_init 成功路径：apply_db_init_result 填充 OnceCell 并将状态置为 Ready。

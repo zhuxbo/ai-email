@@ -18,6 +18,7 @@ import type {
   AutoReplyRule,
   AutoReplyRuleInput,
   Category,
+  CacheClearReport,
   ClassifyResult,
   ConversationView,
   DraftResult,
@@ -136,12 +137,12 @@ export async function messageAttachments(id: string): Promise<AttachmentMeta[]> 
   return invoke('message_attachments', { id });
 }
 
-export async function messageAttachmentSave(
-  id: string,
-  index: number,
-  dest: string,
-): Promise<void> {
-  await invoke('message_attachment_save', { id, index, dest });
+export async function messageAttachmentSave(id: string, index: number): Promise<void> {
+  await invoke('message_attachment_save', { id, index });
+}
+
+export async function cacheClear(): Promise<CacheClearReport> {
+  return invoke('cache_clear');
 }
 
 export async function modelsList(): Promise<AiModel[]> {
@@ -438,12 +439,12 @@ export async function accountInboxFolded(accountId: string, limit = 100): Promis
   }));
 }
 
-/** 将信箱内所有邮件标为已读（服务端操作）。 */
+/** 将信箱内所有邮件标为已读（纯本地操作）。 */
 export async function mailboxMarkSeen(mailboxId: string): Promise<void> {
   await invoke('mailbox_mark_seen', { mailboxId });
 }
 
-/** 将账户收件箱所有邮件标为已读（服务端操作）。 */
+/** 将账户收件箱所有邮件标为已读（纯本地操作）。 */
 export async function accountInboxMarkSeen(accountId: string): Promise<void> {
   await invoke('account_inbox_mark_seen', { accountId });
 }

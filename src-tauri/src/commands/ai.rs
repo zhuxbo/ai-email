@@ -10,8 +10,20 @@ use crate::ai::draft::{self, DraftResult};
 use crate::ai::summarize::{self, SummaryResult};
 use crate::ai::translate::{self, TextTranslation, TranslateResult};
 use crate::auto_reply;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::AppState;
+
+const MAX_CLASSIFY_IDS: usize = 200;
+
+fn validate_classify_ids(ids: &[Uuid]) -> AppResult<()> {
+    if ids.len() > MAX_CLASSIFY_IDS {
+        return Err(AppError::Config(format!(
+            "too many message ids: {} (max {MAX_CLASSIFY_IDS})",
+            ids.len()
+        )));
+    }
+    Ok(())
+}
 
 #[tauri::command]
 pub async fn ai_summarize(state: State<'_, AppState>, id: Uuid) -> AppResult<SummaryResult> {
@@ -28,6 +40,7 @@ pub async fn ai_classify(
     state: State<'_, AppState>,
     ids: Vec<Uuid>,
 ) -> AppResult<Vec<ClassifyResult>> {
+    validate_classify_ids(&ids)?;
     let pool = state.pool().await?;
     let results = classify::classify_message_ids(pool, &ids).await?;
     // 评估自动回复规则：仅对本次分类成功写回的 id 评估，失败 warn 不传播。
@@ -36,6 +49,17 @@ pub async fn ai_classify(
         tracing::warn!(error = %e, "ai_classify: auto-reply rule eval failed (non-fatal)");
     }
     Ok(results)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_ids_have_a_command_layer_cap() {
+        let ids: Vec<Uuid> = (0..=MAX_CLASSIFY_IDS).map(|_| Uuid::new_v4()).collect();
+        assert!(validate_classify_ids(&ids).is_err());
+    }
 }
 
 #[tauri::command]

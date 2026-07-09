@@ -10,7 +10,7 @@ Keep this file short. When in doubt, ask the user.
 
 AI-assisted email client. Tauri 2 desktop (macOS) + Android (arm64-v8a).
 Primary email provider: **QQ Mail** (IMAP/SMTP + authorization code); 腾讯企业邮 (exmail) + Gmail also supported via IMAP/SMTP.
-AI calls go to **Anthropic API** — Haiku 4.5 for classification, Sonnet 4.6 for summarization / translation / drafting, Opus 4.7 only for complex threads.
+AI calls go through configured **Anthropic or OpenAI-compatible providers**. Keep role defaults explicit in app settings.
 
 ## Repo layout
 
@@ -21,7 +21,7 @@ ai-email/
 │   └── src/
 │       ├── imap/             # IMAP client + parsing
 │       ├── smtp/             # SMTP send
-│       ├── ai/               # Anthropic client + prompts
+│       ├── ai/               # Anthropic / OpenAI-compatible clients + prompts
 │       ├── db/               # SQLite layer (sqlx + migrations)
 │       └── commands/         # #[tauri::command] handlers
 ├── .github/                  # CI workflows, dependabot, PR template
@@ -44,9 +44,15 @@ ai-email/
 - **Rust** for the core (IMAP / SMTP / DB / AI / Tauri commands)
 - **SQLite** via `sqlx` (embedded, bundled libsqlite3 — no server). DB file lives in the OS app-data dir, created + migrated on first launch → zero-config, offline, works on desktop + Android
 - **`async-imap`** + **`lettre`** for mail
-- **Anthropic API** via `reqwest` (no third-party AI wrappers)
+- **IMAP behavior**: connect timeout covers TCP + TLS + LOGIN + ID (60s); command/body timeouts stay separate. Inline `cid:` images are materialized as `data:` URLs during body parsing; unresolved `cid:` image sources must be neutralized so cached bodies do not refetch forever.
+- **HTML email rendering**: render sanitized HTML in Shadow DOM with app-owned base CSS for image/table width constraints; do not rely on remote email CSS for layout safety.
+- **Logs**: runtime diagnostics append to `<app-data>/logs/ai-email.log` with startup rotation; IMAP command logs must include the command/phase and elapsed time.
+- **Anthropic / OpenAI-compatible APIs** via `reqwest` (no third-party AI wrappers)
 - **pnpm** as package manager (NOT npm or yarn)
 - **Mirrors**: `npmmirror.com` for npm, `rsproxy.cn` for cargo
+- **Release entrypoints**: macOS uses `pnpm build:macos` (`.app` + CI-safe DMG without Finder AppleScript); Android uses `pnpm build:android`
+- **Android release signing**: optional via `ANDROID_RELEASE_*` env vars / GitHub Secrets; never commit keystores
+- **npm security overrides** live in `pnpm-workspace.yaml`, not `package.json`'s deprecated `pnpm` field
 
 ## Code conventions
 
@@ -110,9 +116,13 @@ Pre-push adds:
 
 - `cargo test`
 - `vitest run`
-- `cargo audit`
+- `cargo audit --ignore RUSTSEC-2023-0071`
 
 **Never bypass with `--no-verify`.** If a check fails, fix the underlying issue.
+
+`RUSTSEC-2023-0071` is ignored narrowly because `Cargo.lock` includes `rsa` through `sqlx-macros`' optional MySQL backend path; this app disables sqlx default features and only enables SQLite, so the MySQL/RSA path is not compiled or used. Do not add broader audit ignores without documenting the reachable path analysis.
+
+For dependency audits, keep `pnpm audit --registry https://registry.npmjs.org/` clean. If a transitive npm advisory needs an override, add the narrowest selector to `pnpm-workspace.yaml` and refresh `pnpm-lock.yaml`.
 
 **完成守卫**：实质改动提交前跑 `/finish-check` —— 在上述自动门之上叠加范围审查、删除审核与独立 reviewer 循环（落盘 `REVIEW_PASS:` 签字才算完成）。主指令见 `.claude/commands/finish-check.md`，反模式与 reviewer 模板见 `skills/review-checklist.md`。
 
@@ -126,8 +136,8 @@ Pre-push adds:
 
 - Never commit `.env`, credentials, or anything matching `.gitleaks.toml`
 - QQ Mail auth code lives in the OS keychain via the `keyring` crate (macOS Keychain; Android KeyStore via `android-keyring`) — NEVER in plaintext config or DB
-- Anthropic API key: dev = `.env` (gitignored), prod = OS keychain
-- All HTTP calls (IMAP / SMTP / Anthropic) use TLS — no exceptions
+- AI provider API keys: dev = `.env` (gitignored), prod = OS keychain
+- IMAP / SMTP / AI provider network calls use TLS — no exceptions
 
 ## What NOT to do
 
@@ -135,7 +145,7 @@ Pre-push adds:
 - Don't comment WHAT the code does — only WHY when non-obvious
 - Don't add a new dep without checking its weekly download count + last-update date
 - Don't silence a lint to make CI pass — fix the root cause
-- Don't write to disk outside the Tauri app data directory
+- Don't write to disk outside the Tauri app data directory, except user-selected attachment saves from the backend native save dialog
 - Don't call IMAP / SMTP / AI from the frontend — always go through a Tauri command
 
 ## When unsure

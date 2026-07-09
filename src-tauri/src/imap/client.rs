@@ -5,7 +5,7 @@
 //! persist. Per-call streams are fully drained before returning so the underlying mut-borrow
 //! on the session ends with the function call.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_imap::Session;
 use futures::StreamExt;
@@ -19,8 +19,8 @@ use crate::error::{AppError, AppResult};
 use crate::imap::tls;
 
 /// Total budget for TCP connect + TLS handshake + LOGIN + ID exchange.
-/// Covers QQ Mail's typical latency (< 3 s) with a large safety margin for weak mobile links.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Covers slow provider login on weak networks without letting a half-open handshake hang forever.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Per-operation budget for LIST / SELECT / FETCH / STORE / MOVE.
 /// Keeps individual commands from stalling indefinitely on half-open connections.
@@ -30,6 +30,10 @@ const OP_TIMEOUT: Duration = Duration::from_secs(30);
 /// A single message can carry ~50 MB of attachments; at 200 KB/s that takes ~250 s.
 /// 120 s covers most real-world cases while still bounding runaway fetches.
 const BODY_TIMEOUT: Duration = Duration::from_secs(120);
+
+fn elapsed_ms(started: Instant) -> u128 {
+    started.elapsed().as_millis()
+}
 
 /// One open IMAP session. Not thread-safe; never share across tasks.
 pub struct ImapClient {
@@ -92,17 +96,44 @@ impl ImapClient {
         email: &str,
         auth_code: &SecretString,
     ) -> AppResult<Self> {
-        timeout(
+        let started = Instant::now();
+        tracing::info!(
+            host,
+            port,
+            email,
+            timeout_secs = CONNECT_TIMEOUT.as_secs(),
+            "imap connect start"
+        );
+        match timeout(
             CONNECT_TIMEOUT,
             Self::connect_inner(host, port, email, auth_code),
         )
         .await
-        .unwrap_or_else(|_| {
-            Err(AppError::Imap(format!(
-                "IMAP 连接超时（{}s）：{host}:{port}",
-                CONNECT_TIMEOUT.as_secs()
-            )))
-        })
+        {
+            Ok(result) => result.inspect(|_| {
+                tracing::info!(
+                    host,
+                    port,
+                    email,
+                    elapsed_ms = elapsed_ms(started),
+                    "imap connect done"
+                );
+            }),
+            Err(_) => {
+                tracing::warn!(
+                    host,
+                    port,
+                    email,
+                    timeout_secs = CONNECT_TIMEOUT.as_secs(),
+                    elapsed_ms = elapsed_ms(started),
+                    "imap connect timeout"
+                );
+                Err(AppError::Imap(format!(
+                    "IMAP 连接超时（{}s）：{host}:{port}",
+                    CONNECT_TIMEOUT.as_secs()
+                )))
+            }
+        }
     }
 
     async fn connect_inner(
@@ -112,26 +143,118 @@ impl ImapClient {
         auth_code: &SecretString,
     ) -> AppResult<Self> {
         let connector = tls::build_connector();
-        let tcp = TcpStream::connect((host, port)).await?;
+        let phase_started = Instant::now();
+        tracing::info!(host, port, email, phase = "tcp", "imap connect phase start");
+        let tcp = match TcpStream::connect((host, port)).await {
+            Ok(tcp) => {
+                tracing::info!(
+                    host,
+                    port,
+                    email,
+                    phase = "tcp",
+                    elapsed_ms = elapsed_ms(phase_started),
+                    "imap connect phase done"
+                );
+                tcp
+            }
+            Err(e) => {
+                tracing::warn!(
+                    host,
+                    port,
+                    email,
+                    phase = "tcp",
+                    elapsed_ms = elapsed_ms(phase_started),
+                    error = %e,
+                    "imap connect phase failed"
+                );
+                return Err(AppError::Io(e));
+            }
+        };
         let server_name = ServerName::try_from(host.to_owned())
             .map_err(|e| AppError::Imap(format!("invalid TLS server name: {e}")))?;
-        let tls = connector
-            .connect(server_name, tcp)
-            .await
-            .map_err(|e| AppError::Imap(format!("TLS handshake failed: {e}")))?;
+        let phase_started = Instant::now();
+        tracing::info!(host, port, email, phase = "tls", "imap connect phase start");
+        let tls = connector.connect(server_name, tcp).await.map_err(|e| {
+            tracing::warn!(
+                host,
+                port,
+                email,
+                phase = "tls",
+                elapsed_ms = elapsed_ms(phase_started),
+                error = %e,
+                "imap connect phase failed"
+            );
+            AppError::Imap(format!("TLS handshake failed: {e}"))
+        })?;
+        tracing::info!(
+            host,
+            port,
+            email,
+            phase = "tls",
+            elapsed_ms = elapsed_ms(phase_started),
+            "imap connect phase done"
+        );
 
         let client = async_imap::Client::new(tls);
+        let phase_started = Instant::now();
+        tracing::info!(
+            host,
+            port,
+            email,
+            phase = "login",
+            "imap connect phase start"
+        );
         let mut session = client
             .login(email, auth_code.expose_secret())
             .await
-            .map_err(|(e, _client)| AppError::Imap(e.to_string()))?;
+            .map_err(|(e, _client)| {
+                tracing::warn!(
+                    host,
+                    port,
+                    email,
+                    phase = "login",
+                    elapsed_ms = elapsed_ms(phase_started),
+                    error = %e,
+                    "imap connect phase failed"
+                );
+                AppError::Imap(e.to_string())
+            })?;
+        tracing::info!(
+            host,
+            port,
+            email,
+            phase = "login",
+            elapsed_ms = elapsed_ms(phase_started),
+            "imap connect phase done"
+        );
 
         // RFC 2971 ID. Required by 163 since 2022; QQ accepts it. Sending a static identity
         // keeps us from leaking host info to the provider.
+        let phase_started = Instant::now();
+        tracing::info!(host, port, email, phase = "id", "imap connect phase start");
         session
             .run_command_and_check_ok(r#"ID ("name" "ai-email" "version" "0.1.0")"#)
             .await
-            .map_err(|e| AppError::Imap(e.to_string()))?;
+            .map_err(|e| {
+                tracing::warn!(
+                    host,
+                    port,
+                    email,
+                    phase = "id",
+                    elapsed_ms = elapsed_ms(phase_started),
+                    error = %e,
+                    "imap connect phase failed"
+                );
+                AppError::Imap(e.to_string())
+            })?;
+        tracing::info!(
+            host,
+            port,
+            email,
+            phase = "id",
+            elapsed_ms = elapsed_ms(phase_started),
+            "imap connect phase done"
+        );
 
         tracing::debug!(host, port, email, "imap session ready");
         Ok(Self { session })
@@ -143,7 +266,12 @@ impl ImapClient {
         // Timeout covers both the command send AND the full response drain: a half-open
         // connection that accepts LIST but then stalls on the response frames would otherwise
         // hang indefinitely.
-        timeout(OP_TIMEOUT, async {
+        let started = Instant::now();
+        tracing::info!(
+            timeout_secs = OP_TIMEOUT.as_secs(),
+            "imap list mailboxes start"
+        );
+        match timeout(OP_TIMEOUT, async {
             let mut stream = self
                 .session
                 .list(Some(""), Some("*"))
@@ -165,18 +293,67 @@ impl ImapClient {
             Ok(out)
         })
         .await
-        .map_err(|_| AppError::Imap("IMAP LIST 操作超时（30s）".into()))?
+        {
+            Ok(Ok(out)) => {
+                tracing::info!(
+                    count = out.len(),
+                    elapsed_ms = elapsed_ms(started),
+                    "imap list mailboxes done"
+                );
+                Ok(out)
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, elapsed_ms = elapsed_ms(started), "imap list mailboxes failed");
+                Err(e)
+            }
+            Err(_) => {
+                tracing::warn!(
+                    timeout_secs = OP_TIMEOUT.as_secs(),
+                    elapsed_ms = elapsed_ms(started),
+                    "imap list mailboxes timeout"
+                );
+                Err(AppError::Imap("IMAP LIST 操作超时（30s）".into()))
+            }
+        }
     }
 
     /// SELECT and return the resulting state. We only read three fields; the rest of the
     /// response (PERMANENTFLAGS, RECENT, etc.) is ignored at MVP.
     pub async fn select(&mut self, name: &str) -> AppResult<SelectedMailbox> {
-        let m = timeout(OP_TIMEOUT, self.session.select(name))
-            .await
-            .map_err(|_| {
-                AppError::Imap(format!("IMAP SELECT 操作超时（{}s）", OP_TIMEOUT.as_secs()))
-            })?
-            .map_err(|e| AppError::Imap(e.to_string()))?;
+        let started = Instant::now();
+        tracing::info!(
+            mailbox = name,
+            timeout_secs = OP_TIMEOUT.as_secs(),
+            "imap select start"
+        );
+        let m = match timeout(OP_TIMEOUT, self.session.select(name)).await {
+            Ok(Ok(m)) => {
+                tracing::info!(
+                    mailbox = name,
+                    exists = m.exists,
+                    uid_next = ?m.uid_next,
+                    elapsed_ms = elapsed_ms(started),
+                    "imap select done"
+                );
+                m
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(mailbox = name, error = %e, elapsed_ms = elapsed_ms(started), "imap select failed");
+                return Err(AppError::Imap(e.to_string()));
+            }
+            Err(_) => {
+                tracing::warn!(
+                    mailbox = name,
+                    timeout_secs = OP_TIMEOUT.as_secs(),
+                    elapsed_ms = elapsed_ms(started),
+                    "imap select timeout"
+                );
+                return Err(AppError::Imap(format!(
+                    "IMAP SELECT 操作超时（{}s）",
+                    OP_TIMEOUT.as_secs()
+                )));
+            }
+        };
         Ok(SelectedMailbox {
             exists: m.exists,
             uid_next: m.uid_next,
@@ -189,7 +366,13 @@ impl ImapClient {
     pub async fn fetch_headers(&mut self, seq_set: &str) -> AppResult<Vec<FetchedHeader>> {
         // Timeout wraps both command send and full stream drain so a half-open connection that
         // accepts FETCH but stalls on response frames doesn't hang indefinitely.
-        timeout(OP_TIMEOUT, async {
+        let started = Instant::now();
+        tracing::info!(
+            seq_set,
+            timeout_secs = OP_TIMEOUT.as_secs(),
+            "imap fetch headers start"
+        );
+        match timeout(OP_TIMEOUT, async {
             let stream = self
                 .session
                 .fetch(seq_set, FETCH_QUERY)
@@ -198,14 +381,43 @@ impl ImapClient {
             drain_fetch_stream(stream).await
         })
         .await
-        .map_err(|_| AppError::Imap("IMAP FETCH 操作超时（30s）".into()))?
+        {
+            Ok(Ok(out)) => {
+                tracing::info!(
+                    seq_set,
+                    count = out.len(),
+                    elapsed_ms = elapsed_ms(started),
+                    "imap fetch headers done"
+                );
+                Ok(out)
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(seq_set, error = %e, elapsed_ms = elapsed_ms(started), "imap fetch headers failed");
+                Err(e)
+            }
+            Err(_) => {
+                tracing::warn!(
+                    seq_set,
+                    timeout_secs = OP_TIMEOUT.as_secs(),
+                    elapsed_ms = elapsed_ms(started),
+                    "imap fetch headers timeout"
+                );
+                Err(AppError::Imap("IMAP FETCH 操作超时（30s）".into()))
+            }
+        }
     }
 
     /// `UID FETCH <set> (UID FLAGS RFC822.SIZE BODY.PEEK[HEADER])`. Best for incremental sync
     /// (e.g. `<prev_uid_next>:*`) — UIDs are stable across SELECT, sequence numbers aren't.
     pub async fn uid_fetch_headers(&mut self, uid_set: &str) -> AppResult<Vec<FetchedHeader>> {
         // Same pattern: timeout covers send + full drain.
-        timeout(OP_TIMEOUT, async {
+        let started = Instant::now();
+        tracing::info!(
+            uid_set,
+            timeout_secs = OP_TIMEOUT.as_secs(),
+            "imap uid fetch headers start"
+        );
+        match timeout(OP_TIMEOUT, async {
             let stream = self
                 .session
                 .uid_fetch(uid_set, FETCH_QUERY)
@@ -214,7 +426,30 @@ impl ImapClient {
             drain_fetch_stream(stream).await
         })
         .await
-        .map_err(|_| AppError::Imap("IMAP UID FETCH 操作超时（30s）".into()))?
+        {
+            Ok(Ok(out)) => {
+                tracing::info!(
+                    uid_set,
+                    count = out.len(),
+                    elapsed_ms = elapsed_ms(started),
+                    "imap uid fetch headers done"
+                );
+                Ok(out)
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(uid_set, error = %e, elapsed_ms = elapsed_ms(started), "imap uid fetch headers failed");
+                Err(e)
+            }
+            Err(_) => {
+                tracing::warn!(
+                    uid_set,
+                    timeout_secs = OP_TIMEOUT.as_secs(),
+                    elapsed_ms = elapsed_ms(started),
+                    "imap uid fetch headers timeout"
+                );
+                Err(AppError::Imap("IMAP UID FETCH 操作超时（30s）".into()))
+            }
+        }
     }
 
     /// `UID FETCH <uid> (BODY.PEEK[])`. Returns the full RFC 822 bytes for one message —
@@ -223,7 +458,13 @@ impl ImapClient {
     pub async fn uid_fetch_body(&mut self, uid: u32) -> AppResult<Vec<u8>> {
         // Timeout covers both command send and stream read so a half-open connection that
         // accepts the UID FETCH but stalls on response data doesn't hang indefinitely.
-        timeout(BODY_TIMEOUT, async {
+        let started = Instant::now();
+        tracing::info!(
+            uid,
+            timeout_secs = BODY_TIMEOUT.as_secs(),
+            "imap uid fetch body start"
+        );
+        match timeout(BODY_TIMEOUT, async {
             let mut stream = self
                 .session
                 .uid_fetch(uid.to_string(), "(BODY.PEEK[])")
@@ -239,12 +480,33 @@ impl ImapClient {
             Ok(body.to_vec())
         })
         .await
-        .map_err(|_| {
-            AppError::Imap(format!(
-                "IMAP UID FETCH BODY 操作超时（{}s）",
-                BODY_TIMEOUT.as_secs()
-            ))
-        })?
+        {
+            Ok(Ok(body)) => {
+                tracing::info!(
+                    uid,
+                    bytes = body.len(),
+                    elapsed_ms = elapsed_ms(started),
+                    "imap uid fetch body done"
+                );
+                Ok(body)
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(uid, error = %e, elapsed_ms = elapsed_ms(started), "imap uid fetch body failed");
+                Err(e)
+            }
+            Err(_) => {
+                tracing::warn!(
+                    uid,
+                    timeout_secs = BODY_TIMEOUT.as_secs(),
+                    elapsed_ms = elapsed_ms(started),
+                    "imap uid fetch body timeout"
+                );
+                Err(AppError::Imap(format!(
+                    "IMAP UID FETCH BODY 操作超时（{}s）",
+                    BODY_TIMEOUT.as_secs()
+                )))
+            }
+        }
     }
 
     /// 批量按 UID 取 BODY[]，drain 全流按 uid 配对。会话物化一次拉多封，省握手。超时按批量放大。
@@ -258,7 +520,13 @@ impl ImapClient {
             .collect::<Vec<_>>()
             .join(",");
         let budget = BODY_TIMEOUT.saturating_mul(u32::try_from(uids.len()).unwrap_or(1));
-        timeout(budget, async {
+        let started = Instant::now();
+        tracing::info!(
+            count = uids.len(),
+            timeout_secs = budget.as_secs(),
+            "imap uid fetch bodies start"
+        );
+        match timeout(budget, async {
             let mut stream = self
                 .session
                 .uid_fetch(set, "(UID BODY.PEEK[])")
@@ -278,13 +546,41 @@ impl ImapClient {
             Ok(out)
         })
         .await
-        .map_err(|_| {
-            AppError::Imap(format!(
-                "IMAP 批量 UID FETCH BODY 超时（{} 封 / {}s）",
-                uids.len(),
-                budget.as_secs()
-            ))
-        })?
+        {
+            Ok(Ok(out)) => {
+                let bytes: usize = out.iter().map(|(_, body)| body.len()).sum();
+                tracing::info!(
+                    requested_count = uids.len(),
+                    fetched_count = out.len(),
+                    bytes,
+                    elapsed_ms = elapsed_ms(started),
+                    "imap uid fetch bodies done"
+                );
+                Ok(out)
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    requested_count = uids.len(),
+                    error = %e,
+                    elapsed_ms = elapsed_ms(started),
+                    "imap uid fetch bodies failed"
+                );
+                Err(e)
+            }
+            Err(_) => {
+                tracing::warn!(
+                    requested_count = uids.len(),
+                    timeout_secs = budget.as_secs(),
+                    elapsed_ms = elapsed_ms(started),
+                    "imap uid fetch bodies timeout"
+                );
+                Err(AppError::Imap(format!(
+                    "IMAP 批量 UID FETCH BODY 超时（{} 封 / {}s）",
+                    uids.len(),
+                    budget.as_secs()
+                )))
+            }
+        }
     }
 
     /// `UID STORE <uid> ±FLAGS (<flag>)`。flag 传字面 IMAP 形式（如 `"\\Seen"` / `"\\Flagged"`）。
@@ -295,7 +591,15 @@ impl ImapClient {
         let sign = if add { "+" } else { "-" };
         let query = format!("{sign}FLAGS ({flag})");
         // Timeout covers both command send and the full FLAGS response stream drain.
-        timeout(OP_TIMEOUT, async {
+        let started = Instant::now();
+        tracing::info!(
+            uid,
+            flag,
+            add,
+            timeout_secs = OP_TIMEOUT.as_secs(),
+            "imap uid store flag start"
+        );
+        match timeout(OP_TIMEOUT, async {
             let mut stream = self
                 .session
                 .uid_store(uid.to_string(), query)
@@ -307,7 +611,40 @@ impl ImapClient {
             Ok(())
         })
         .await
-        .map_err(|_| AppError::Imap("IMAP UID STORE 操作超时（30s）".into()))?
+        {
+            Ok(Ok(())) => {
+                tracing::info!(
+                    uid,
+                    flag,
+                    add,
+                    elapsed_ms = elapsed_ms(started),
+                    "imap uid store flag done"
+                );
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    uid,
+                    flag,
+                    add,
+                    error = %e,
+                    elapsed_ms = elapsed_ms(started),
+                    "imap uid store flag failed"
+                );
+                Err(e)
+            }
+            Err(_) => {
+                tracing::warn!(
+                    uid,
+                    flag,
+                    add,
+                    timeout_secs = OP_TIMEOUT.as_secs(),
+                    elapsed_ms = elapsed_ms(started),
+                    "imap uid store flag timeout"
+                );
+                Err(AppError::Imap("IMAP UID STORE 操作超时（30s）".into()))
+            }
+        }
     }
 
     /// `UID STORE <set> ±FLAGS (<flag>)` 批量版：`uids` 拼成逗号分隔 sequence-set，一次往返
@@ -329,7 +666,15 @@ impl ImapClient {
         let sign = if add { "+" } else { "-" };
         let query = format!("{sign}FLAGS ({flag})");
         // Timeout covers both command send and the full FLAGS response stream drain.
-        timeout(OP_TIMEOUT, async {
+        let started = Instant::now();
+        tracing::info!(
+            count = uids.len(),
+            flag,
+            add,
+            timeout_secs = OP_TIMEOUT.as_secs(),
+            "imap uid store flag bulk start"
+        );
+        match timeout(OP_TIMEOUT, async {
             let mut stream = self
                 .session
                 .uid_store(set, query)
@@ -341,20 +686,81 @@ impl ImapClient {
             Ok(())
         })
         .await
-        .map_err(|_| AppError::Imap("IMAP UID STORE（批量）操作超时（30s）".into()))?
+        {
+            Ok(Ok(())) => {
+                tracing::info!(
+                    count = uids.len(),
+                    flag,
+                    add,
+                    elapsed_ms = elapsed_ms(started),
+                    "imap uid store flag bulk done"
+                );
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    count = uids.len(),
+                    flag,
+                    add,
+                    error = %e,
+                    elapsed_ms = elapsed_ms(started),
+                    "imap uid store flag bulk failed"
+                );
+                Err(e)
+            }
+            Err(_) => {
+                tracing::warn!(
+                    count = uids.len(),
+                    flag,
+                    add,
+                    timeout_secs = OP_TIMEOUT.as_secs(),
+                    elapsed_ms = elapsed_ms(started),
+                    "imap uid store flag bulk timeout"
+                );
+                Err(AppError::Imap(
+                    "IMAP UID STORE（批量）操作超时（30s）".into(),
+                ))
+            }
+        }
     }
 
     /// `UID MOVE <uid> <dest>`。需先 `select` 源文件夹。
     pub async fn uid_move(&mut self, uid: u32, dest: &str) -> AppResult<()> {
-        timeout(OP_TIMEOUT, self.session.uid_mv(uid.to_string(), dest))
-            .await
-            .map_err(|_| {
-                AppError::Imap(format!(
+        let started = Instant::now();
+        tracing::info!(
+            uid,
+            dest,
+            timeout_secs = OP_TIMEOUT.as_secs(),
+            "imap uid move start"
+        );
+        match timeout(OP_TIMEOUT, self.session.uid_mv(uid.to_string(), dest)).await {
+            Ok(Ok(())) => {
+                tracing::info!(
+                    uid,
+                    dest,
+                    elapsed_ms = elapsed_ms(started),
+                    "imap uid move done"
+                );
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(uid, dest, error = %e, elapsed_ms = elapsed_ms(started), "imap uid move failed");
+                Err(AppError::Imap(e.to_string()))
+            }
+            Err(_) => {
+                tracing::warn!(
+                    uid,
+                    dest,
+                    timeout_secs = OP_TIMEOUT.as_secs(),
+                    elapsed_ms = elapsed_ms(started),
+                    "imap uid move timeout"
+                );
+                Err(AppError::Imap(format!(
                     "IMAP UID MOVE 操作超时（{}s）",
                     OP_TIMEOUT.as_secs()
-                ))
-            })?
-            .map_err(|e| AppError::Imap(e.to_string()))
+                )))
+            }
+        }
     }
 
     pub async fn logout(mut self) -> AppResult<()> {
@@ -626,6 +1032,15 @@ mod tests {
         assert!(
             (10..=60).contains(&secs),
             "CONNECT_TIMEOUT={secs}s 不在 [10,60] 合理范围"
+        );
+    }
+
+    #[test]
+    fn connect_timeout_allows_slow_tls_login() {
+        let secs = CONNECT_TIMEOUT.as_secs();
+        assert!(
+            secs >= 60,
+            "CONNECT_TIMEOUT={secs}s 仍可能把慢网络下的 TCP+TLS+LOGIN+ID 误判为失败"
         );
     }
 

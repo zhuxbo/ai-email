@@ -75,10 +75,10 @@ pnpm exec vitest run --passWithNoTests
 gitleaks protect --staged --no-banner --redact -v
 
 # 依赖变更时（Cargo.toml / package.json 动了；cargo audit 平时在 CI）
-cd src-tauri && cargo audit
+cd src-tauri && cargo audit --ignore RUSTSEC-2023-0071
 ```
 
-任一不过当场修根因，**禁止 `--no-verify` 绕过**。IMAP/AI 集成测试一律 in-memory/mock，**绝不打真 QQ、绝不真烧 token**。
+`RUSTSEC-2023-0071` 仅来自 `Cargo.lock` 中 `sqlx-macros` 可选 MySQL 后端路径的 `rsa`，本项目 `sqlx` 已禁用默认特性并只启用 SQLite，运行/编译路径不使用 MySQL/RSA。任一不过当场修根因，**禁止 `--no-verify` 绕过**。IMAP/AI 集成测试一律 in-memory/mock，**绝不打真 QQ、绝不真烧 token**。
 
 ---
 

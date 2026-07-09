@@ -22,6 +22,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::addr;
 use crate::db::accounts::{self, Account, AccountInput, AccountUpdate};
 use crate::db::Pool;
 use crate::error::{AppError, AppResult};
@@ -115,6 +116,60 @@ fn validate_port(port: i32, field: &str) -> AppResult<()> {
     Ok(())
 }
 
+fn validate_required(value: &str, field: &str) -> AppResult<()> {
+    if value.trim().is_empty() {
+        return Err(AppError::Config(format!("{field} must not be empty")));
+    }
+    Ok(())
+}
+
+fn validate_host(host: &str, field: &str) -> AppResult<()> {
+    validate_required(host, field)?;
+    if host.trim().chars().any(char::is_whitespace) {
+        return Err(AppError::Config(format!(
+            "{field} must not contain whitespace"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_bare_email(email: &str) -> AppResult<()> {
+    let trimmed = email.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    match addr::extract_email(Some(trimmed)) {
+        Some(parsed) if parsed == lower => Ok(()),
+        _ => Err(AppError::Config(
+            "email must be a valid bare address".into(),
+        )),
+    }
+}
+
+fn validate_add_account_form(form: &AddAccountForm) -> AppResult<()> {
+    validate_bare_email(&form.email)?;
+    validate_required(&form.provider, "provider")?;
+    validate_host(&form.imap_host, "imap_host")?;
+    validate_host(&form.smtp_host, "smtp_host")?;
+    validate_required(&form.auth_code, "auth_code")?;
+    validate_port(form.imap_port, "imap_port")?;
+    validate_port(form.smtp_port, "smtp_port")?;
+    let provider = form.provider.trim().to_ascii_lowercase();
+    if !KNOWN_PROVIDERS.contains(&provider.as_str()) {
+        return Err(AppError::Config(format!(
+            "unknown provider: {} (must be one of: {})",
+            form.provider,
+            KNOWN_PROVIDERS.join(", ")
+        )));
+    }
+    Ok(())
+}
+
+fn validate_update_account_form(form: &UpdateAccountForm) -> AppResult<()> {
+    validate_host(&form.imap_host, "imap_host")?;
+    validate_host(&form.smtp_host, "smtp_host")?;
+    validate_port(form.imap_port, "imap_port")?;
+    validate_port(form.smtp_port, "smtp_port")
+}
+
 #[tauri::command]
 pub async fn accounts_list(state: State<'_, AppState>) -> AppResult<Vec<Account>> {
     accounts::list(state.pool().await?).await
@@ -122,26 +177,17 @@ pub async fn accounts_list(state: State<'_, AppState>) -> AppResult<Vec<Account>
 
 #[tauri::command]
 pub async fn account_add(state: State<'_, AppState>, form: AddAccountForm) -> AppResult<Account> {
-    // #39: validate port range and provider up-front so errors surface immediately.
-    validate_port(form.imap_port, "imap_port")?;
-    validate_port(form.smtp_port, "smtp_port")?;
-    if !KNOWN_PROVIDERS.contains(&form.provider.as_str()) {
-        return Err(AppError::Config(format!(
-            "unknown provider: {} (must be one of: {})",
-            form.provider,
-            KNOWN_PROVIDERS.join(", ")
-        )));
-    }
+    validate_add_account_form(&form)?;
 
     let pool = state.pool().await?;
-    let auth = SecretString::from(form.auth_code);
+    let auth = SecretString::from(form.auth_code.trim().to_string());
     let input = AccountInput {
-        email: form.email,
+        email: form.email.trim().to_string(),
         display_name: form.display_name,
-        provider: form.provider,
-        imap_host: form.imap_host,
+        provider: form.provider.trim().to_ascii_lowercase(),
+        imap_host: form.imap_host.trim().to_string(),
         imap_port: form.imap_port,
-        smtp_host: form.smtp_host,
+        smtp_host: form.smtp_host.trim().to_string(),
         smtp_port: form.smtp_port,
     };
 
@@ -208,14 +254,13 @@ pub async fn account_update(
     id: Uuid,
     form: UpdateAccountForm,
 ) -> AppResult<Account> {
-    validate_port(form.imap_port, "imap_port")?;
-    validate_port(form.smtp_port, "smtp_port")?;
+    validate_update_account_form(&form)?;
 
     let input = AccountUpdate {
         display_name: form.display_name,
-        imap_host: form.imap_host,
+        imap_host: form.imap_host.trim().to_string(),
         imap_port: form.imap_port,
-        smtp_host: form.smtp_host,
+        smtp_host: form.smtp_host.trim().to_string(),
         smtp_port: form.smtp_port,
     };
     let pool = state.pool().await?;
@@ -294,8 +339,11 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use uuid::Uuid;
 
-    use super::{accounts, apply_account_update, cancel_account_tasks, validate_port};
-    use super::{AccountInput, AccountUpdate};
+    use super::{
+        accounts, apply_account_update, cancel_account_tasks, validate_add_account_form,
+        validate_port, validate_update_account_form,
+    };
+    use super::{AccountInput, AccountUpdate, AddAccountForm, UpdateAccountForm};
     use crate::db::{self, Pool};
     use crate::error::AppError;
 
@@ -406,6 +454,75 @@ mod tests {
     #[test]
     fn port_common_smtp_is_accepted() {
         assert!(validate_port(465, "smtp_port").is_ok());
+    }
+
+    #[test]
+    fn add_account_validation_rejects_blank_identity_fields() {
+        let mut form = AddAccountForm {
+            email: "   ".into(),
+            display_name: None,
+            provider: "qq".into(),
+            imap_host: "imap.qq.com".into(),
+            imap_port: 993,
+            smtp_host: "smtp.qq.com".into(),
+            smtp_port: 465,
+            auth_code: "secret".into(),
+        };
+        assert!(matches!(
+            validate_add_account_form(&form),
+            Err(AppError::Config(_))
+        ));
+
+        form.email = "user@qq.com".into();
+        form.imap_host = "  ".into();
+        assert!(matches!(
+            validate_add_account_form(&form),
+            Err(AppError::Config(_))
+        ));
+
+        form.imap_host = "imap.qq.com".into();
+        form.auth_code = "  ".into();
+        assert!(matches!(
+            validate_add_account_form(&form),
+            Err(AppError::Config(_))
+        ));
+    }
+
+    #[test]
+    fn add_account_validation_rejects_malformed_email() {
+        let form = AddAccountForm {
+            email: "not-an-email".into(),
+            display_name: None,
+            provider: "qq".into(),
+            imap_host: "imap.qq.com".into(),
+            imap_port: 993,
+            smtp_host: "smtp.qq.com".into(),
+            smtp_port: 465,
+            auth_code: "secret".into(),
+        };
+        assert!(matches!(
+            validate_add_account_form(&form),
+            Err(AppError::Config(_))
+        ));
+    }
+
+    #[test]
+    fn update_account_validation_rejects_blank_hosts_but_allows_blank_secret_to_preserve() {
+        let mut form = UpdateAccountForm {
+            display_name: None,
+            imap_host: "imap.qq.com".into(),
+            imap_port: 993,
+            smtp_host: "smtp.qq.com".into(),
+            smtp_port: 465,
+            auth_code: Some("   ".into()),
+        };
+        assert!(validate_update_account_form(&form).is_ok());
+
+        form.smtp_host = " ".into();
+        assert!(matches!(
+            validate_update_account_form(&form),
+            Err(AppError::Config(_))
+        ));
     }
 
     // ---- #11: account_remove ordering is tested behaviourally via integration tests

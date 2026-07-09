@@ -86,20 +86,15 @@ fn parse_completion(
     bytes: &[u8],
     fallback_model: &str,
 ) -> AppResult<CompletionResponse> {
-    // Parse from slice; on non-2xx fall back to the raw body so we never lose the upstream
-    // error text even when it isn't JSON.
+    // Parse from slice so success handling can inspect JSON. Non-2xx responses intentionally
+    // return only status/category to the frontend; raw provider text may contain secrets.
     let payload: serde_json::Value =
         serde_json::from_slice(bytes).unwrap_or(serde_json::Value::Null);
 
     if !status.is_success() {
-        // Anthropic 错误格式单一稳定：始终为 {"error":{"message":...}}，
-        // 无需像 openai.rs 那样兜底多厂商的非标准错误体（顶层 message、嵌套层等）。
-        // 勿"对齐" openai 改成多步兜底——差异是刻意的，不是遗漏。
-        let msg = payload["error"]["message"]
-            .as_str()
-            .map(str::to_string)
-            .unwrap_or_else(|| body_snippet(bytes));
-        return Err(AppError::Ai(format!("HTTP {status}: {msg}")));
+        return Err(AppError::Ai(format!(
+            "AI provider request failed (HTTP {status})"
+        )));
     }
 
     // A `max_tokens` stop means the body (often JSON) is truncated mid-output. Report it
@@ -164,23 +159,6 @@ fn read_u32(v: &serde_json::Value) -> Option<u32> {
         .map(|n| u32::try_from(n).unwrap_or(u32::MAX))
 }
 
-/// A short, lossy-UTF-8 snippet of the raw body for error messages — used when a non-2xx
-/// response has no parseable `error.message` (HTML gateway pages, plain-text rate limits).
-fn body_snippet(bytes: &[u8]) -> String {
-    const LIMIT: usize = 500;
-    let text = String::from_utf8_lossy(bytes);
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return "(empty response body)".to_string();
-    }
-    if trimmed.chars().count() <= LIMIT {
-        trimmed.to_string()
-    } else {
-        let cut: String = trimmed.chars().take(LIMIT).collect();
-        format!("{cut}…")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,23 +173,29 @@ mod tests {
         }
     }
 
-    // ── #4: non-2xx with non-JSON body keeps status + raw text ──────────────────
+    // ── provider errors are user-safe: keep status/category, do not surface raw body ──
 
     #[test]
-    fn non_json_error_body_reports_status_and_snippet() {
-        // A gateway 502 HTML page must not be swallowed as a decode error.
-        let html = b"<html><body>502 Bad Gateway</body></html>";
+    fn non_json_error_body_reports_status_without_raw_snippet() {
+        let html = b"<html><body>gateway-secret-body</body></html>";
         let msg = err_string(parse_completion(StatusCode::BAD_GATEWAY, html, "m"));
         assert!(msg.contains("502"), "status preserved: {msg}");
-        assert!(msg.contains("Bad Gateway"), "raw body preserved: {msg}");
+        assert!(
+            !msg.contains("gateway-secret-body"),
+            "raw body hidden: {msg}"
+        );
+        assert!(msg.contains("provider"), "safe category present: {msg}");
     }
 
     #[test]
-    fn json_error_body_uses_error_message() {
+    fn json_error_body_keeps_status_without_raw_message() {
         let body = br#"{"error":{"message":"invalid x-api-key","type":"authentication_error"}}"#;
         let msg = err_string(parse_completion(StatusCode::UNAUTHORIZED, body, "m"));
         assert!(msg.contains("401"), "status: {msg}");
-        assert!(msg.contains("invalid x-api-key"), "message: {msg}");
+        assert!(
+            !msg.contains("invalid x-api-key"),
+            "raw provider message hidden: {msg}"
+        );
     }
 
     #[test]

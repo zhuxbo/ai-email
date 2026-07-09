@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::ai::{extract_json, prompts, AiClient, CompletionRequest, SystemBlock, UserMessage};
+use crate::ai::{
+    extract_json, prompts, safe_model_json_error, AiClient, CompletionRequest, SystemBlock,
+    UserMessage,
+};
 use crate::db::ai_results::{self, AiResultInsert};
 use crate::db::messages::MessageHeader;
 use crate::db::{ai_role_defaults, Pool};
@@ -22,6 +25,7 @@ const ROLE: &str = "translate";
 const KIND: &str = "translate";
 const MAX_OUTPUT_TOKENS: u32 = 4096;
 const MAX_TEXT_TRANSLATION_TOKENS: u32 = 2048;
+const MAX_TEXT_TRANSLATION_CHARS: usize = 20_000;
 /// Larger than summary's 50k because translation is roughly 1:1 in tokens — we can fit
 /// most real-world mail with room to spare. Anything longer probably has structural noise
 /// that translation wouldn't recover from anyway.
@@ -104,13 +108,8 @@ pub async fn translate_message(
         })
         .await?;
 
-    let mut translation: Translation =
-        serde_json::from_str(extract_json(&response.text)).map_err(|e| {
-            AppError::Ai(format!(
-                "翻译模型未返回合法 JSON：{e}\n原文：{}",
-                truncate_for_log(&response.text)
-            ))
-        })?;
+    let mut translation: Translation = serde_json::from_str(extract_json(&response.text))
+        .map_err(|e| safe_model_json_error("翻译模型", &e))?;
     // Defensive: the model occasionally returns a slightly different target tag (e.g. "zh"
     // instead of "zh-CN"). Force the field to match what we asked for so the UI's cache
     // assumptions hold.
@@ -211,8 +210,22 @@ fn build_text_user_prompt(target: &str, text: &str) -> String {
     format!("目标语言：{target}\n\n文本：\n{text}")
 }
 
+fn validate_text_translation_input(text: &str) -> AppResult<()> {
+    let chars = text.trim().chars().count();
+    if chars == 0 {
+        return Err(AppError::Ai("待翻译文本不能为空".into()));
+    }
+    if chars > MAX_TEXT_TRANSLATION_CHARS {
+        return Err(AppError::Ai(format!(
+            "待翻译文本过长：{chars} 字符，最多 {MAX_TEXT_TRANSLATION_CHARS} 字符"
+        )));
+    }
+    Ok(())
+}
+
 /// 翻译自由文本（草稿回译）。复用 translate 角色模型；不读 DB、不缓存。
 pub async fn translate_text(pool: &Pool, text: &str, target: &str) -> AppResult<TextTranslation> {
+    validate_text_translation_input(text)?;
     let target = normalize_target(target)?;
     let model = ai_role_defaults::resolve_model(pool, ROLE)
         .await?
@@ -313,6 +326,15 @@ mod tests {
         let p = build_text_user_prompt("en-US", "你好世界");
         assert!(p.contains("目标语言：en-US"));
         assert!(p.contains("文本：\n你好世界"));
+    }
+
+    #[test]
+    fn validate_text_translation_input_rejects_empty_and_too_long() {
+        assert!(validate_text_translation_input("   ").is_err());
+        assert!(
+            validate_text_translation_input(&"x".repeat(MAX_TEXT_TRANSLATION_CHARS + 1)).is_err()
+        );
+        assert!(validate_text_translation_input(&"x".repeat(MAX_TEXT_TRANSLATION_CHARS)).is_ok());
     }
 
     /// A fenced ```json response must still deserialize into `Translation` via `extract_json`.

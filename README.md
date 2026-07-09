@@ -13,15 +13,16 @@ AI 辅助的邮件客户端 —— Tauri 2 桌面(macOS)+ Android,本地优先�
 - 收件箱列表折叠聚合:同一会话折叠成一行;孤立的同发件人通知 / 推广邮件折叠成一行(显示最新一封 + 数量角标);点同发件人折叠组在详情区以会话流展示(默认全折叠)
 - 多账户统一收件箱 + 信箱切换:跨账户聚合视图,或按账户浏览收件箱 / 已发送 / 草稿 / 废纸篓 / 垃圾邮件等信箱;支持未读筛选与一键全部已读
 - 自动收信:窗口开启时按设定间隔(默认 5 分钟,设置中心可改 关 / 1 / 5 / 15 / 30)自动收取全部账户收件箱;全局顶栏指示器显示上次同步 / 下次倒计时 / 同步中 / 失败,点击即立即同步
-- 邮件操作:删除(移到废纸篓,可找回)、标记已读 / 未读、加星 / 取消;打开邮件自动标记已读;会话流内每封邮件各自展示附件(懒加载,点击从 IMAP 拉取下载)
-- HTML 邮件防追踪:正文经清洗去除脚本;远程图片仅对私人 / 工作邮件默认加载,其余默认拦截(防 tracking pixel 暴露已读与 IP),可一键显示;过滤卡片中纯 HTML 邮件自动转纯文本显示(不再暴露 HTML 源码)
+- 邮件操作:删除(移到废纸篓,可找回)、标记已读 / 未读、加星 / 取消;打开邮件自动标记已读;会话流内每封邮件各自展示附件(懒加载,点击后由后端原生保存框另存为)
+- HTML 邮件防追踪:正文经清洗去除脚本与内联样式,并在 Shadow DOM 内注入基础邮件样式限制图片 / 表格撑宽;远程图片仅对私人 / 工作邮件默认加载,其余默认拦截(防 tracking pixel 暴露已读与 IP),可一键显示;内联 `cid:` 图片会转成本地 `data:` URL 后再渲染,无法匹配 MIME 图片部件的 `cid:` 图片会移除不可加载的 `src`;过滤卡片中纯 HTML 邮件自动转纯文本显示(不再暴露 HTML 源码)
+- 本地诊断日志:启动后写入 app 数据目录的 `logs/ai-email.log`,记录 IMAP 连接 / TLS / 登录 / LIST / SELECT / FETCH / STORE / MOVE 阶段耗时与失败原因,便于排查间歇性超时
 - 自动回复中心:规则把需要回复的新邮件筛进「建议回复」队列,一键起草双语回复审阅后发送(不自动发出)
-- 支持 QQ 邮箱 / 腾讯企业邮 / Gmail;设置中心统一管理邮箱账户(增 / 删 / 改)与 AI 模型
+- 支持 QQ 邮箱 / 腾讯企业邮 / Gmail;设置中心统一管理邮箱账户(增 / 删 / 改)、AI 模型与本地正文 / AI 缓存清理
 
 ## 技术栈
 
 - **Tauri 2** + React + TypeScript(前端)
-- **Rust** 核心:`async-imap` / `lettre`(IMAP/SMTP)、`reqwest` → Anthropic API
+- **Rust** 核心:`async-imap` / `lettre`(IMAP/SMTP)、`reqwest` → Anthropic / OpenAI-compatible API
 - **嵌入式 SQLite**(`sqlx`):数据库文件在 OS app 数据目录,首次启动自动创建并迁移 —— 零配置、离线、无需数据库服务
 - 凭据(邮箱授权码 / 客户端专用密码、AI API key)存 OS keychain,从不入库
 
@@ -34,16 +35,41 @@ pnpm install
 pnpm tauri dev      # 开发模式(桌面)
 ```
 
-首次运行会在 app 数据目录自动建 SQLite 库并跑迁移。在应用内设置中心添加邮箱账户(QQ / 腾讯企业邮 / Gmail,授权码或客户端专用密码)与 AI 模型(Anthropic key)即可使用。
+首次运行会在 app 数据目录自动建 SQLite 库并跑迁移。在应用内设置中心添加邮箱账户(QQ / 腾讯企业邮 / Gmail,授权码或客户端专用密码)与 AI 模型(Anthropic 或 OpenAI-compatible key)即可使用。
 
 构建发布包:
 
 ```bash
-pnpm tauri build                                   # macOS 桌面 .app / .dmg
+pnpm build:macos      # macOS 桌面 .app / .dmg
 pnpm build:android    # Android arm64 APK
 ```
 
-> 可选(macOS):用**自签名代码签名证书**签构建,可避免每次重建后系统钥匙串重复授权(ad-hoc 签名每次变、「始终允许」存不住)。先在钥匙串访问建一张「代码签名」自签名证书、对其设「代码签名: 始终信任」,再 `APPLE_SIGNING_IDENTITY="<证书名>" pnpm tauri build`。dev(`tauri dev`)的重复授权由 debug 文件态旁路自动解决,无需签名。
+发布前基础验证:
+
+```bash
+pnpm exec prettier --check .
+pnpm exec eslint --max-warnings 0 .
+pnpm exec tsc --noEmit
+pnpm test:coverage
+pnpm audit --registry https://registry.npmjs.org/
+cd src-tauri && cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test --all-features && cargo audit --ignore RUSTSEC-2023-0071
+```
+
+`RUSTSEC-2023-0071` 是窄范围忽略项：`Cargo.lock` 会因 `sqlx-macros` 的可选 MySQL 后端路径列出 `rsa`，但本项目禁用 `sqlx` 默认特性且只启用 SQLite，实际编译/运行路径不使用 MySQL/RSA。
+
+> 可选(macOS):用**自签名代码签名证书**签构建,可避免每次重建后系统钥匙串重复授权(ad-hoc 签名每次变、「始终允许」存不住)。先在钥匙串访问建一张「代码签名」自签名证书、对其设「代码签名: 始终信任」,再 `APPLE_SIGNING_IDENTITY="<证书名>" pnpm build:macos`。dev(`tauri dev`)的重复授权由 debug 文件态旁路自动解决,无需签名。
+
+Android release 签名可通过环境变量启用；不设置时仍产出 unsigned APK，适合本地冒烟验证：
+
+```bash
+export ANDROID_RELEASE_STORE_FILE="/path/to/release.jks"
+export ANDROID_RELEASE_STORE_PASSWORD="..."
+export ANDROID_RELEASE_KEY_ALIAS="..."
+export ANDROID_RELEASE_KEY_PASSWORD="..."
+pnpm build:android
+```
+
+CI 可改用 `ANDROID_RELEASE_KEYSTORE_BASE64` 存 GitHub Secret，脚本会临时解码并自动设置 `ANDROID_RELEASE_STORE_FILE`。不要把 `.jks` / `.keystore` / `.p12` 文件提交到仓库。
 
 ## 平台
 

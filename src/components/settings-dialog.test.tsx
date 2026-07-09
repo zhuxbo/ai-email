@@ -13,6 +13,9 @@ vi.mock('./ai-settings-dialog', () => ({
 vi.mock('./auto-sync-panel', () => ({
   AutoSyncPanel: () => <div data-testid="auto-sync-panel" />,
 }));
+vi.mock('./maintenance-panel', () => ({
+  MaintenancePanel: () => <div data-testid="maintenance-panel" />,
+}));
 
 describe('SettingsDialog', () => {
   it('open=false 时不渲染', () => {
@@ -42,6 +45,14 @@ describe('SettingsDialog', () => {
     expect(screen.getByTestId('auto-sync-panel')).toBeInTheDocument();
     expect(screen.queryByTestId('accounts-panel')).toBeNull();
     expect(screen.getByRole('button', { name: '收信' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('点「维护」tab 渲染 MaintenancePanel', () => {
+    render(<SettingsDialog open onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: '维护' }));
+    expect(screen.getByTestId('maintenance-panel')).toBeInTheDocument();
+    expect(screen.queryByTestId('accounts-panel')).toBeNull();
+    expect(screen.getByRole('button', { name: '维护' })).toHaveAttribute('aria-pressed', 'true');
   });
 
   it('点关闭按钮触发 onClose', () => {

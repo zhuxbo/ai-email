@@ -1,15 +1,11 @@
 import { render, screen } from '@testing-library/react';
 import { fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { save } from '@tauri-apps/plugin-dialog';
 
 import { AttachmentList } from './attachment-list';
 import { useMailStore } from '../lib/store/mail';
 import * as tauri from '../lib/tauri';
 
-vi.mock('@tauri-apps/plugin-dialog', () => ({
-  save: vi.fn().mockResolvedValue(null),
-}));
 vi.mock('../lib/tauri', async (importOriginal) => {
   const actual = await importOriginal<typeof tauri>();
   return {
@@ -59,29 +55,15 @@ describe('AttachmentList', () => {
     expect(screen.getByText(/1\.5\s*KB/)).toBeInTheDocument();
   });
 
-  it('点击附件下载按钮触发 save + messageAttachmentSave', async () => {
+  it('点击附件下载按钮触发后端另存为命令，不从前端传入文件路径', async () => {
     vi.mocked(tauri.messageAttachments).mockResolvedValueOnce([
       { filename: 'doc.pdf', contentType: 'application/pdf', size: 2048 },
     ]);
-    vi.mocked(save).mockResolvedValueOnce('/downloads/doc.pdf');
     render(<AttachmentList messageId="m3" hasAttachment />);
     const btn = await screen.findByRole('button', { name: /doc\.pdf/ });
     fireEvent.click(btn);
     await waitFor(() => {
-      expect(tauri.messageAttachmentSave).toHaveBeenCalledWith('m3', 0, '/downloads/doc.pdf');
-    });
-  });
-
-  it('save 返回 null 时不调用 messageAttachmentSave（用户取消）', async () => {
-    vi.mocked(tauri.messageAttachments).mockResolvedValueOnce([
-      { filename: 'doc.pdf', contentType: 'application/pdf', size: 1024 },
-    ]);
-    vi.mocked(save).mockResolvedValueOnce(null);
-    render(<AttachmentList messageId="m4" hasAttachment />);
-    const btn = await screen.findByRole('button', { name: /doc\.pdf/ });
-    fireEvent.click(btn);
-    await waitFor(() => {
-      expect(tauri.messageAttachmentSave).not.toHaveBeenCalled();
+      expect(tauri.messageAttachmentSave).toHaveBeenCalledWith('m3', 0);
     });
   });
 
@@ -89,7 +71,6 @@ describe('AttachmentList', () => {
     vi.mocked(tauri.messageAttachments).mockResolvedValueOnce([
       { filename: 'fail.pdf', contentType: 'application/pdf', size: 512 },
     ]);
-    vi.mocked(save).mockResolvedValueOnce('/tmp/fail.pdf');
     vi.mocked(tauri.messageAttachmentSave).mockRejectedValueOnce(new Error('写盘失败'));
     render(<AttachmentList messageId="m5" hasAttachment />);
     const btn = await screen.findByRole('button', { name: /fail\.pdf/ });

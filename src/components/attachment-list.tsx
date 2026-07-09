@@ -1,8 +1,7 @@
 // 附件懒加载列表组件。hasAttachment 为真时才拉取元信息（active 守卫防竞态）。
-// 下载走 save 对话框 → messageAttachmentSave，失败 surface 到全局错误条。
+// 下载走后端原生保存对话框 → messageAttachmentSave，失败 surface 到全局错误条。
 
 import { useEffect, useState } from 'react';
-import { save } from '@tauri-apps/plugin-dialog';
 
 import * as tauri from '../lib/tauri';
 import { useMailStore } from '../lib/store/mail';
@@ -52,12 +51,9 @@ export function AttachmentList({ messageId, hasAttachment }: Props) {
 
   if (!hasAttachment) return null;
 
-  async function downloadAttachment(index: number, att: AttachmentMeta) {
+  async function downloadAttachment(index: number) {
     try {
-      const path = await save({ defaultPath: att.filename });
-      if (typeof path === 'string') {
-        await tauri.messageAttachmentSave(messageId, index, path);
-      }
+      await tauri.messageAttachmentSave(messageId, index);
     } catch (e) {
       useMailStore.setState({ error: e instanceof Error ? e.message : '下载附件失败' });
     }
@@ -78,7 +74,7 @@ export function AttachmentList({ messageId, hasAttachment }: Props) {
             <li key={`${a.filename}-${String(i)}`}>
               <button
                 type="button"
-                onClick={() => void downloadAttachment(i, a)}
+                onClick={() => void downloadAttachment(i)}
                 className="flex items-center gap-1 rounded border border-slate-200 px-2 py-1 text-xs text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
                 title="下载附件"
                 aria-label={`${a.filename} · ${formatSize(a.size)}`}

@@ -118,6 +118,11 @@ pub(crate) fn extract_json(raw: &str) -> &str {
     }
 }
 
+pub(crate) fn safe_model_json_error(label: &str, err: &serde_json::Error) -> AppError {
+    tracing::warn!(error = %err, model_role = label, "model returned invalid JSON");
+    AppError::Ai(format!("{label}未返回合法 JSON，请重试或调整输入"))
+}
+
 // ── Dispatch ──────────────────────────────────────────────────────────────────
 
 pub enum AiClient {
@@ -202,7 +207,7 @@ impl AiClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_json, AiClient};
+    use super::{extract_json, safe_model_json_error, AiClient};
     use crate::db::ai_models::AiModel;
     use secrecy::SecretString;
     use serde_json::Value;
@@ -353,6 +358,14 @@ mod tests {
         // No JSON structure at all: return trimmed text so the caller's serde error
         // surfaces the real (non-JSON) response.
         assert_eq!(extract_json("  not json at all  "), "not json at all");
+    }
+
+    #[test]
+    fn safe_model_json_error_does_not_include_raw_model_text() {
+        let err = serde_json::from_str::<serde_json::Value>("not json at all").unwrap_err();
+        let msg = safe_model_json_error("摘要模型", &err).to_string();
+        assert!(msg.contains("摘要模型未返回合法 JSON"));
+        assert!(!msg.contains("not json at all"));
     }
 
     #[test]
