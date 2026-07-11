@@ -19,14 +19,11 @@ export function AutoReplyDialog({ open, onClose }: Props) {
   const selectedAccountId = useMailStore((s) => s.selectedAccountId);
   const loadQueue = useAutoReplyStore((s) => s.loadQueue);
   const [ruleAccount, setRuleAccount] = useState<string | null>(null);
+  const activeRuleAccount = ruleAccount ?? selectedAccountId ?? accounts[0]?.id ?? null;
 
   useEffect(() => {
     if (open) void loadQueue();
   }, [open, loadQueue]);
-
-  useEffect(() => {
-    if (ruleAccount === null) setRuleAccount(selectedAccountId ?? accounts[0]?.id ?? null);
-  }, [accounts, selectedAccountId, ruleAccount]);
 
   if (!open) return null;
 
@@ -66,7 +63,7 @@ export function AutoReplyDialog({ open, onClose }: Props) {
             {accounts.length > 1 && (
               <select
                 aria-label="规则所属账户"
-                value={ruleAccount ?? ''}
+                value={activeRuleAccount ?? ''}
                 onChange={(e) => {
                   setRuleAccount(e.target.value);
                 }}
@@ -79,8 +76,8 @@ export function AutoReplyDialog({ open, onClose }: Props) {
                 ))}
               </select>
             )}
-            {ruleAccount !== null ? (
-              <AutoReplyRules accountId={ruleAccount} />
+            {activeRuleAccount !== null ? (
+              <AutoReplyRules accountId={activeRuleAccount} />
             ) : (
               <p className="text-sm text-text-3">先添加邮箱账户再配置规则。</p>
             )}

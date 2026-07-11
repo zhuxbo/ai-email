@@ -101,4 +101,27 @@ describe('AttachmentList', () => {
       expect(screen.queryByText(/a\.pdf/)).toBeNull();
     });
   });
+
+  it('同一封邮件重新显示附件时不会复用旧结果', async () => {
+    let resolveReload!: (value: { filename: string; contentType: string; size: number }[]) => void;
+    const reload = new Promise<{ filename: string; contentType: string; size: number }[]>(
+      (resolve) => {
+        resolveReload = resolve;
+      },
+    );
+    vi.mocked(tauri.messageAttachments)
+      .mockResolvedValueOnce([{ filename: 'old.pdf', contentType: 'application/pdf', size: 512 }])
+      .mockReturnValueOnce(reload);
+
+    const { rerender } = render(<AttachmentList messageId="m1" hasAttachment />);
+    expect(await screen.findByText(/old\.pdf/)).toBeInTheDocument();
+
+    rerender(<AttachmentList messageId="m1" hasAttachment={false} />);
+    rerender(<AttachmentList messageId="m1" hasAttachment />);
+
+    expect(await screen.findByText(/正在读取附件/)).toBeInTheDocument();
+    resolveReload([{ filename: 'new.pdf', contentType: 'application/pdf', size: 1024 }]);
+    expect(await screen.findByText(/new\.pdf/)).toBeInTheDocument();
+    expect(screen.queryByText(/old\.pdf/)).toBeNull();
+  });
 });

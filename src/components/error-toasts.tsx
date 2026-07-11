@@ -13,7 +13,10 @@ function ErrorToast({ toast }: { toast: ErrorToastItem }) {
   // clear 闭包每次 render 标识可能变化；用 ref 持最新值，使计时 effect 只依赖 key+text，
   // 不因父组件重渲染而反复重置 3s 计时（否则计时永远走不满 3s）。
   const clearRef = useRef(toast.clear);
-  clearRef.current = toast.clear;
+  useEffect(() => {
+    clearRef.current = toast.clear;
+  }, [toast.clear]);
+
   useEffect(() => {
     const id = setTimeout(() => {
       clearRef.current();

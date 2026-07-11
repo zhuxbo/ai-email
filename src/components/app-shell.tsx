@@ -42,7 +42,9 @@ export function AppShell({ nav, onQueryChange, messageOpenSeq, list, detail, dra
 
   // 读最新 isMobile 但不放进 effect deps —— 只有"打开邮件"（seq 变）才切详情，缩窗不切。
   const isMobileRef = useRef(isMobile);
-  isMobileRef.current = isMobile;
+  useEffect(() => {
+    isMobileRef.current = isMobile;
+  }, [isMobile]);
 
   // 移动端：每次打开邮件（messageOpenSeq 递增）进详情视图。
   useEffect(() => {

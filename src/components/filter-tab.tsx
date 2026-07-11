@@ -14,26 +14,32 @@ const TARGET_LABEL: Record<FilterTarget, string> = {
 
 export function FilterTab() {
   const selectedMessageId = useMailStore((s) => s.selectedMessageId);
+
+  if (selectedMessageId === null) {
+    return <p className="text-sm text-text-3">在左侧选一封邮件再看过滤效果。</p>;
+  }
+
+  return <FilterPreview key={selectedMessageId} messageId={selectedMessageId} />;
+}
+
+function FilterPreview({ messageId }: { messageId: string }) {
   const [data, setData] = useState<MessageFilterPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // 最新选中 id（useLatest）：供事件处理器在 await 后判断邮件是否已切换。
-  const currentId = useRef(selectedMessageId);
-  currentId.current = selectedMessageId;
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   // 切换邮件即重新预览；active 守卫防迟到结果覆盖新选中。
   useEffect(() => {
-    if (selectedMessageId === null) {
-      setData(null);
-      setError(null);
-      return;
-    }
     let active = true;
-    const id = selectedMessageId;
-    setData(null);
-    setError(null);
     // 卸载守卫同 message-detail：迟到结果不覆盖新选中。
     void tauri
-      .messageFilterPreview(id)
+      .messageFilterPreview(messageId)
       .then((d) => {
         if (active) {
           setData(d);
@@ -47,29 +53,23 @@ export function FilterTab() {
     return () => {
       active = false;
     };
-  }, [selectedMessageId]);
+  }, [messageId]);
 
   const onToggleDisabled = async (disabled: boolean): Promise<void> => {
-    const id = selectedMessageId;
-    if (id === null) return;
     setError(null);
     try {
-      await tauri.messageSetFilterDisabled(id, disabled);
-      const d = await tauri.messageFilterPreview(id);
-      // 两次 await 间用户可能已切换邮件——比对最新选中，丢弃陈旧结果。
-      if (currentId.current === id) {
+      await tauri.messageSetFilterDisabled(messageId, disabled);
+      const d = await tauri.messageFilterPreview(messageId);
+      // 两次 await 间若已切换邮件，本组件会卸载，丢弃陈旧结果。
+      if (mountedRef.current) {
         setData(d);
       }
     } catch (e) {
-      if (currentId.current === id) {
+      if (mountedRef.current) {
         setError(errMsg(e));
       }
     }
   };
-
-  if (selectedMessageId === null) {
-    return <p className="text-sm text-text-3">在左侧选一封邮件再看过滤效果。</p>;
-  }
 
   return (
     <div className="flex flex-col gap-2">

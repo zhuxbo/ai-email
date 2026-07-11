@@ -55,6 +55,10 @@ pnpm audit --registry https://registry.npmjs.org/
 cd src-tauri && cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test --all-features && cargo audit --ignore RUSTSEC-2023-0071
 ```
 
+React Hooks 编译器诊断保持开启；依赖升级引入新诊断时，应修正组件状态生命周期，不在 ESLint 中关闭规则。
+
+Android 更新比较使用 Tauri 默认的 SemVer `versionCode` 公式；版本号保持 `package.json`、`tauri.conf.json` 与 `Cargo.toml` 一致，不依赖未跟踪的 Android 生成文件。
+
 `RUSTSEC-2023-0071` 是窄范围忽略项：`Cargo.lock` 会因 `sqlx-macros` 的可选 MySQL 后端路径列出 `rsa`，但本项目禁用 `sqlx` 默认特性且只启用 SQLite，实际编译/运行路径不使用 MySQL/RSA。
 
 > macOS 发布包是未签名的 DMG。用户从 GitHub Release 手动下载 DMG，退出旧版应用后以新应用替换旧应用；本地 `pnpm build:macos` 同样不需要发布凭据。

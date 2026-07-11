@@ -1,3 +1,4 @@
+import { StrictMode } from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
@@ -64,11 +65,52 @@ describe('FilterTab', () => {
     expect(tauri.messageFilterPreview).toHaveBeenCalledTimes(2);
   });
 
+  it('Strict Mode 下切换不过滤后仍刷新预览', async () => {
+    let disabled = false;
+    mockSelected('m1');
+    vi.mocked(tauri.messageFilterPreview).mockImplementation(() =>
+      Promise.resolve(preview({ net: disabled ? '更新后的净增量' : '初始净增量' })),
+    );
+    vi.mocked(tauri.messageSetFilterDisabled).mockImplementation(() => {
+      disabled = true;
+      return Promise.resolve();
+    });
+
+    render(
+      <StrictMode>
+        <FilterTab />
+      </StrictMode>,
+    );
+    expect(await screen.findByText('初始净增量')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText('本封不过滤（AI 收完整原文）'));
+    expect(await screen.findByText('更新后的净增量')).toBeInTheDocument();
+  });
+
   it('加载失败显示错误信息', async () => {
     mockSelected('m1');
     vi.mocked(tauri.messageFilterPreview).mockRejectedValue(new Error('网络超时'));
     render(<FilterTab />);
     expect(await screen.findByText('网络超时')).toBeInTheDocument();
+  });
+
+  it('切换邮件后不显示旧邮件的加载错误', async () => {
+    vi.mocked(tauri.messageFilterPreview).mockImplementation((id: string) =>
+      id === 'm1'
+        ? Promise.reject(new Error('m1 网络超时'))
+        : new Promise<MessageFilterPreview>(() => {
+            /* keep m2 loading */
+          }),
+    );
+    mockSelected('m1');
+    const { rerender } = render(<FilterTab />);
+    expect(await screen.findByText('m1 网络超时')).toBeInTheDocument();
+
+    mockSelected('m2');
+    rerender(<FilterTab />);
+
+    expect(screen.getByText('加载中…')).toBeInTheDocument();
+    expect(screen.queryByText('m1 网络超时')).toBeNull();
   });
 
   // #10 并发对抗：切换邮件时旧 load 迟到 resolve 不得覆盖新邮件（useEffect active 守卫）。

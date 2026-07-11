@@ -19,17 +19,17 @@ interface Props {
 }
 
 export function AttachmentList({ messageId, hasAttachment }: Props) {
+  if (!hasAttachment) return null;
+
+  return <LoadedAttachmentList key={messageId} messageId={messageId} />;
+}
+
+function LoadedAttachmentList({ messageId }: Pick<Props, 'messageId'>) {
   const [attachments, setAttachments] = useState<AttachmentMeta[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (!hasAttachment) {
-      setAttachments([]);
-      setLoading(false);
-      return;
-    }
     let active = true;
-    setLoading(true);
     void tauri
       .messageAttachments(messageId)
       .then((atts) => {
@@ -47,9 +47,7 @@ export function AttachmentList({ messageId, hasAttachment }: Props) {
     return () => {
       active = false;
     };
-  }, [messageId, hasAttachment]);
-
-  if (!hasAttachment) return null;
+  }, [messageId]);
 
   async function downloadAttachment(index: number) {
     try {

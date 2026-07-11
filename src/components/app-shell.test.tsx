@@ -25,7 +25,8 @@ vi.mock('../lib/tauri', () => ({
   inboxSync: vi.fn().mockResolvedValue({ newMessageCount: 0, totalInMailbox: 0 }),
 }));
 
-vi.mock('../lib/hooks/use-breakpoint', () => ({ useBreakpoint: () => 'mobile' }));
+let breakpoint: 'desktop' | 'mobile' = 'mobile';
+vi.mock('../lib/hooks/use-breakpoint', () => ({ useBreakpoint: () => breakpoint }));
 
 const noop = vi.fn();
 const navProps = {
@@ -55,6 +56,7 @@ function shell(messageOpenSeq: number) {
 }
 
 afterEach(() => {
+  breakpoint = 'mobile';
   vi.clearAllMocks();
 });
 
@@ -82,6 +84,21 @@ describe('AppShell (mobile)', () => {
     // 重选同一封邮件：selectMessage 仍推进 messageOpenSeq → 再次进详情（B1 回归）。
     rerender(shell(2));
     expect(screen.getByText('DETAIL')).toBeInTheDocument();
+  });
+
+  it('switching back to mobile without opening a new message keeps the list view', async () => {
+    useUiStore.setState({ mobileView: 'list', drawerOpen: false });
+    useMailStore.setState({ selectedMessageId: 'm1' } as never);
+    const { rerender } = render(shell(1));
+    await userEvent.click(screen.getByRole('button', { name: '返回列表' }));
+
+    breakpoint = 'desktop';
+    rerender(shell(1));
+    breakpoint = 'mobile';
+    rerender(shell(1));
+
+    expect(screen.getByText('LIST')).toBeInTheDocument();
+    expect(screen.queryByText('DETAIL')).not.toBeInTheDocument();
   });
 
   it('#15 选中邮件被删除（selectedMessageId 变 null）→ 移动端自动回列表视图', () => {

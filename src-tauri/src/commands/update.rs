@@ -13,8 +13,10 @@ use crate::error::{AppError, AppResult};
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 const ANDROID_UPDATE_METADATA_URL: &str =
     "https://github.com/zhuxbo/ai-email/releases/latest/download/android-latest.json";
-const ANDROID_TAURI_PROPERTIES: &str = include_str!("../../gen/android/app/tauri.properties");
 const ANDROID_RELEASE_PATH_PREFIX: &str = "/zhuxbo/ai-email/releases/download/";
+const ANDROID_VERSION_CODE_MAJOR_FACTOR: u64 = 1_000_000;
+const ANDROID_VERSION_CODE_MINOR_FACTOR: u64 = 1_000;
+const ANDROID_VERSION_CODE_MAX: u64 = 2_100_000_000;
 #[cfg(target_os = "android")]
 const ANDROID_UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(15);
 const MACOS_LATEST_RELEASE_API_URL: &str =
@@ -82,18 +84,27 @@ pub(crate) fn parse_android_metadata(raw: &str) -> AppResult<AndroidUpdateInfo> 
 }
 
 pub(crate) fn current_android_version_code() -> AppResult<i64> {
-    parse_current_android_version_code(ANDROID_TAURI_PROPERTIES)
+    let version = Version::parse(env!("CARGO_PKG_VERSION"))
+        .map_err(|_| AppError::Config("当前 Android 版本非法".into()))?;
+    android_version_code_from_semver(&version)
 }
 
-fn parse_current_android_version_code(raw: &str) -> AppResult<i64> {
-    parse_version_code(raw)
-        .ok_or_else(|| AppError::Config("无法读取当前 Android versionCode".into()))
-}
+fn android_version_code_from_semver(version: &Version) -> AppResult<i64> {
+    // Tauri defaults to major * 1_000_000 + minor * 1_000 + patch.
+    let code = version
+        .major
+        .checked_mul(ANDROID_VERSION_CODE_MAJOR_FACTOR)
+        .and_then(|code| {
+            version
+                .minor
+                .checked_mul(ANDROID_VERSION_CODE_MINOR_FACTOR)
+                .and_then(|minor| code.checked_add(minor))
+        })
+        .and_then(|code| code.checked_add(version.patch))
+        .filter(|code| *code <= ANDROID_VERSION_CODE_MAX)
+        .ok_or_else(|| AppError::Config("Android versionCode 超出允许范围".into()))?;
 
-fn parse_version_code(raw: &str) -> Option<i64> {
-    raw.lines()
-        .find_map(|line| line.strip_prefix("tauri.android.versionCode="))
-        .and_then(|value| value.trim().parse::<i64>().ok())
+    Ok(code as i64)
 }
 
 fn validate_allowed_android_apk_url(raw: &str) -> AppResult<Url> {
@@ -269,10 +280,11 @@ mod tests {
     use std::cmp::Ordering;
 
     use super::{
-        compare_version_code, current_android_version_code, is_allowed_android_apk_url,
-        parse_android_metadata, parse_current_android_version_code, parse_macos_release,
+        android_version_code_from_semver, compare_version_code, current_android_version_code,
+        is_allowed_android_apk_url, parse_android_metadata, parse_macos_release,
         validate_macos_update_download_url,
     };
+    use semver::Version;
 
     fn macos_release_json(
         tag_name: &str,
@@ -320,13 +332,21 @@ mod tests {
     }
 
     #[test]
-    fn current_android_version_code_parses_tauri_properties() {
+    fn current_android_version_code_uses_package_version() {
         assert_eq!(current_android_version_code().unwrap(), 1000);
     }
 
     #[test]
-    fn current_android_version_code_rejects_missing_properties_value() {
-        assert!(parse_current_android_version_code("tauri.android.versionName=0.1.0").is_err());
+    fn android_version_code_matches_tauri_semver_default() {
+        assert_eq!(
+            android_version_code_from_semver(&Version::parse("0.1.0").unwrap()).unwrap(),
+            1000
+        );
+        assert_eq!(
+            android_version_code_from_semver(&Version::parse("1.2.3").unwrap()).unwrap(),
+            1_002_003
+        );
+        assert!(android_version_code_from_semver(&Version::parse("2101.0.0").unwrap()).is_err());
     }
 
     #[test]
