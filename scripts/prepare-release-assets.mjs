@@ -47,6 +47,10 @@ export function releaseAssetNames(version) {
   ];
 }
 
+export function releaseAssetNamesOutput(version) {
+  return `${releaseAssetNames(version).join('\n')}\n`;
+}
+
 export function assertSignedApkName(fileName) {
   if (fileName.includes('unsigned')) {
     throw new Error('Android Release 不能使用 unsigned APK');
@@ -246,6 +250,10 @@ async function runSelfTest() {
     'ai-email_0.1.0_arm64-v8a.apk',
     'android-latest.json',
   ]);
+  assert.equal(
+    releaseAssetNamesOutput('0.1.0'),
+    'ai-email_0.1.0_aarch64.dmg\nai-email_0.1.0_arm64-v8a.apk\nandroid-latest.json\n',
+  );
 
   console.log('self-test passed');
 }

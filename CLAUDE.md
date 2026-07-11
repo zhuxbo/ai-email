@@ -150,6 +150,7 @@ For dependency audits, keep `pnpm audit --registry https://registry.npmjs.org/` 
 - Don't add a new dep without checking its weekly download count + last-update date
 - Don't silence a lint to make CI pass — fix the root cause; React Hooks compiler diagnostics stay enabled
 - Don't make runtime Rust code depend on ignored Android generated files; use synchronized source version metadata
+- Don't duplicate release asset naming in workflow shell; use the release asset helper as the single source
 - Don't write to disk outside the Tauri app data directory, except user-selected attachment saves from the backend native save dialog
 - Don't call IMAP / SMTP / AI from the frontend — always go through a Tauri command
 

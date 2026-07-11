@@ -209,7 +209,7 @@ jobs:
           staging_dir='src-tauri/target/release/release-assets'
           cp "$NOTES_FILE" "$staging_dir/release-notes.md"
           assets="$(
-            node --input-type=module --eval 'import { releaseAssetNames } from "./scripts/prepare-release-assets.mjs"; process.stdout.write(releaseAssetNames(process.argv.at(-1)).join("\\n"));' "$VERSION"
+            node --input-type=module --eval 'import { releaseAssetNamesOutput } from "./scripts/prepare-release-assets.mjs"; process.stdout.write(releaseAssetNamesOutput(process.argv.at(-1)));' "$VERSION"
           )"
           asset_count=0
           while IFS= read -r asset; do
