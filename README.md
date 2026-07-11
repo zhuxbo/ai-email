@@ -88,7 +88,7 @@ git push origin v0.1.0
 
 - 工作流仅接受 `main` 上的 `v<major>.<minor>.<patch>` 注释标签；Actions 手动运行时选择 `main` 并输入已有标签。
 - build Job 只使用 Android JKS 凭据与证书指纹，校验 signed APK，并生成未签名 macOS DMG；无凭据的 publish Job 才创建公开 stable GitHub Release。
-- Release 只包含 `android-latest.json`、`ai-email_<version>_aarch64.dmg` 和 `ai-email_<version>_arm64-v8a.apk`；资产名称和校验清单由 `scripts/prepare-release-assets.mjs` 统一生成。GitHub Release 必须公开，以便客户端匿名下载。
+- Release 只包含 `android-latest.json`、`ai-email_<version>_aarch64.dmg` 和 `ai-email_<version>_arm64-v8a.apk`；资产名称和校验清单由 `scripts/prepare-release-assets.mjs` 统一生成。发布作业会检出对应标签，以校验并创建不可变公开 Release，供客户端匿名下载。
 - 已存在同标签 Release 时工作流会失败且不覆盖资产；检查或处理失败的 draft 后再重新触发。保护 `v*` 标签，禁止移动或删除。
 - macOS 用户检查 GitHub Release 后打开对应 DMG URL，手动以新应用替换旧应用；Android Release 只允许 signed APK，unsigned APK 仅用于本地冒烟。
 
