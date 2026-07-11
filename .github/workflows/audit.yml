@@ -24,6 +24,9 @@ on:
       - 'src-tauri/Cargo.lock'
       - '.github/workflows/audit.yml'
 
+permissions:
+  contents: read
+
 jobs:
   npm-audit:
     name: pnpm audit

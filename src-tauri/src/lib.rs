@@ -318,6 +318,10 @@ pub fn run() {
             commands::mail::message_filter_preview,
             commands::mail::message_set_filter_disabled,
             commands::mail::message_set_category,
+            commands::update::android_update_check,
+            commands::update::android_update_open_download,
+            commands::update::macos_update_check,
+            commands::update::macos_update_open_download,
         ])
         .build(tauri::generate_context!())
         .map_err(|e| {

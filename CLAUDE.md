@@ -50,8 +50,12 @@ ai-email/
 - **Anthropic / OpenAI-compatible APIs** via `reqwest` (no third-party AI wrappers)
 - **pnpm** as package manager (NOT npm or yarn)
 - **Mirrors**: `npmmirror.com` for npm, `rsproxy.cn` for cargo
-- **Release entrypoints**: macOS uses `pnpm build:macos` (`.app` + CI-safe DMG without Finder AppleScript); Android uses `pnpm build:android`
-- **Android release signing**: optional via `ANDROID_RELEASE_*` env vars / GitHub Secrets; never commit keystores
+- **Release entrypoints**: `pnpm build:macos` and `pnpm build:android` are low-level build entrypoints; `.github/workflows/release.yml` is the only production build/publish entrypoint
+- **Android release signing**: optional via local `ANDROID_RELEASE_*` env vars; only the protected `release.yml` release workflow may inject GitHub signing secrets, while ordinary CI always builds unsigned APKs; never commit keystores
+- **Release automation**: `release.yml` accepts only annotated stable tags from `main`, separates secret-bearing build from `contents: write` publish, and stores signing material only in the `release` GitHub Environment
+- **macOS delivery**: macOS checks GitHub Release, then opens the versioned DMG URL and relies on manual app replacement; it has no updater-signature, certificate, or notarization release gate
+- **Release assets**: public stable releases contain exactly `android-latest.json`, `ai-email_<version>_aarch64.dmg`, and `ai-email_<version>_arm64-v8a.apk`; Android APK certificate SHA-256 validation happens before artifact transfer
+- **Signing boundaries**: the protected build job accepts only Android JKS credentials and `ANDROID_RELEASE_CERT_SHA256`; publish has no release credentials and only `contents: write`
 - **npm security overrides** live in `pnpm-workspace.yaml`, not `package.json`'s deprecated `pnpm` field
 
 ## Code conventions

@@ -19,6 +19,14 @@ describe('生产安全配置', () => {
     expect(capability.permissions).not.toContain('dialog:default');
   });
 
+  it('不配置 Tauri updater 插件且不放宽默认 opener/dialog 权限', () => {
+    expect(tauriConfig).not.toHaveProperty('plugins.updater');
+    expect(capability.permissions).toEqual(['core:default']);
+    expect(capability.permissions).not.toContain('opener:default');
+    expect(capability.permissions).not.toContain('dialog:default');
+    expect(capability.permissions.join('\n')).not.toContain('shell:');
+  });
+
   it('Android FileProvider 不暴露整个 external storage', () => {
     expect(fileProviderPaths).not.toContain('<external-path');
     expect(fileProviderPaths).toContain('path="attachments/"');

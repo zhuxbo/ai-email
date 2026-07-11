@@ -2,7 +2,7 @@
 # 构建 Android arm64-v8a release APK。
 # 优先使用已设的 ANDROID_HOME / NDK_HOME / JAVA_HOME（CI 会设，故不受影响）；
 # 本地缺失时回退到 Homebrew 默认位置，并自动选用版本号最高的 NDK。
-# 默认 `--apk --target aarch64`，可透传其它参数覆盖（如 `--aab`）。
+# 默认 `--apk --target aarch64 --ci`，可透传其它参数覆盖（如 `--aab`）。
 # 可选 release 签名环境变量：
 #   ANDROID_RELEASE_KEYSTORE_BASE64 或 ANDROID_RELEASE_STORE_FILE
 #   ANDROID_RELEASE_STORE_PASSWORD
@@ -45,7 +45,9 @@ echo "→ JAVA_HOME=$JAVA_HOME"
 
 keystore_tmp=""
 cleanup() {
-  [ -n "$keystore_tmp" ] && rm -f "$keystore_tmp"
+  if [ -n "$keystore_tmp" ]; then
+    rm -f "$keystore_tmp"
+  fi
 }
 trap cleanup EXIT
 
@@ -75,5 +77,5 @@ else
   echo "→ Android release signing: disabled (unsigned APK)"
 fi
 
-[ "$#" -eq 0 ] && set -- --apk --target aarch64
+[ "$#" -eq 0 ] && set -- --apk --target aarch64 --ci
 pnpm tauri android build "$@"

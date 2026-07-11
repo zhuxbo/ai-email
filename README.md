@@ -57,7 +57,7 @@ cd src-tauri && cargo fmt --check && cargo clippy --all-targets --all-features -
 
 `RUSTSEC-2023-0071` 是窄范围忽略项：`Cargo.lock` 会因 `sqlx-macros` 的可选 MySQL 后端路径列出 `rsa`，但本项目禁用 `sqlx` 默认特性且只启用 SQLite，实际编译/运行路径不使用 MySQL/RSA。
 
-> 可选(macOS):用**自签名代码签名证书**签构建,可避免每次重建后系统钥匙串重复授权(ad-hoc 签名每次变、「始终允许」存不住)。先在钥匙串访问建一张「代码签名」自签名证书、对其设「代码签名: 始终信任」,再 `APPLE_SIGNING_IDENTITY="<证书名>" pnpm build:macos`。dev(`tauri dev`)的重复授权由 debug 文件态旁路自动解决,无需签名。
+> macOS 发布包是未签名的 DMG。用户从 GitHub Release 手动下载 DMG，退出旧版应用后以新应用替换旧应用；本地 `pnpm build:macos` 同样不需要发布凭据。
 
 Android release 签名可通过环境变量启用；不设置时仍产出 unsigned APK，适合本地冒烟验证：
 
@@ -69,7 +69,24 @@ export ANDROID_RELEASE_KEY_PASSWORD="..."
 pnpm build:android
 ```
 
-CI 可改用 `ANDROID_RELEASE_KEYSTORE_BASE64` 存 GitHub Secret，脚本会临时解码并自动设置 `ANDROID_RELEASE_STORE_FILE`。不要把 `.jks` / `.keystore` / `.p12` 文件提交到仓库。
+只有受保护的 `release.yml` 发布工作流可以注入 GitHub signing secrets，其中 `ANDROID_RELEASE_KEYSTORE_BASE64` 会由脚本临时解码并自动设置 `ANDROID_RELEASE_STORE_FILE`。普通 CI 必然构建 unsigned APK。不要把 `.jks` 或 `.keystore` 文件提交到仓库。
+
+正式发布由 [release.yml](.github/workflows/release.yml) 完成。本地 `build:*` 只用于冒烟，不能替代受保护的 CI 发布。
+
+1. 在 GitHub 创建受保护的 `release` Environment，并限制为发布维护者使用。仅配置 Android JKS Secrets：`ANDROID_RELEASE_KEYSTORE_BASE64`、`ANDROID_RELEASE_STORE_PASSWORD`、`ANDROID_RELEASE_KEY_ALIAS`、`ANDROID_RELEASE_KEY_PASSWORD`。
+2. 配置 Environment Variable：`ANDROID_RELEASE_CERT_SHA256`，其值为 Android 发布证书的 SHA-256 指纹。
+3. 在 `main` 同步 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 的版本后，创建带更新说明的注释 SemVer 标签并推送：
+
+```bash
+git tag -a v0.1.0 -m "更新说明"
+git push origin v0.1.0
+```
+
+- 工作流仅接受 `main` 上的 `v<major>.<minor>.<patch>` 注释标签；Actions 手动运行时选择 `main` 并输入已有标签。
+- build Job 只使用 Android JKS 凭据与证书指纹，校验 signed APK，并生成未签名 macOS DMG；无凭据的 publish Job 才创建公开 stable GitHub Release。
+- Release 只包含 `android-latest.json`、`ai-email_<version>_aarch64.dmg` 和 `ai-email_<version>_arm64-v8a.apk`。GitHub Release 必须公开，以便客户端匿名下载。
+- 已存在同标签 Release 时工作流会失败且不覆盖资产；检查或处理失败的 draft 后再重新触发。保护 `v*` 标签，禁止移动或删除。
+- macOS 用户检查 GitHub Release 后打开对应 DMG URL，手动以新应用替换旧应用；Android Release 只允许 signed APK，unsigned APK 仅用于本地冒烟。
 
 ## 平台
 

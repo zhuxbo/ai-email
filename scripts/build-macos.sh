@@ -13,7 +13,8 @@ case "$host_arch" in
     dmg_arch="aarch64"
     ;;
   *)
-    dmg_arch="$host_arch"
+    echo "macOS release build only supports arm64 hosts; got $host_arch" >&2
+    exit 1
     ;;
 esac
 

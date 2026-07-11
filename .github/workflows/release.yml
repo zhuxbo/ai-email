@@ -1,0 +1,283 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing annotated v<major>.<minor>.<patch> tag to release
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: Build Android-Signed Release Assets
+    runs-on: macos-15
+    environment: release
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.release-context.outputs.tag }}
+      version: ${{ steps.release-context.outputs.version }}
+
+    steps:
+      - name: Verify manual dispatch source
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != 'refs/heads/main' ]; then
+            echo 'manual release dispatch must run from main' >&2
+            exit 1
+          fi
+
+      - name: Checkout release tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Drop China crates mirror on CI
+        shell: bash
+        run: rm -f .cargo/config.toml
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 11.2.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Setup Java
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@2817442ee7c3346c1eb7d2ec60263c93206ba14f # v1
+        with:
+          ndk-version: r26b
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@40fd30fb8d7440372e1316f5d1809ec01dcd3699 # v4
+
+      - name: Install Android platform and build tools
+        shell: bash
+        run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0'
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        with:
+          components: rustfmt, clippy
+          targets: aarch64-linux-android
+
+      - name: Restore Rust cache
+        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae # v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Validate release tag
+        id: release-context
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "release tag must match v<major>.<minor>.<patch>: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          if [ "$(git cat-file -t "refs/tags/$RELEASE_TAG")" != 'tag' ]; then
+            echo "release tag must be annotated: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          tag_commit="$(git rev-parse "$RELEASE_TAG^{}")"
+          if ! git merge-base --is-ancestor "$tag_commit" origin/main; then
+            echo "release tag must point to a commit reachable from main: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          notes_file="$RUNNER_TEMP/release-notes.md"
+          git for-each-ref --format='%(contents)' "refs/tags/$RELEASE_TAG" >"$notes_file"
+          if [ ! -s "$notes_file" ]; then
+            echo "release tag annotation must not be empty: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          version="${RELEASE_TAG#v}"
+          if [ "$(node -p "require('./package.json').version")" != "$version" ]; then
+            echo "package.json version does not match $RELEASE_TAG" >&2
+            exit 1
+          fi
+          git checkout --detach "$tag_commit"
+          printf 'tag=%s\nversion=%s\nnotes_file=%s\n' "$RELEASE_TAG" "$version" "$notes_file" >>"$GITHUB_OUTPUT"
+
+      - name: Validate Android signing material
+        shell: bash
+        env:
+          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+          ANDROID_RELEASE_CERT_SHA256: ${{ vars.ANDROID_RELEASE_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          required=(ANDROID_RELEASE_KEYSTORE_BASE64 ANDROID_RELEASE_STORE_PASSWORD ANDROID_RELEASE_KEY_ALIAS ANDROID_RELEASE_KEY_PASSWORD ANDROID_RELEASE_CERT_SHA256)
+          for name in "${required[@]}"; do
+            if [ -z "${!name:-}" ]; then
+              echo "missing Android release signing input: $name" >&2
+              exit 1
+            fi
+          done
+          fingerprint="$(printf '%s' "$ANDROID_RELEASE_CERT_SHA256" | tr -cd '[:xdigit:]' | tr '[:upper:]' '[:lower:]')"
+          if ! [[ "$fingerprint" =~ ^[a-f0-9]{64}$ ]]; then
+            echo 'ANDROID_RELEASE_CERT_SHA256 must be a SHA-256 certificate fingerprint' >&2
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Prettier check
+        run: pnpm exec prettier --check .
+
+      - name: ESLint
+        run: pnpm exec eslint --max-warnings 0 .
+
+      - name: TypeScript check
+        run: pnpm exec tsc --noEmit
+
+      - name: Vitest
+        run: pnpm test:coverage
+
+      - name: Rust format
+        working-directory: src-tauri
+        run: cargo fmt --check
+
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Rust tests
+        working-directory: src-tauri
+        run: cargo test --all-features
+
+      - name: Release helper self-test
+        run: pnpm test:release-assets
+
+      - name: Build unsigned macOS DMG for manual installation
+        run: pnpm build:macos
+
+      - name: Build signed Android APK
+        env:
+          NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          ANDROID_RELEASE_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_STORE_PASSWORD }}
+          ANDROID_RELEASE_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          ANDROID_RELEASE_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+        run: pnpm build:android
+
+      - name: Stage and checksum release assets
+        shell: bash
+        env:
+          VERSION: ${{ steps.release-context.outputs.version }}
+          NOTES_FILE: ${{ steps.release-context.outputs.notes_file }}
+          ANDROID_RELEASE_CERT_SHA256: ${{ vars.ANDROID_RELEASE_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          pnpm release:prepare-assets -- --version "$VERSION" --notes-file "$NOTES_FILE"
+          staging_dir='src-tauri/target/release/release-assets'
+          cp "$NOTES_FILE" "$staging_dir/release-notes.md"
+          assets="$(
+            node --input-type=module --eval 'import { releaseAssetNames } from "./scripts/prepare-release-assets.mjs"; process.stdout.write(releaseAssetNames(process.argv.at(-1)).join("\\n"));' "$VERSION"
+          )"
+          asset_count=0
+          while IFS= read -r asset; do
+            [ -f "$staging_dir/$asset" ] || { echo "missing staged release asset: $asset" >&2; exit 1; }
+            asset_count=$((asset_count + 1))
+          done <<<"$assets"
+          [ "$asset_count" -eq 3 ] || { echo 'release helper must stage exactly three public assets' >&2; exit 1; }
+          (
+            cd "$staging_dir"
+            while IFS= read -r asset; do
+              shasum -a 256 "$asset"
+            done <<<"$assets" >release-assets.sha256
+          )
+
+      - name: Upload release build artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-assets-${{ steps.release-context.outputs.tag }}
+          path: src-tauri/target/release/release-assets
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download release build artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-assets-${{ needs.build.outputs.tag }}
+          path: release-assets
+
+      - name: Create immutable public stable release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.tag }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          manifest='release-assets/release-assets.sha256'
+          [ -f "$manifest" ] || { echo "missing release checksum manifest: $manifest" >&2; exit 1; }
+          mapfile -t assets < <(
+            awk '
+              NF != 2 || length($1) != 64 || $1 !~ /^[[:xdigit:]]+$/ || $2 !~ /^[A-Za-z0-9._-]+$/ { exit 1 }
+              { print $2 }
+            ' "$manifest"
+          )
+          [ "${#assets[@]}" -eq 3 ] || { echo 'release checksum manifest must contain exactly three assets' >&2; exit 1; }
+          [ "$(printf '%s\n' "${assets[@]}" | sort -u | wc -l | tr -d ' ')" -eq 3 ] || {
+            echo 'release checksum manifest must not repeat assets' >&2
+            exit 1
+          }
+          (
+            cd release-assets
+            shasum -a 256 -c release-assets.sha256
+          )
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release already exists and will not be mutated: $TAG" >&2
+            exit 1
+          fi
+          gh release create "$TAG" \
+            --verify-tag \
+            --latest \
+            --title "ai-email $VERSION" \
+            --notes-file release-assets/release-notes.md \
+            "${assets[@]/#/release-assets/}"

@@ -14,6 +14,7 @@ pub mod mail;
 pub mod reclassify;
 pub mod sender_filters;
 pub mod system;
+pub mod update;
 
 /// Decide which secret to persist to the keychain on an *update*.
 ///

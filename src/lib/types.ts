@@ -131,6 +131,23 @@ export interface CacheClearReport {
   aiResultsDeleted: number;
 }
 
+export interface AndroidUpdateInfo {
+  version: string;
+  versionCode: number;
+  notes: string;
+  pubDate: string;
+  apkUrl: string;
+  apkSize: number;
+  sha256: string;
+}
+
+export interface MacosUpdateInfo {
+  version: string;
+  notes: string;
+  pubDate: string;
+  dmgUrl: string;
+}
+
 export type AiProvider = 'anthropic' | 'openai';
 
 export type AiRole = 'summary' | 'classify' | 'translate' | 'draft';

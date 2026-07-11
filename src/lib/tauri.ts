@@ -38,6 +38,8 @@ import type {
   SyncReport,
   TextTranslation,
   TranslateResult,
+  AndroidUpdateInfo,
+  MacosUpdateInfo,
 } from './types';
 import { isSingleFold } from './types';
 
@@ -143,6 +145,22 @@ export async function messageAttachmentSave(id: string, index: number): Promise<
 
 export async function cacheClear(): Promise<CacheClearReport> {
   return invoke('cache_clear');
+}
+
+export async function androidUpdateCheck(): Promise<AndroidUpdateInfo | null> {
+  return invoke<AndroidUpdateInfo | null>('android_update_check');
+}
+
+export async function androidUpdateOpenDownload(url: string): Promise<void> {
+  await invoke('android_update_open_download', { url });
+}
+
+export async function macosUpdateCheck(): Promise<MacosUpdateInfo | null> {
+  return invoke<MacosUpdateInfo | null>('macos_update_check');
+}
+
+export async function macosUpdateOpenDownload(url: string): Promise<void> {
+  await invoke('macos_update_open_download', { url });
 }
 
 export async function modelsList(): Promise<AiModel[]> {
