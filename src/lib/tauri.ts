@@ -30,6 +30,7 @@ import type {
   MessageFilterPreview,
   MessageHeader,
   RoleDefault,
+  SearchHit,
   SendDraft,
   SendReceipt,
   SenderFilter,
@@ -59,8 +60,12 @@ export async function accountUpdate(id: string, form: UpdateAccountForm): Promis
   return invoke('account_update', { id, form });
 }
 
-export async function inboxSync(accountId: string): Promise<SyncReport> {
-  return invoke('inbox_sync', { accountId });
+/**
+ * 同步收件箱。`force=true`（手动同步）绕过后端失败冷却；自动轮询应传 false，
+ * 冷却期内后端直接返回错误、不发起 IMAP 登录（防止持续撞服务端限流）。
+ */
+export async function inboxSync(accountId: string, force = false): Promise<SyncReport> {
+  return invoke('inbox_sync', { accountId, force });
 }
 
 export async function mailboxSync(accountId: string, mailboxName: string): Promise<SyncReport> {
@@ -133,6 +138,14 @@ export async function messageDelete(id: string): Promise<void> {
 
 export async function messageSetCategory(messageId: string, category: Category): Promise<void> {
   await invoke('message_set_category', { messageId, category });
+}
+
+export async function messageAddTag(messageId: string, tag: string): Promise<void> {
+  await invoke('message_add_tag', { messageId, tag });
+}
+
+export async function messageRemoveTag(messageId: string, tag: string): Promise<void> {
+  await invoke('message_remove_tag', { messageId, tag });
 }
 
 export async function messageAttachments(id: string): Promise<AttachmentMeta[]> {
@@ -432,6 +445,18 @@ interface FoldedRaw {
 // ---------------------------------------------------------------------------
 // 折叠列表命令绑定
 // ---------------------------------------------------------------------------
+
+/**
+ * 全局搜索（后端 LIKE 子串匹配，中文任意长度词有效）：多词 AND，覆盖全部账户
+ * 全部信箱；正文命中仅限已物化缓存的邮件。`accountId` 省略/null=全部账户。
+ */
+export async function messagesSearch(
+  query: string,
+  accountId: string | null,
+  limit = 100,
+): Promise<SearchHit[]> {
+  return invoke('messages_search', { query, accountId, limit });
+}
 
 /** 按信箱取折叠列表（信箱 id + 条数上限）。 */
 export async function mailboxFolded(mailboxId: string, limit = 100): Promise<FoldedItem[]> {

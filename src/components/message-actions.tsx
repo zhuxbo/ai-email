@@ -3,11 +3,13 @@ import { useMailStore } from '../lib/store/mail';
 import { useComposeStore } from '../lib/store/compose';
 import { useUiStore } from '../lib/store/ui';
 import { CategoryDialog } from './category-dialog';
+import { TagEditor } from './tag-editor';
 
 export function MessageActions() {
   const body = useMailStore((s) => s.body);
   const selectedMessageId = useMailStore((s) => s.selectedMessageId);
   const messages = useMailStore((s) => s.messages);
+  const conversation = useMailStore((s) => s.conversation);
   const deleteMessage = useMailStore((s) => s.deleteMessage);
   const setSeen = useMailStore((s) => s.setSeen);
   const setFlagged = useMailStore((s) => s.setFlagged);
@@ -19,7 +21,10 @@ export function MessageActions() {
   if (selectedMessageId === null) return null;
 
   const hasBody = body !== null;
-  const message = messages.find((m) => m.id === selectedMessageId);
+  // 列表代表优先；搜索结果打开的邮件不在列表窗口里，回落到 conversation 成员。
+  const message =
+    messages.find((m) => m.id === selectedMessageId) ??
+    conversation?.messages.find((m) => m.id === selectedMessageId);
 
   const seen = message?.flags.includes('\\Seen') ?? false;
   const flagged = message?.flags.includes('\\Flagged') ?? false;
@@ -111,6 +116,7 @@ export function MessageActions() {
           {flagged ? '取消加星' : '加星'}
         </button>
       </div>
+      <TagEditor message={message} />
       <CategoryDialog
         open={categoryOpen}
         messageId={selectedMessageId}

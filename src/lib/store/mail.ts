@@ -15,6 +15,7 @@ import type {
   Mailbox,
   MessageBody,
   MessageHeader,
+  SearchHit,
 } from '../types';
 import { errMsg } from '../utils';
 import { useAiStore } from './ai';
@@ -63,6 +64,13 @@ async function setFlagOptimistic(
 const AUTO_SYNC_KEY = 'ai-email-auto-sync-min';
 const VALID_INTERVALS: readonly number[] = [0, 1, 5, 15, 30];
 
+/** 搜索防抖间隔（ms）：停止输入后再发后端查询，避免逐键全量扫库。 */
+const SEARCH_DEBOUNCE_MS = 250;
+/** 搜索迟到守卫：每次发起递增，结果返回前比对，丢弃过期响应。 */
+let searchSeq = 0;
+/** 模块级防抖计时器（store 外部状态，避免进 React 生命周期）。 */
+let searchDebounce: ReturnType<typeof setTimeout> | null = null;
+
 /**
  * 读取持久化的自动收信间隔（分钟）。非法/缺省/localStorage 不可用时回落 5。
  * 同 theme：纯前端 localStorage，无后端参与。
@@ -88,9 +96,10 @@ async function runSync(
   set: StoreApi<MailState>['setState'],
   get: StoreApi<MailState>['getState'],
   targets: string[],
+  force: boolean,
 ): Promise<void> {
   set({ syncing: true, error: null });
-  const results = await Promise.allSettled(targets.map((id) => tauri.inboxSync(id)));
+  const results = await Promise.allSettled(targets.map((id) => tauri.inboxSync(id, force)));
   const syncErrs: Record<string, string> = {};
   results.forEach((r, i) => {
     if (r.status === 'rejected') syncErrs[targets[i] ?? ''] = errMsg(r.reason);
@@ -126,8 +135,14 @@ interface MailState {
   sortByPriority: boolean;
   /** 仅显示未读（无 \Seen 标记）。与 categoryFilter 叠加。 */
   unreadOnly: boolean;
+  /** 标签筛选：null = 不过滤；与 categoryFilter/unreadOnly 叠加（客户端过滤当前窗口）。 */
+  tagFilter: string | null;
 
   query: string;
+  /** 全局搜索结果；null = 不在搜索态（列表走折叠/聚合视图）。 */
+  searchResults: SearchHit[] | null;
+  /** 搜索请求进行中（防抖触发后到结果返回前）。 */
+  searching: boolean;
   /** 部分账户当前加载/同步失败：accountId → 错误信息。聚合层不再静默吞掉部分失败。 */
   accountErrors: Record<string, string>;
 
@@ -178,10 +193,23 @@ interface MailState {
   /** 切换到同一账户下的某个信箱（只在 selectedAccountId 非 null 时调用）。 */
   selectMailbox: (mailboxId: string) => Promise<void>;
   setQuery: (q: string) => void;
+  /** 执行一次全局搜索（防抖后由 setQuery 触发；空查询直接清空）。 */
+  runSearch: () => Promise<void>;
+  /** 打开搜索结果：标已读（静默）+ 进入单封会话详情。 */
+  openSearchHit: (hit: SearchHit) => Promise<void>;
   classifyVisibleMessages: () => Promise<void>;
   toggleCategoryFilter: (cat: Category) => void;
   setSortByPriority: (on: boolean) => void;
   setUnreadOnly: (on: boolean) => void;
+  /** 设置标签筛选（null 清除）。 */
+  setTagFilter: (tag: string | null) => void;
+  /**
+   * 给邮件加用户标签：乐观更新三切片（列表代表 / conversation 成员 / senderGroup 成员），
+   * 失败时按该条精准回滚 tags（复用 setCategoryLocal 的回滚策略）。
+   */
+  addTagLocal: (messageId: string, tag: string) => Promise<void>;
+  /** 删邮件标签（无论来源）：同 addTagLocal 的乐观更新与回滚。 */
+  removeTagLocal: (messageId: string, tag: string) => Promise<void>;
 
   setSeen: (id: string, seen: boolean) => Promise<void>;
   /** 自动已读：打开邮件时本地乐观标 \Seen，IMAP 尽力同步、失败静默不回滚（区别于 setSeen）。 */
@@ -234,8 +262,11 @@ export const useMailStore = create<MailState>((set, get) => ({
   categoryFilter: [],
   sortByPriority: false,
   unreadOnly: false,
+  tagFilter: null,
 
   query: '',
+  searchResults: null,
+  searching: false,
   accountErrors: {},
 
   conversation: null,
@@ -312,16 +343,19 @@ export const useMailStore = create<MailState>((set, get) => ({
   syncInbox: async (accountId?: string) => {
     const filter = accountId ?? get().selectedAccountId;
     const targets = filter == null ? get().accounts.map((a) => a.id) : [filter];
-    await runSync(set, get, targets);
+    // 手动入口（按钮/添加账户后首同步）：force=true 绕过后端失败冷却。
+    await runSync(set, get, targets, true);
     // 后台 classify 写回 category/priority 后会 emit mail://classified，
     // App.tsx 订阅该事件后刷新列表，不再需要固定延迟计时器。
   },
 
   syncAllInbox: async () => {
+    // 自动轮询入口：force=false，冷却期内后端跳过、不发起 IMAP 登录。
     await runSync(
       set,
       get,
       get().accounts.map((a) => a.id),
+      false,
     );
   },
 
@@ -486,6 +520,48 @@ export const useMailStore = create<MailState>((set, get) => ({
 
   setQuery: (q: string) => {
     set({ query: q });
+    if (searchDebounce !== null) clearTimeout(searchDebounce);
+    if (q.trim() === '') {
+      // 清空输入：立即退出搜索态，取消在途防抖。
+      searchSeq += 1;
+      set({ searchResults: null, searching: false });
+      return;
+    }
+    searchDebounce = setTimeout(() => {
+      searchDebounce = null;
+      void get().runSearch();
+    }, SEARCH_DEBOUNCE_MS);
+  },
+
+  runSearch: async () => {
+    const q = get().query.trim();
+    if (q === '') return;
+    const seq = ++searchSeq;
+    set({ searching: true });
+    try {
+      const hits = await tauri.messagesSearch(q, null);
+      // 迟到守卫：期间查询已变 / 已清空则丢弃。
+      if (seq !== searchSeq || get().query.trim() === '') return;
+      set({ searchResults: hits });
+    } catch (e) {
+      if (seq === searchSeq) set({ error: errMsg(e), searchResults: [] });
+    } finally {
+      if (seq === searchSeq) set({ searching: false });
+    }
+  },
+
+  openSearchHit: async (hit) => {
+    // 搜索结果不在折叠列表里，markSeenSilent 的本地 map 是 no-op，但 IMAP 置读仍会执行；
+    // 这里同时乐观更新搜索结果行的 flags，让未读点即时熄灭。
+    if (!hit.flags.includes('\\Seen')) {
+      set({
+        searchResults: (get().searchResults ?? []).map((h) =>
+          h.id === hit.id ? { ...h, flags: [...h.flags, '\\Seen'] } : h,
+        ),
+      });
+      void get().markSeenSilent(hit.id);
+    }
+    await get().selectMessage(hit.id);
   },
 
   classifyVisibleMessages: async () => {
@@ -518,6 +594,69 @@ export const useMailStore = create<MailState>((set, get) => ({
 
   setUnreadOnly: (on) => {
     set({ unreadOnly: on });
+  },
+
+  setTagFilter: (tag) => {
+    set({ tagFilter: tag });
+  },
+
+  addTagLocal: async (messageId, tag) => {
+    const applyTags = (tags: string[]): void => {
+      const patch = <T extends MessageHeader>(m: T): T => (m.id === messageId ? { ...m, tags } : m);
+      const conv = get().conversation;
+      const sg = get().senderGroup;
+      set({
+        messages: get().messages.map(patch),
+        conversation: conv !== null ? { ...conv, messages: conv.messages.map(patch) } : null,
+        senderGroup: sg !== null ? { ...sg, messages: sg.messages.map(patch) } : null,
+      });
+    };
+
+    const findById = (m: MessageHeader): boolean => m.id === messageId;
+    const prev =
+      get().messages.find(findById) ??
+      get().conversation?.messages.find(findById) ??
+      get().senderGroup?.messages.find(findById);
+    const prevTags = prev?.tags ?? [];
+
+    // 乐观：已存在则幂等 no-op；否则追加。
+    if (!prevTags.includes(tag)) applyTags([...prevTags, tag]);
+    try {
+      await tauri.messageAddTag(messageId, tag);
+      await get().reloadMessages();
+    } catch (e) {
+      applyTags(prevTags); // 精准回滚该条 tags
+      set({ error: errMsg(e) });
+    }
+  },
+
+  removeTagLocal: async (messageId, tag) => {
+    const applyTags = (tags: string[]): void => {
+      const patch = <T extends MessageHeader>(m: T): T => (m.id === messageId ? { ...m, tags } : m);
+      const conv = get().conversation;
+      const sg = get().senderGroup;
+      set({
+        messages: get().messages.map(patch),
+        conversation: conv !== null ? { ...conv, messages: conv.messages.map(patch) } : null,
+        senderGroup: sg !== null ? { ...sg, messages: sg.messages.map(patch) } : null,
+      });
+    };
+
+    const findById = (m: MessageHeader): boolean => m.id === messageId;
+    const prev =
+      get().messages.find(findById) ??
+      get().conversation?.messages.find(findById) ??
+      get().senderGroup?.messages.find(findById);
+    const prevTags = prev?.tags ?? [];
+
+    applyTags(prevTags.filter((t) => t !== tag));
+    try {
+      await tauri.messageRemoveTag(messageId, tag);
+      await get().reloadMessages();
+    } catch (e) {
+      applyTags(prevTags);
+      set({ error: errMsg(e) });
+    }
   },
 
   setCategoryLocal: async (messageId, category) => {

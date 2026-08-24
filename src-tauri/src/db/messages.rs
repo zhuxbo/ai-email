@@ -488,6 +488,159 @@ pub async fn reclassify_candidates(pool: &Pool, cap: i64) -> AppResult<Vec<Uuid>
     Ok(rows.into_iter().map(|r| r.0).collect())
 }
 
+// ── 全局搜索 ─────────────────────────────────────────────────────────────
+
+/// 搜索词上限。多余词忽略，防止超长输入把 SQL 绑定变量数推高。
+pub(crate) const MAX_SEARCH_TERMS: usize = 5;
+
+/// 匹配行扫描上限。个人邮箱量级（数万封 header + 少量已物化正文）下 LIKE 全扫是
+/// 毫秒级，该上限只兜极端病态输入。
+const SEARCH_SCAN_CAP: i64 = 500;
+
+/// 搜索命中行：MessageHeader + 定位信息（信箱名 / 账户邮箱）+ 正文命中标记。
+#[derive(Debug, Clone, Serialize, FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchRow {
+    /// serde(flatten)：前端 SearchHit 是**平铺**形状（id/subject/... 与 mailboxName 同级）。
+    /// 只写 sqlx(flatten)（管 FromRow）漏掉 serde(flatten)（管 JSON）会把头字段嵌进
+    /// "header" 键，前端拿到全 undefined 的行——真实事故，下方契约测试锁定。
+    #[serde(flatten)]
+    #[sqlx(flatten)]
+    pub header: MessageHeader,
+    /// 命中邮件所在信箱名（如 INBOX / 已发送），供结果行展示归属。
+    pub mailbox_name: String,
+    /// 命中邮件所属账户邮箱，跨账户搜索时区分来源。
+    pub account_email: String,
+    /// 正文（text_plain / html）是否命中任一搜索词。
+    pub body_matched: bool,
+}
+
+/// 搜索词归一化：按空白分词、小写（ASCII 大小写由 SQLite LIKE 天然不敏感）、截断上限。
+pub(crate) fn normalize_search_terms(query: &str) -> Vec<String> {
+    query
+        .split_whitespace()
+        .map(str::to_lowercase)
+        .take(MAX_SEARCH_TERMS)
+        .collect()
+}
+
+/// 相关度桶（纯函数）：任一词命中主题 → 0；否则命中发件人 → 1；否则（摘要/正文）→ 2。
+fn rank_scope_of(row: &SearchRow, terms: &[String]) -> i64 {
+    let hit = |field: Option<&str>| {
+        let f = field.unwrap_or("").to_lowercase();
+        terms.iter().any(|t| f.contains(t.as_str()))
+    };
+    if hit(row.header.subject.as_deref()) {
+        0
+    } else if hit(row.header.from_addr.as_deref()) {
+        1
+    } else {
+        2
+    }
+}
+
+/// 相关度排序（纯函数）：桶升序 → sent_at 降序（None 最后）→ imap_uid 降序，截断 `limit`。
+pub(crate) fn rank_rows(
+    mut rows: Vec<SearchRow>,
+    terms: &[String],
+    limit: usize,
+) -> Vec<SearchRow> {
+    rows.sort_by(|a, b| {
+        rank_scope_of(a, terms)
+            .cmp(&rank_scope_of(b, terms))
+            .then_with(|| b.header.sent_at.cmp(&a.header.sent_at))
+            .then_with(|| b.header.imap_uid.cmp(&a.header.imap_uid))
+    });
+    rows.truncate(limit);
+    rows
+}
+
+/// 全局搜索：多词 AND（每词须命中主题/发件人/摘要/正文任一字段），覆盖**全部账户全部
+/// 信箱**的已同步邮件；正文仅覆盖已物化（打开过/会话加载过）的 `message_bodies` 行。
+/// LIKE 子串匹配对中文任意长度词均有效（无分词依赖）。
+///
+/// 绑定顺序说明：sqlx 按 SQL 文本中占位符出现顺序绑定。SELECT 列表的 `body_matched`
+/// CASE 占位符先于 WHERE 出现，因此 body 词项的绑定值需先入列（见 `body_binds`）。
+pub async fn search_messages(
+    pool: &Pool,
+    query: &str,
+    account_id: Option<Uuid>,
+    limit: usize,
+) -> AppResult<Vec<SearchRow>> {
+    let terms = normalize_search_terms(query);
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // WHERE：每词一个「五字段任一命中」块，块间 AND。
+    let mut where_binds: Vec<String> = Vec::new();
+    let term_blocks: Vec<String> = terms
+        .iter()
+        .map(|t| {
+            for _ in 0..5 {
+                where_binds.push(format!("%{t}%"));
+            }
+            "(COALESCE(m.subject,'') LIKE ? \
+              OR COALESCE(m.from_addr,'') LIKE ? \
+              OR COALESCE(m.snippet,'') LIKE ? \
+              OR COALESCE(mb.text_plain,'') LIKE ? \
+              OR COALESCE(mb.html,'') LIKE ?)"
+                .to_string()
+        })
+        .collect();
+
+    // SELECT：body_matched = 任一词命中正文（text_plain 或 html）。每词两个占位符。
+    let body_binds: Vec<String> = terms
+        .iter()
+        .flat_map(|t| [format!("%{t}%"), format!("%{t}%")])
+        .collect();
+    let body_case = terms
+        .iter()
+        .map(|_| "(COALESCE(mb.text_plain,'') LIKE ? OR COALESCE(mb.html,'') LIKE ?)")
+        .collect::<Vec<_>>()
+        .join(" OR ");
+
+    let account_pred = if account_id.is_some() {
+        "AND m.account_id = ? "
+    } else {
+        ""
+    };
+
+    let sql = format!(
+        r#"
+        SELECT {SELECT_COLUMNS},
+               b.name AS mailbox_name,
+               a.email AS account_email,
+               CASE WHEN {body_case} THEN 1 ELSE 0 END AS body_matched
+        FROM messages m
+        LEFT JOIN message_tags t ON t.message_id = m.id
+        JOIN mailboxes b ON b.id = m.mailbox_id
+        JOIN accounts a ON a.id = m.account_id
+        LEFT JOIN message_bodies mb ON mb.message_id = m.id
+        WHERE 1=1 {account_pred}
+          AND ( {} )
+        GROUP BY m.id
+        ORDER BY m.sent_at DESC, m.imap_uid DESC
+        LIMIT {SEARCH_SCAN_CAP}
+        "#,
+        term_blocks.join(" AND "),
+    );
+
+    let mut q = sqlx::query_as::<_, SearchRow>(&sql);
+    // SQL 文本顺序：SELECT 的 body CASE → WHERE 的 account → WHERE 的词项块。
+    for b in body_binds {
+        q = q.bind(b);
+    }
+    if let Some(id) = account_id {
+        q = q.bind(id);
+    }
+    for b in where_binds {
+        q = q.bind(b);
+    }
+    let rows = q.fetch_all(pool).await?;
+    Ok(rank_rows(rows, &terms, limit))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -709,6 +862,148 @@ mod tests {
         serde_json::from_str(&row.0).unwrap()
     }
 
+    // ── 全局搜索 ─────────────────────────────────────────────────────────
+
+    /// 种一封可控 subject/from/snippet 的消息；`body` Some 时同时物化正文行。
+    #[allow(clippy::too_many_arguments)]
+    async fn seed_search_msg(
+        pool: &Pool,
+        account_id: Uuid,
+        mailbox_id: Uuid,
+        uid: i64,
+        subject: &str,
+        from: &str,
+        snippet: &str,
+        body: Option<&str>,
+    ) -> Uuid {
+        let id = Uuid::new_v4();
+        let sent_at = format!("2026-01-01T00:{:02}:00Z", uid.rem_euclid(60));
+        sqlx::query(
+            "INSERT INTO messages \
+             (id, account_id, mailbox_id, imap_uid, flags, subject, from_addr, snippet, sent_at) \
+             VALUES (?1,?2,?3,?4,'[]',?5,?6,?7,?8)",
+        )
+        .bind(id)
+        .bind(account_id)
+        .bind(mailbox_id)
+        .bind(uid)
+        .bind(subject)
+        .bind(from)
+        .bind(snippet)
+        .bind(sent_at)
+        .execute(pool)
+        .await
+        .unwrap();
+        if let Some(b) = body {
+            sqlx::query("INSERT INTO message_bodies (message_id, text_plain) VALUES (?1, ?2)")
+                .bind(id)
+                .bind(b)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        id
+    }
+
+    #[tokio::test]
+    async fn search_matches_subject_from_snippet_and_body() {
+        use crate::db::test_seed::*;
+        let pool = test_pool().await;
+        let acc = seed_account(&pool).await;
+        let mb = seed_mailbox(&pool, acc, "INBOX", None).await;
+
+        let subj = seed_search_msg(&pool, acc, mb, 1, "季度发票", "a@x.com", "", None).await;
+        let from = seed_search_msg(&pool, acc, mb, 2, "hello", "发票机器人@x.com", "", None).await;
+        let snip = seed_search_msg(&pool, acc, mb, 3, "hello", "b@x.com", "附件是发票", None).await;
+        let body = seed_search_msg(
+            &pool,
+            acc,
+            mb,
+            4,
+            "hello",
+            "c@x.com",
+            "",
+            Some("正文里有发票"),
+        )
+        .await;
+        seed_search_msg(&pool, acc, mb, 5, "hello", "d@x.com", "无关内容", None).await;
+
+        let hits = search_messages(&pool, "发票", None, 50).await.unwrap();
+        let ids: Vec<Uuid> = hits.iter().map(|r| r.header.id).collect();
+        assert_eq!(ids.len(), 4, "应命中主题/发件人/摘要/正文各一封: {ids:?}");
+        assert!(
+            ids.contains(&subj)
+                && ids.contains(&from)
+                && ids.contains(&snip)
+                && ids.contains(&body)
+        );
+
+        // 相关度：主题命中排最前；正文命中应带 body_matched 标记。
+        assert_eq!(hits[0].header.id, subj, "主题命中应排首位");
+        let body_row = hits.iter().find(|r| r.header.id == body).unwrap();
+        assert!(body_row.body_matched, "正文命中的行应标记 bodyMatched");
+        let subj_row = hits.iter().find(|r| r.header.id == subj).unwrap();
+        assert!(!subj_row.body_matched, "仅主题命中不应标记 bodyMatched");
+        // 定位信息
+        assert_eq!(hits[0].mailbox_name, "INBOX");
+        assert!(hits[0].account_email.ends_with("@test.invalid"));
+    }
+
+    #[tokio::test]
+    async fn search_multi_terms_are_anded() {
+        use crate::db::test_seed::*;
+        let pool = test_pool().await;
+        let acc = seed_account(&pool).await;
+        let mb = seed_mailbox(&pool, acc, "INBOX", None).await;
+
+        let both = seed_search_msg(&pool, acc, mb, 1, "亚马逊 订单", "a@x.com", "", None).await;
+        seed_search_msg(&pool, acc, mb, 2, "亚马逊 促销", "b@x.com", "", None).await;
+
+        let hits = search_messages(&pool, "亚马逊 订单", None, 50)
+            .await
+            .unwrap();
+        let ids: Vec<Uuid> = hits.iter().map(|r| r.header.id).collect();
+        assert_eq!(ids, vec![both], "多词应 AND：只命中同时含两词的行");
+    }
+
+    #[tokio::test]
+    async fn search_scopes_to_account_and_empty_query_returns_nothing() {
+        use crate::db::test_seed::*;
+        let pool = test_pool().await;
+        let acc1 = seed_account(&pool).await;
+        let acc2 = seed_account(&pool).await;
+        let mb1 = seed_mailbox(&pool, acc1, "INBOX", None).await;
+        let mb2 = seed_mailbox(&pool, acc2, "INBOX", None).await;
+
+        seed_search_msg(&pool, acc1, mb1, 1, "周报", "a@x.com", "", None).await;
+        let other = seed_search_msg(&pool, acc2, mb2, 2, "周报", "b@x.com", "", None).await;
+
+        let hits = search_messages(&pool, "周报", Some(acc2), 50)
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].header.id, other, "account 过滤应只留指定账户");
+
+        assert!(search_messages(&pool, "   ", None, 50)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(search_messages(&pool, "", None, 50)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn normalize_terms_lowercases_splits_and_caps() {
+        assert_eq!(
+            normalize_search_terms("  Foo BAR  baz"),
+            vec!["foo", "bar", "baz"]
+        );
+        let many = "a b c d e f g";
+        assert_eq!(normalize_search_terms(many).len(), MAX_SEARCH_TERMS);
+    }
+
     // 批量已读（账户级收件箱）：两封未读 → 两封都含 \Seen；再调一次幂等不重复加。
     #[tokio::test]
     async fn account_inbox_mark_seen_marks_and_is_idempotent() {
@@ -848,5 +1143,67 @@ mod tests {
         let _raw = seed_msg(&pool, acc, mb, 3, "c@x.com", None, None, false, "[]").await;
         let ids = reclassify_candidates(&pool, 1000).await.unwrap();
         assert_eq!(ids, vec![classified]);
+    }
+}
+
+#[cfg(test)]
+mod search_contract_tests {
+    use super::*;
+
+    /// 就地建内存池（复用 tests 模块的私有 helper 需改可见性，这里直接内联）。
+    async fn shape_pool() -> Pool {
+        let opts = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(":memory:")
+            .foreign_keys(true);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        crate::db::MIGRATOR.run(&pool).await.unwrap();
+        pool
+    }
+
+    /// 序列化契约：SearchRow 的 JSON 必须与前端 SearchHit 平铺形状一致——
+    /// 头字段（id/subject/fromAddr/...）与 mailboxName/accountEmail/bodyMatched 同级，
+    /// 不得出现嵌套的 "header" 键。漏写 serde(flatten) 时本测试 FAIL。
+    #[tokio::test]
+    async fn search_row_serializes_flat_like_frontend_shape() {
+        let pool = shape_pool().await;
+        let acc = crate::db::test_seed::seed_account(&pool).await;
+        let mb = crate::db::test_seed::seed_mailbox(&pool, acc, "INBOX", None).await;
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO messages (id, account_id, mailbox_id, imap_uid, flags, subject, from_addr, snippet, sent_at) \
+             VALUES (?1,?2,?3,1,'[]','季度发票','a@x.com','摘要',NULL)",
+        )
+        .bind(id).bind(acc).bind(mb)
+        .execute(&pool).await.unwrap();
+        let rows = search_messages(&pool, "发票", None, 10).await.unwrap();
+        let v = serde_json::to_value(&rows).unwrap();
+        let first = &v[0];
+        assert!(
+            first.get("header").is_none(),
+            "SearchRow 不得序列化出嵌套 header 键（serde(flatten) 被移除）: {first}"
+        );
+        for key in [
+            "id",
+            "accountId",
+            "mailboxId",
+            "subject",
+            "fromAddr",
+            "flags",
+            "sentAt",
+            "mailboxName",
+            "accountEmail",
+            "bodyMatched",
+        ] {
+            assert!(
+                first.get(key).is_some(),
+                "SearchRow JSON 缺平铺键 {key}: {first}"
+            );
+        }
+        assert_eq!(first["subject"], "季度发票");
+        assert_eq!(first["mailboxName"], "INBOX");
     }
 }

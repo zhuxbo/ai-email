@@ -13,6 +13,8 @@ AI 辅助的邮件客户端 —— Tauri 2 桌面(macOS)+ Android,本地优先�
 - 收件箱列表折叠聚合:同一会话折叠成一行;孤立的同发件人通知 / 推广邮件折叠成一行(显示最新一封 + 数量角标);点同发件人折叠组在详情区以会话流展示(默认全折叠)
 - 多账户统一收件箱 + 信箱切换:跨账户聚合视图,或按账户浏览收件箱 / 已发送 / 草稿 / 废纸篓 / 垃圾邮件等信箱;支持未读筛选与一键全部已读
 - 自动收信:窗口开启时按设定间隔(默认 5 分钟,设置中心可改 关 / 1 / 5 / 15 / 30)自动收取全部账户收件箱;全局顶栏指示器显示上次同步 / 下次倒计时 / 同步中 / 失败,点击即立即同步
+- IMAP 连接复用与退避:每账户维持一条长连接(空闲 NOOP 保活,断线自动重连并重试一次),登录次数从每日数百次降到个位数,避免 QQ 邮箱等服务的登录限流;连续同步失败 2 次起自动进入 15/30 分钟冷却(自动收信暂停登录,手动同步不受限);信箱列表 LIST 结果缓存 24 小时
+- 全局搜索:顶部搜索框直达后端全文匹配,多关键词 AND,覆盖全部账户全部信箱的主题 / 发件人 / 摘要,以及已打开过(已缓存)邮件的正文;主题命中优先排序,结果行标注信箱 / 账户归属与「正文」命中
 - 邮件操作:删除(移到废纸篓,可找回)、标记已读 / 未读、加星 / 取消;打开邮件自动标记已读;会话流内每封邮件各自展示附件(懒加载,点击后由后端原生保存框另存为)
 - HTML 邮件防追踪:正文经清洗去除脚本与内联样式,并在 Shadow DOM 内注入基础邮件样式限制图片 / 表格撑宽;远程图片仅对私人 / 工作邮件默认加载,其余默认拦截(防 tracking pixel 暴露已读与 IP),可一键显示;内联 `cid:` 图片会转成本地 `data:` URL 后再渲染,无法匹配 MIME 图片部件的 `cid:` 图片会移除不可加载的 `src`;过滤卡片中纯 HTML 邮件自动转纯文本显示(不再暴露 HTML 源码)
 - 本地诊断日志:启动后写入 app 数据目录的 `logs/ai-email.log`,记录 IMAP 连接 / TLS / 登录 / LIST / SELECT / FETCH / STORE / MOVE 阶段耗时与失败原因,便于排查间歇性超时
@@ -43,6 +45,8 @@ pnpm tauri dev      # 开发模式(桌面)
 pnpm build:macos      # macOS 桌面 .app / .dmg
 pnpm build:android    # Android arm64 APK
 ```
+
+本机消除「每次重建后钥匙串重复索权弹窗」(未签名 app 的钥匙串 ACL 按二进制哈希识别身份,每次构建都变):先跑一次 `bash scripts/setup-macos-signing.sh` 创建本地自签名身份(存登录钥匙串,仅本机生效),之后 `pnpm build:macos` 检测到该身份会自动签名。首次运行签名版时钥匙串会最后弹一次,点「始终允许」即可——此后同证书签名的新构建不再弹。删除身份:`security delete-identity -c "ai-email local signing"`。
 
 发布前基础验证:
 
@@ -76,6 +80,8 @@ pnpm build:android
 只有受保护的 `release.yml` 发布工作流可以注入 GitHub signing secrets，其中 `ANDROID_RELEASE_KEYSTORE_BASE64` 会由脚本临时解码并自动设置 `ANDROID_RELEASE_STORE_FILE`。普通 CI 必然构建 unsigned APK。不要把 `.jks` 或 `.keystore` 文件提交到仓库。
 
 正式发布由 [release.yml](.github/workflows/release.yml) 完成。本地 `build:*` 只用于冒烟，不能替代受保护的 CI 发布。
+
+在 Claude 中推荐使用 `/release <version>`（例如 `/release 0.1.1`）执行 ai-email 专用发布流程；它会校验版本、创建注释标签、监控 Release，并核验公开 DMG、已签名 APK 与 Android 更新清单。
 
 1. 在 GitHub 创建受保护的 `release` Environment，并限制为发布维护者使用。仅配置 Android JKS Secrets：`ANDROID_RELEASE_KEYSTORE_BASE64`、`ANDROID_RELEASE_STORE_PASSWORD`、`ANDROID_RELEASE_KEY_ALIAS`、`ANDROID_RELEASE_KEY_PASSWORD`。
 2. 配置 Environment Variable：`ANDROID_RELEASE_CERT_SHA256`，其值为 Android 发布证书的 SHA-256 指纹。

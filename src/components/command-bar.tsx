@@ -20,9 +20,16 @@ export function CommandBar({ onQueryChange, onAiCommand }: Props) {
         <input
           type="text"
           aria-label="搜索邮件"
-          placeholder="搜索全部账户的邮件、联系人、附件…"
+          placeholder="搜索全部账户的邮件（含已缓存正文）"
           onChange={(e) => {
             onQueryChange(e.target.value);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              e.currentTarget.value = '';
+              onQueryChange('');
+              e.currentTarget.blur();
+            }
           }}
           className="min-w-0 flex-1 bg-transparent text-xs text-text-1 outline-none placeholder:text-text-3"
         />

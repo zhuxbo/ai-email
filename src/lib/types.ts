@@ -68,6 +68,16 @@ export interface FoldedItem extends MessageHeader {
   hasUnread: boolean;
 }
 
+/** 全局搜索命中行（messages_search 命令返回，Rust 侧 SearchRow）。 */
+export interface SearchHit extends MessageHeader {
+  /** 命中邮件所在信箱名（如 INBOX / 已发送）。 */
+  mailboxName: string;
+  /** 命中邮件所属账户邮箱。 */
+  accountEmail: string;
+  /** 正文（已物化缓存的 text_plain / html）是否命中搜索词。 */
+  bodyMatched: boolean;
+}
+
 /** 类型守卫：判断 m 是 FoldedItem 且 foldKind === 'single'（单封代表，参与 rfc 去重）。 */
 export function isSingleFold(m: MessageHeader): m is FoldedItem {
   return 'foldKind' in m && (m as FoldedItem).foldKind === 'single';
@@ -124,6 +134,8 @@ export interface MessageBody {
 export interface SyncReport {
   newMessageCount: number;
   totalInMailbox: number;
+  /** true = 因失败冷却被跳过（未打 IMAP）。可选用；旧 mock 无此字段。 */
+  cooldownSkipped?: boolean;
 }
 
 export interface CacheClearReport {

@@ -27,6 +27,7 @@ describe('MessageActions', () => {
           sentAt: null,
           snippet: null,
           flags: [],
+          tags: [],
         } as never,
       ],
     } as never);
@@ -62,6 +63,7 @@ describe('MessageActions', () => {
       selectedMessageId: 'm1',
       body: { messageId: 'm1', textPlain: 'x', html: null, fetchedAt: '' },
       messages: [{ id: 'm1', accountId: 'a1', flags: [] } as never],
+      tags: [],
       deleteMessage: del,
     } as never);
     render(<MessageActions />);
@@ -75,6 +77,7 @@ describe('MessageActions', () => {
       selectedMessageId: 'm1',
       body: null,
       messages: [{ id: 'm1', accountId: 'a1', flags: [] } as never],
+      tags: [],
       setFlagged,
     } as never);
     render(<MessageActions />);
@@ -87,6 +90,7 @@ describe('MessageActions', () => {
       selectedMessageId: 'm1',
       body: null,
       messages: [{ id: 'm1', accountId: 'a1', flags: [] } as never],
+      tags: [],
     } as never);
     render(<MessageActions />);
     expect(screen.queryByRole('button', { name: '归档' })).toBeNull();
@@ -99,6 +103,7 @@ describe('MessageActions', () => {
       selectedMessageId: 'm1',
       body: null,
       messages: [{ id: 'm1', accountId: 'a1', flags: [] } as never],
+      tags: [],
       deleteMessage: del,
     } as never);
     render(<MessageActions />);
@@ -112,6 +117,7 @@ describe('MessageActions', () => {
       selectedMessageId: 'm1',
       body: null,
       messages: [{ id: 'm1', accountId: 'a1', flags: ['\\Seen'] } as never],
+      tags: [],
       setSeen,
     } as never);
     render(<MessageActions />);

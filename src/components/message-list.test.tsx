@@ -3,7 +3,7 @@ import { render, screen, fireEvent } from '@testing-library/react';
 
 import { MessageList } from './message-list';
 import { useMailStore } from '../lib/store/mail';
-import type { FoldedItem } from '../lib/types';
+import type { FoldedItem, SearchHit } from '../lib/types';
 
 const mkRow = (over: Partial<FoldedItem>): FoldedItem => ({
   id: 'm1',
@@ -162,5 +162,105 @@ describe('MessageList 未读筛选', () => {
     render(<MessageList />);
     fireEvent.click(screen.getByRole('button', { name: '未读' }));
     expect(setUnreadOnly).toHaveBeenCalledWith(true);
+  });
+});
+
+describe('MessageList 搜索态', () => {
+  const mkHit = (over: Partial<SearchHit>): SearchHit => ({
+    ...mkRow({ id: 'h1' }),
+    mailboxName: 'INBOX',
+    accountEmail: 'me@qq.com',
+    bodyMatched: false,
+    ...over,
+  });
+
+  beforeEach(() => {
+    useMailStore.setState({
+      accounts: [{ id: 'a1' }],
+      messages: [mkRow({ id: 'm1' })],
+      selectedAccountId: null,
+      selectedMailboxId: null,
+      categoryFilter: [],
+      sortByPriority: false,
+      query: '发票',
+      searchResults: null,
+      searching: false,
+      accountErrors: {},
+    } as never);
+  });
+
+  it('搜索结果非空时接管列表：显示搜索标题与归属徽标，隐藏筛选控件', () => {
+    useMailStore.setState({
+      searchResults: [
+        mkHit({ id: 'h1', subject: '季度发票', bodyMatched: true }),
+        mkHit({ id: 'h2', subject: 'hello', mailboxName: '已发送' }),
+      ],
+    } as never);
+    render(<MessageList />);
+    expect(screen.getByText(/搜索“发票”/)).toBeInTheDocument();
+    expect(screen.getByText('季度发票')).toBeInTheDocument();
+    expect(screen.getByText('正文')).toBeInTheDocument(); // bodyMatched 徽标
+    expect(screen.getByText('已发送')).toBeInTheDocument(); // 信箱归属徽标
+    // 筛选控件在搜索态不渲染
+    expect(screen.queryByText('私人')).toBeNull();
+    expect(screen.queryByRole('button', { name: '未读' })).toBeNull();
+  });
+
+  it('无结果时显示空态与正文覆盖范围提示', () => {
+    useMailStore.setState({ searchResults: [], searching: false } as never);
+    render(<MessageList />);
+    expect(screen.getByText('无匹配结果。')).toBeInTheDocument();
+    expect(screen.getByText(/正文仅覆盖已打开过/)).toBeInTheDocument();
+  });
+
+  it('点击结果行调用 openSearchHit', () => {
+    const openSearchHit = vi.fn().mockResolvedValue(undefined);
+    useMailStore.setState({
+      searchResults: [mkHit({ id: 'h1', subject: '季度发票' })],
+      openSearchHit,
+    } as never);
+    render(<MessageList />);
+    fireEvent.click(screen.getByText('季度发票'));
+    expect(openSearchHit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('MessageList 标签筛选', () => {
+  beforeEach(() => {
+    useMailStore.setState({
+      accounts: [{ id: 'a1' }],
+      messages: [
+        mkRow({ id: 'm1', subject: 'm1', tags: ['报销', '重要'] }),
+        mkRow({ id: 'm2', subject: 'm2', tags: [] }),
+        mkRow({ id: 'm3', subject: 'm3', tags: ['报销'] }),
+      ],
+      selectedAccountId: null,
+      selectedMailboxId: null,
+      categoryFilter: [],
+      sortByPriority: false,
+      unreadOnly: false,
+      tagFilter: null,
+      query: '',
+      searchResults: null,
+      accountErrors: {},
+    } as never);
+  });
+
+  it('未选标签时显示下拉入口（列出窗口内标签）', () => {
+    render(<MessageList />);
+    fireEvent.click(screen.getByText('标签 ▾'));
+    expect(screen.getByText('#报销')).toBeInTheDocument();
+    expect(screen.getByText('#重要')).toBeInTheDocument();
+  });
+
+  it('选中标签后仅显示含该标签的行，活动筛选可一键清除', () => {
+    useMailStore.setState({ tagFilter: '报销' } as never);
+    render(<MessageList />);
+    expect(screen.getByText('m1')).toBeInTheDocument();
+    expect(screen.getByText('m3')).toBeInTheDocument();
+    expect(screen.queryByText('m2')).toBeNull();
+    // 清除后全部可见
+    fireEvent.click(screen.getByTitle('点击取消标签筛选'));
+    expect(screen.getByText('m2')).toBeInTheDocument();
   });
 });

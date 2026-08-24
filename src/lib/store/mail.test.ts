@@ -66,6 +66,9 @@ vi.mock('../tauri', () => ({
   mailboxFolded: vi.fn().mockResolvedValue([]),
   mailboxMarkSeen: vi.fn().mockResolvedValue(undefined),
   accountInboxMarkSeen: vi.fn().mockResolvedValue(undefined),
+  messagesSearch: vi.fn().mockResolvedValue([]),
+  messageAddTag: vi.fn().mockResolvedValue(undefined),
+  messageRemoveTag: vi.fn().mockResolvedValue(undefined),
 }));
 import * as tauri from '../tauri';
 describe('mail store 聚合新成员', () => {
@@ -1263,5 +1266,165 @@ describe('mail store 自动收信状态', () => {
     expect(readIntervalMin()).toBe(30);
     localStorage.removeItem('ai-email-auto-sync-min');
     expect(readIntervalMin()).toBe(5); // 缺省回 5
+  });
+});
+
+describe('mail store 全局搜索', () => {
+  beforeEach(() => {
+    useMailStore.setState({
+      accounts: [],
+      selectedAccountId: null,
+      messages: [],
+      query: '',
+      searchResults: null,
+      searching: false,
+      selectedMessageId: null,
+      body: null,
+      detailMode: 'none',
+      accountErrors: {},
+    } as never);
+    vi.clearAllMocks();
+  });
+
+  it('setQuery 非空 → 防抖后发起后端搜索并写入结果', async () => {
+    vi.useFakeTimers();
+    const hit = {
+      ...mkFoldedMock('s1', 'a1'),
+      mailboxName: 'INBOX',
+      accountEmail: 'me@qq.com',
+      bodyMatched: true,
+    };
+    vi.mocked(tauri.messagesSearch).mockResolvedValue([hit]);
+    useMailStore.getState().setQuery('发票');
+    // 防抖窗口内不发请求
+    expect(tauri.messagesSearch).not.toHaveBeenCalled();
+    expect(useMailStore.getState().searching).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(250);
+    expect(tauri.messagesSearch).toHaveBeenCalledWith('发票', null);
+    const s = useMailStore.getState();
+    expect(s.searchResults?.[0]?.id).toBe('s1');
+    expect(s.searching).toBe(false);
+    vi.useRealTimers();
+  });
+
+  it('setQuery 清空 → 立即退出搜索态并取消在途防抖', async () => {
+    vi.useFakeTimers();
+    useMailStore.getState().setQuery('关键词');
+    useMailStore.getState().setQuery('');
+    await vi.advanceTimersByTimeAsync(500);
+    expect(tauri.messagesSearch).not.toHaveBeenCalled();
+    expect(useMailStore.getState().searchResults).toBeNull();
+    vi.useRealTimers();
+  });
+
+  it('搜索失败 → error 记录且结果置空数组（区分「无结果」与「未搜索」）', async () => {
+    vi.useFakeTimers();
+    vi.mocked(tauri.messagesSearch).mockRejectedValueOnce(new Error('db boom'));
+    useMailStore.getState().setQuery('x');
+    await vi.advanceTimersByTimeAsync(250);
+    const s = useMailStore.getState();
+    expect(s.error).toContain('db boom');
+    expect(s.searchResults).toEqual([]);
+    vi.useRealTimers();
+  });
+
+  it('openSearchHit 未读命中 → 静默标读（乐观更新结果行）+ 进入详情', async () => {
+    const hit = {
+      ...mkFoldedMock('s2', 'a1'),
+      flags: [],
+      mailboxName: 'INBOX',
+      accountEmail: 'me@qq.com',
+      bodyMatched: false,
+    };
+    useMailStore.setState({ searchResults: [hit] } as never);
+    await useMailStore.getState().openSearchHit(hit);
+    expect(tauri.messageSetSeen).toHaveBeenCalledWith('s2', true);
+    expect(useMailStore.getState().selectedMessageId).toBe('s2');
+    expect(useMailStore.getState().searchResults?.[0]?.flags).toContain('\\Seen');
+  });
+});
+
+describe('mail store 同步 force 语义', () => {
+  beforeEach(() => {
+    useMailStore.setState({
+      accounts: [{ id: 'a1' }, { id: 'a2' }] as never,
+      selectedAccountId: null,
+      messages: [],
+      accountErrors: {},
+    } as never);
+    vi.clearAllMocks();
+  });
+
+  it('syncInbox（手动入口）force=true 绕过冷却', async () => {
+    await useMailStore.getState().syncInbox();
+    const targets = vi.mocked(tauri.inboxSync).mock.calls.map((c) => [c[0], c[1]]);
+    expect(targets).toContainEqual(['a1', true]);
+    expect(targets).toContainEqual(['a2', true]);
+  });
+
+  it('syncAllInbox（自动轮询入口）force=false 尊重冷却', async () => {
+    await useMailStore.getState().syncAllInbox();
+    const targets = vi.mocked(tauri.inboxSync).mock.calls.map((c) => [c[0], c[1]]);
+    expect(targets).toContainEqual(['a1', false]);
+    expect(targets).toContainEqual(['a2', false]);
+  });
+});
+
+describe('mail store 用户标签', () => {
+  beforeEach(() => {
+    useMailStore.setState({
+      accounts: [{ id: 'a1' }] as never,
+      selectedAccountId: null,
+      messages: [mkFoldedMock('m1', 'a1')],
+      conversation: null,
+      senderGroup: null,
+      tagFilter: null,
+      accountErrors: {},
+    } as never);
+    vi.clearAllMocks();
+  });
+
+  it('addTagLocal 乐观追加 + 调后端 + reload', async () => {
+    const reload = vi.fn().mockResolvedValue(undefined);
+    useMailStore.setState({ reloadMessages: reload } as never);
+    await useMailStore.getState().addTagLocal('m1', '报销');
+    expect(tauri.messageAddTag).toHaveBeenCalledWith('m1', '报销');
+    expect(useMailStore.getState().messages[0]?.tags).toContain('报销');
+    expect(reload).toHaveBeenCalled();
+  });
+
+  it('addTagLocal 失败精准回滚该条 tags', async () => {
+    vi.mocked(tauri.messageAddTag).mockRejectedValueOnce(new Error('tag boom'));
+    await useMailStore.getState().addTagLocal('m1', '报销');
+    // 失败后应回滚为原 tags（空）
+    expect(useMailStore.getState().messages[0]?.tags).toEqual([]);
+    expect(useMailStore.getState().error).toContain('tag boom');
+  });
+
+  it('removeTagLocal 删除已有标签并在失败时回滚', async () => {
+    useMailStore.setState({
+      messages: [{ ...mkFoldedMock('m1', 'a1'), tags: ['旧标签'] }],
+    } as never);
+    await useMailStore.getState().removeTagLocal('m1', '旧标签');
+    expect(tauri.messageRemoveTag).toHaveBeenCalledWith('m1', '旧标签');
+    expect(useMailStore.getState().messages[0]?.tags).toEqual([]);
+
+    // 第一次成功调用的 reload 会用 unifiedInbox mock 重置列表，失败用例前重新注入 tags。
+    useMailStore.setState({
+      messages: [{ ...mkFoldedMock('m1', 'a1'), tags: ['旧标签'] }],
+    } as never);
+    vi.mocked(tauri.messageRemoveTag).mockRejectedValueOnce(new Error('rm boom'));
+    await useMailStore.getState().removeTagLocal('m1', '旧标签');
+    // 失败应回滚出原标签
+    expect(useMailStore.getState().messages[0]?.tags).toEqual(['旧标签']);
+  });
+
+  it('标签同时更新 conversation 成员切片', async () => {
+    useMailStore.setState({
+      conversation: { threadId: null, sentSyncOk: true, messages: [mkFoldedMock('m1', 'a1')] },
+    } as never);
+    await useMailStore.getState().addTagLocal('m1', '跟进');
+    expect(useMailStore.getState().conversation?.messages[0]?.tags).toContain('跟进');
   });
 });
