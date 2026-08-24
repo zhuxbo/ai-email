@@ -29,6 +29,17 @@ if [ ! -d "$app_path" ]; then
   exit 1
 fi
 
+# 本地签名（可选）：存在本地自签名身份（scripts/setup-macos-signing.sh 创建）时给 app 签名，
+# 稳定签名身份让钥匙串 ACL 记住「同一个应用」，消除每次重建后的重复索权弹窗。
+# CI 无该身份则跳过，行为不变（未签名包）。可用 AI_EMAIL_SIGN_IDENTITY 覆盖身份名。
+sign_identity="${AI_EMAIL_SIGN_IDENTITY:-ai-email local signing}"
+if security find-identity -v -p codesigning | grep -q "$sign_identity"; then
+  codesign --force --sign "$sign_identity" "$app_path"
+  echo "Signed with local identity: $sign_identity"
+else
+  echo "Local signing identity not found; skipping codesign (run scripts/setup-macos-signing.sh to enable)"
+fi
+
 mkdir -p "$out_dir"
 staging="$(mktemp -d "${TMPDIR:-/tmp}/${app_name}-dmg.XXXXXX")"
 trap 'rm -rf "$staging"' EXIT

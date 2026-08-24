@@ -55,7 +55,11 @@ pub struct SendReceipt {
 ///   7. SEND. On success: write a happy `send_log` row (best-effort; failure → warn only) + return.
 ///      On failure: write a `send_log` row WITHOUT `in_reply_to` (so the suggested reply
 ///      remains retryable), then return the error.
-pub async fn send_draft(pool: &Pool, draft: &SendDraft) -> AppResult<SendReceipt> {
+pub async fn send_draft(
+    pool: &Pool,
+    imap: &crate::imap::manager::ImapManager,
+    draft: &SendDraft,
+) -> AppResult<SendReceipt> {
     // #35: validate to ∪ cc non-empty; allow cc-only sends.
     validate_recipients(&draft.to, &draft.cc)?;
 
@@ -87,7 +91,9 @@ pub async fn send_draft(pool: &Pool, draft: &SendDraft) -> AppResult<SendReceipt
     // 缺失/仅-HTML 降级:跳过引用、只发用户正文(warn-not-fail,不阻塞发送)。
     let (original_body, original_from, original_sent_at) = if let Some(reply_id) = draft.in_reply_to
     {
-        match crate::imap::materialize::materialize_one(pool, &account, &api_key, reply_id).await {
+        match crate::imap::materialize::materialize_one(pool, imap, &account, &api_key, reply_id)
+            .await
+        {
             // 取引用源全程 warn-not-fail:body/header 的 DB 查询失败也降级（不附引用/不附头部），绝不阻塞发送。
             Ok(()) => match crate::db::bodies::get(pool, reply_id).await {
                 Ok(Some(b)) => {

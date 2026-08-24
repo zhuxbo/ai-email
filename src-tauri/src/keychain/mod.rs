@@ -15,6 +15,9 @@ use crate::error::{AppError, AppResult};
 #[cfg(debug_assertions)]
 mod dev_store;
 
+#[cfg(any(not(debug_assertions), test))]
+mod cred_cache;
+
 /// dev 凭据文件路径：启动时由 lib.rs setup 设；测试/手动可用 env `AI_EMAIL_DEV_CRED_FILE` 覆盖。
 #[cfg(debug_assertions)]
 static DEV_CRED_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
@@ -36,6 +39,27 @@ fn dev_path() -> AppResult<std::path::PathBuf> {
         .get()
         .cloned()
         .ok_or_else(|| AppError::Keychain("dev cred path 未初始化".into()))
+}
+
+/// 进程内凭据缓存（仅 release：debug 走 dev_store 不触碰钥匙串）。
+/// 见 cred_cache 模块文档：把每操作的钥匙串读取降到每条凭据每进程一次，
+/// 避免授权身份未稳定时的高频系统弹窗。
+#[cfg(not(debug_assertions))]
+static AUTH_CACHE: std::sync::OnceLock<cred_cache::CredCache<uuid::Uuid>> =
+    std::sync::OnceLock::new();
+
+#[cfg(not(debug_assertions))]
+static AI_CACHE: std::sync::OnceLock<cred_cache::CredCache<uuid::Uuid>> =
+    std::sync::OnceLock::new();
+
+#[cfg(not(debug_assertions))]
+fn auth_cache() -> &'static cred_cache::CredCache<uuid::Uuid> {
+    AUTH_CACHE.get_or_init(cred_cache::CredCache::new)
+}
+
+#[cfg(not(debug_assertions))]
+fn ai_cache() -> &'static cred_cache::CredCache<uuid::Uuid> {
+    AI_CACHE.get_or_init(cred_cache::CredCache::new)
 }
 
 /// auth code 的 keychain service（按 UUID 键）。
@@ -74,7 +98,9 @@ pub fn store_auth_code(account_id: Uuid, code: &SecretString) -> AppResult<()> {
     {
         account_entry(account_id)?
             .set_password(code.expose_secret())
-            .map_err(map_err)
+            .map_err(map_err)?;
+        auth_cache().put(account_id, code.clone());
+        Ok(())
     }
 }
 
@@ -93,8 +119,13 @@ pub fn get_auth_code(account_id: Uuid) -> AppResult<SecretString> {
     }
     #[cfg(not(debug_assertions))]
     {
+        if let Some(cached) = auth_cache().get(&account_id) {
+            return Ok((*cached).clone());
+        }
         let password = account_entry(account_id)?.get_password().map_err(map_err)?;
-        Ok(SecretString::from(password))
+        let secret = SecretString::from(password);
+        auth_cache().put(account_id, secret.clone());
+        Ok(secret)
     }
 }
 
@@ -110,6 +141,7 @@ pub fn delete_auth_code(account_id: Uuid) -> AppResult<()> {
     }
     #[cfg(not(debug_assertions))]
     {
+        auth_cache().remove(&account_id);
         match account_entry(account_id)?.delete_credential() {
             Ok(()) => Ok(()),
             Err(keyring::Error::NoEntry) => Ok(()),
@@ -135,7 +167,9 @@ pub fn store_ai_key(model_id: Uuid, key: &SecretString) -> AppResult<()> {
     {
         ai_entry(model_id)?
             .set_password(key.expose_secret())
-            .map_err(map_err)
+            .map_err(map_err)?;
+        ai_cache().put(model_id, key.clone());
+        Ok(())
     }
 }
 
@@ -153,8 +187,13 @@ pub fn get_ai_key(model_id: Uuid) -> AppResult<SecretString> {
     }
     #[cfg(not(debug_assertions))]
     {
+        if let Some(cached) = ai_cache().get(&model_id) {
+            return Ok((*cached).clone());
+        }
         let password = ai_entry(model_id)?.get_password().map_err(map_err)?;
-        Ok(SecretString::from(password))
+        let secret = SecretString::from(password);
+        ai_cache().put(model_id, secret.clone());
+        Ok(secret)
     }
 }
 
@@ -170,6 +209,7 @@ pub fn delete_ai_key(model_id: Uuid) -> AppResult<()> {
     }
     #[cfg(not(debug_assertions))]
     {
+        ai_cache().remove(&model_id);
         match ai_entry(model_id)?.delete_credential() {
             Ok(()) => Ok(()),
             Err(keyring::Error::NoEntry) => Ok(()),

@@ -28,6 +28,8 @@ use uuid::Uuid;
 
 use crate::db::Pool;
 use crate::error::{AppError, AppResult};
+use crate::imap::backoff::SyncBackoff;
+use crate::imap::manager::ImapManager;
 
 /// DB 连接+迁移的超时时限。慢盘/大库下防止后台任务永久挂起。
 const DB_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -104,6 +106,10 @@ pub struct AppState {
     /// 账户级同步互斥。INBOX 手动同步和单信箱同步共用同一把账户锁，
     /// 避免同一账户同时打开多个 IMAP 同步流程并互相覆盖后台任务 token。
     pub sync_in_flight: StdMutex<HashSet<Uuid>>,
+    /// 每账户 IMAP 复用连接管理器（一条长连接/账户；断线自动重连）。见 `imap::manager`。
+    pub imap: Arc<ImapManager>,
+    /// 同步失败冷却退避（连续失败 ≥2 次后自动同步进入冷却，手动同步绕过）。见 `imap::backoff`。
+    pub sync_backoff: Arc<SyncBackoff>,
 }
 
 impl AppState {
@@ -235,6 +241,13 @@ pub fn run() {
                 // 初始化为 Initializing，run_db_init 完成后更新为 Ready/Failed。
                 let db_init_status: Arc<Mutex<DbInitStatus>> =
                     Arc::new(Mutex::new(DbInitStatus::Initializing));
+                let imap_manager: Arc<ImapManager> = Arc::new(ImapManager::new());
+
+                // 连接保活：周期对空闲复用连接发 NOOP，防服务端/NAT 回收半开连接。
+                crate::imap::manager::spawn_keepalive(
+                    Arc::clone(&imap_manager),
+                    app_cancel.clone(),
+                );
 
                 app.manage(AppState {
                     db: Arc::clone(&db_cell),
@@ -243,6 +256,8 @@ pub fn run() {
                     cancel: app_cancel,
                     account_tokens: Arc::new(Mutex::new(HashMap::new())),
                     sync_in_flight: StdMutex::new(HashSet::new()),
+                    imap: imap_manager,
+                    sync_backoff: Arc::new(SyncBackoff::new()),
                 });
 
                 // 窗口已可显示（manage 完成后 Tauri 会渲染主窗口）；
@@ -313,11 +328,14 @@ pub fn run() {
             commands::conversation::sender_group_thread,
             commands::mail::mailbox_folded,
             commands::mail::account_inbox_folded,
+            commands::mail::messages_search,
             commands::mail::mailbox_mark_seen,
             commands::mail::account_inbox_mark_seen,
             commands::mail::message_filter_preview,
             commands::mail::message_set_filter_disabled,
             commands::mail::message_set_category,
+            commands::mail::message_add_tag,
+            commands::mail::message_remove_tag,
             commands::update::android_update_check,
             commands::update::android_update_open_download,
             commands::update::macos_update_check,
@@ -486,6 +504,8 @@ mod tests {
             cancel: CancellationToken::new(),
             account_tokens: Arc::new(Mutex::new(HashMap::new())),
             sync_in_flight: std::sync::Mutex::new(std::collections::HashSet::new()),
+            imap: Arc::new(crate::imap::manager::ImapManager::new()),
+            sync_backoff: Arc::new(crate::imap::backoff::SyncBackoff::new()),
         }
     }
 

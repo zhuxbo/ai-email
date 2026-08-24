@@ -57,7 +57,11 @@ pub struct SummaryResult {
     pub cache_read_tokens: Option<i32>,
 }
 
-pub async fn summarize_message(pool: &Pool, message_id: Uuid) -> AppResult<SummaryResult> {
+pub async fn summarize_message(
+    pool: &Pool,
+    imap: &crate::imap::manager::ImapManager,
+    message_id: Uuid,
+) -> AppResult<SummaryResult> {
     let model = ai_role_defaults::resolve_model(pool, ROLE)
         .await?
         .ok_or_else(|| {
@@ -70,7 +74,7 @@ pub async fn summarize_message(pool: &Pool, message_id: Uuid) -> AppResult<Summa
             .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
 
     // Plan B：物化整条会话取净增量。删去旧"未缓存即 bail"守卫——load_thread_context 保证 body 入库。
-    let ctx = crate::ai::context::load_thread_context(pool, message_id).await?;
+    let ctx = crate::ai::context::load_thread_context(pool, imap, message_id).await?;
     let current = ctx
         .members
         .get(ctx.current_index)

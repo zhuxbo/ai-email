@@ -215,6 +215,8 @@ pub async fn account_remove(state: State<'_, AppState>, id: Uuid) -> AppResult<(
     // 取消该账户的在途后台任务（classify/eval）：先于 DB 删除，避免任务写入已删除的 mailbox
     // 触发外键冲突，同时节省 AI 调用配额。无在途任务时 no-op 不报错。
     cancel_account_tasks(&state.account_tokens, id).await;
+    // 丢弃该账户的复用 IMAP 连接：账户即将消失，连接再无用途（保活任务也不再碰它）。
+    state.imap.close(id);
 
     // #11: delete keychain credential first (best-effort — warn on failure, never abort).
     // This avoids leaving an unreachable orphan auth-code if the DB delete succeeds but
@@ -275,6 +277,8 @@ pub async fn account_update(
     })
     .await?;
 
+    // 服务器配置可能已变更（host/port）：丢弃复用连接，下次操作以新配置重建。
+    state.imap.close(id);
     tracing::info!(account_id = %account.id, "account updated");
     Ok(account)
 }

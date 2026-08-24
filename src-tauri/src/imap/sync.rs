@@ -1,15 +1,15 @@
 //! Orchestrates IMAP mailbox sync.
 //!
 //! Flow (for any mailbox, parameterized via `sync_mailbox`):
-//!   1. IMAPS connect → login → ID
-//!   2. LIST every folder + upsert into `mailboxes` (with special_use detection)
+//!   1. 复用连接（`ImapManager::run`，无连接时建立；连接级失败自动重连重试一次）
+//!   2. LIST 信箱 + upsert（带 24h 缓存：首次或距上次刷新 ≥24h 才 LIST，见
+//!      [`list_refresh_due`]；未到刷新期但目标信箱缺行时强制刷新自愈）
 //!   3. SELECT <mailbox> → grab `exists` / `uid_next` / `uid_validity`
 //!   4. FETCH range:
 //!      - First sync (no prior `uid_next`): seq range `(exists-49):*` — guarantees ≤50 rows.
 //!      - Incremental: `UID FETCH <prev_uid_next>:*` — gets everything new.
 //!   5. Parse headers + INSERT … ON CONFLICT DO NOTHING (idempotent on retries)
 //!   6. Bookkeeping: `mailboxes.uid_next` / `last_synced_at`, `accounts.last_synced_at`
-//!   7. LOGOUT (best-effort — already-committed sync isn't undone by logout failure)
 //!
 //! `sync_inbox` is a convenience wrapper around `sync_mailbox("INBOX")`.
 //! Non-INBOX syncs (Sent, Drafts, Trash, etc.) are triggered on-demand when the user
@@ -34,10 +34,56 @@ use uuid::Uuid;
 
 use crate::db::accounts::Account;
 use crate::db::messages::MessageInsert;
-use crate::db::{accounts, mailboxes, messages, Pool};
+use crate::db::{accounts, app_meta, mailboxes, messages, Pool};
 use crate::error::{AppError, AppResult};
 use crate::imap::client::ImapClient;
+use crate::imap::manager::ImapManager;
 use crate::imap::parse;
+
+/// 信箱列表刷新间隔。LIST 结果（名称 + special_use）变化极少，每次同步都全量 LIST
+/// 只会多踩一次服务端限流点；24h 兜底刷新 + 缺行自愈（见 `sync_mailbox_inner`）。
+const LIST_REFRESH_INTERVAL: time::Duration = time::Duration::hours(24);
+
+/// app_meta 里记录某账户上次 LIST 刷新时间的 key（值为 unix 秒）。
+fn list_meta_key(account_id: Uuid) -> String {
+    format!("mailbox_list_at:{account_id}")
+}
+
+/// 纯函数：上次 LIST 时间 + 现在 → 是否需要刷新。
+pub(crate) fn list_refresh_due(
+    last: Option<time::OffsetDateTime>,
+    now: time::OffsetDateTime,
+) -> bool {
+    match last {
+        None => true,
+        Some(t) => now - t >= LIST_REFRESH_INTERVAL,
+    }
+}
+
+async fn read_list_refreshed_at(
+    pool: &Pool,
+    account_id: Uuid,
+) -> AppResult<Option<time::OffsetDateTime>> {
+    let raw = app_meta::get(pool, &list_meta_key(account_id))
+        .await?
+        .and_then(|s| s.parse::<i64>().ok());
+    Ok(raw.and_then(|secs| time::OffsetDateTime::from_unix_timestamp(secs).ok()))
+}
+
+/// 在现有连接上执行 LIST 并 upsert 全部信箱 + 记录刷新时间。
+/// 供同步（按 24h 缓存）与删除流程（缺 Trash 行自愈）共用。
+pub(crate) async fn refresh_mailbox_list(
+    pool: &Pool,
+    account_id: Uuid,
+    client: &mut ImapClient,
+) -> AppResult<()> {
+    for info in client.list_mailboxes().await? {
+        mailboxes::upsert(pool, account_id, &info).await?;
+    }
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    app_meta::set(pool, &list_meta_key(account_id), &now.to_string()).await?;
+    Ok(())
+}
 
 /// Payload for the `mail://classified` event.
 #[derive(Debug, Clone, Serialize)]
@@ -59,6 +105,9 @@ pub struct AutoReplyPayload {
 pub struct SyncReport {
     pub new_message_count: i32,
     pub total_in_mailbox: i64,
+    /// true = 因失败冷却被跳过（未打 IMAP、无新数据）。前端据此静默处理，
+    /// 不作为错误展示——冷却本身是保护行为，横幅只留真实故障。
+    pub cooldown_skipped: bool,
 }
 
 /// How this sync should fetch, decided purely from stored vs. server UIDVALIDITY.
@@ -104,45 +153,92 @@ pub fn decide_sync_mode(
 /// Sync a specific mailbox by name. Reusable core shared by `sync_inbox` and the
 /// on-demand `mailbox_sync` command.
 ///
-/// - Lists all mailboxes and upserts them (with special_use) on every call.
+/// - Lists mailboxes and upserts them (with special_use) **only** when the 24h LIST
+///   cache is stale or the target mailbox row is missing (self-heal for server-side
+///   folder creation).
 /// - Applies UIDVALIDITY change detection and incremental sync logic.
 /// - Returns `(SyncReport, new_message_ids)` so the caller can decide whether
 ///   to kick off background AI tasks.
+///
+/// 连接策略：全程走 [`ImapManager`] 复用连接；IMAP 段（LIST 按需 → SELECT → FETCH 头）
+/// 在一个操作闭包内完成，DB 写入（事务插入 / flags / 簿记）在闭包外完成，尽量缩短
+/// 账户连接锁的持有时长。
 async fn sync_mailbox_inner(
     pool: &Pool,
+    imap: &ImapManager,
     account: &Account,
     auth_code: &SecretString,
     mailbox_name: &str,
 ) -> AppResult<(SyncReport, Vec<uuid::Uuid>)> {
-    let port = u16::try_from(account.imap_port)
-        .map_err(|_| AppError::Imap(format!("invalid imap_port: {}", account.imap_port)))?;
-
     tracing::info!(
         account_id = %account.id,
         mailbox = mailbox_name,
         "mailbox sync starting"
     );
-    let mut client =
-        ImapClient::connect(&account.imap_host, port, &account.email, auth_code).await?;
 
-    for info in client.list_mailboxes().await? {
-        mailboxes::upsert(pool, account.id, &info).await?;
-    }
+    let (fetched, selected, mailbox) = imap
+        .run(account, auth_code, |mut lease| {
+            Box::pin(async move {
+                let client = lease.client()?;
+                // LIST 缓存：首次或距上次刷新 ≥24h 才全量 LIST。
+                let last_list = read_list_refreshed_at(pool, account.id).await?;
+                if list_refresh_due(last_list, time::OffsetDateTime::now_utc()) {
+                    refresh_mailbox_list(pool, account.id, client).await?;
+                }
 
-    let selected = client.select(mailbox_name).await?;
-    let mailbox = mailboxes::get_by_name(pool, account.id, mailbox_name)
-        .await?
-        .ok_or_else(|| AppError::Imap(format!("{mailbox_name} not found after upsert")))?;
+                let selected = client.select(mailbox_name).await?;
+                // 未到刷新期但目标信箱缺行（服务端新建）→ 强制刷新一次自愈。
+                let mailbox = match mailboxes::get_by_name(pool, account.id, mailbox_name).await? {
+                    Some(m) => m,
+                    None => {
+                        tracing::info!(
+                            account_id = %account.id,
+                            mailbox = mailbox_name,
+                            "mailbox row missing; forcing LIST refresh"
+                        );
+                        refresh_mailbox_list(pool, account.id, client).await?;
+                        mailboxes::get_by_name(pool, account.id, mailbox_name)
+                            .await?
+                            .ok_or_else(|| {
+                                AppError::Imap(format!("{mailbox_name} not found after refresh"))
+                            })?
+                    }
+                };
 
-    // Decide fetch strategy based on stored vs. server UIDVALIDITY (audit #2).
+                // Decide fetch strategy based on stored vs. server UIDVALIDITY (audit #2).
+                let mode = decide_sync_mode(
+                    mailbox.uid_validity,
+                    mailbox.uid_next,
+                    selected.uid_validity.map(i64::from),
+                );
+                tracing::debug!(account_id = %account.id, mailbox = mailbox_name, ?mode, "sync mode decided");
+
+                let fetched = if selected.exists == 0 {
+                    Vec::new()
+                } else {
+                    match mode {
+                        SyncMode::Incremental { prev_uid_next } => {
+                            client
+                                .uid_fetch_headers(&format!("{prev_uid_next}:*"))
+                                .await?
+                        }
+                        SyncMode::FirstSync | SyncMode::ResetRefetch => {
+                            let lower = selected.exists.saturating_sub(49).max(1);
+                            client.fetch_headers(&format!("{lower}:*")).await?
+                        }
+                    }
+                };
+                Ok((fetched, selected, mailbox))
+            })
+        })
+        .await?;
+
+    // UIDVALIDITY mismatch: drop stale local rows and reset bookkeeping before re-fetching.
     let mode = decide_sync_mode(
         mailbox.uid_validity,
         mailbox.uid_next,
         selected.uid_validity.map(i64::from),
     );
-    tracing::debug!(account_id = %account.id, mailbox = mailbox_name, ?mode, "sync mode decided");
-
-    // UIDVALIDITY mismatch: drop stale local rows and reset bookkeeping before re-fetching.
     if mode == SyncMode::ResetRefetch {
         let new_validity = selected
             .uid_validity
@@ -157,22 +253,6 @@ async fn sync_mailbox_inner(
         );
         mailboxes::reset_mailbox_for_uidvalidity_change(pool, mailbox.id, new_validity).await?;
     }
-
-    let fetched = if selected.exists == 0 {
-        Vec::new()
-    } else {
-        match mode {
-            SyncMode::Incremental { prev_uid_next } => {
-                client
-                    .uid_fetch_headers(&format!("{prev_uid_next}:*"))
-                    .await?
-            }
-            SyncMode::FirstSync | SyncMode::ResetRefetch => {
-                let lower = selected.exists.saturating_sub(49).max(1);
-                client.fetch_headers(&format!("{lower}:*")).await?
-            }
-        }
-    };
 
     // Pre-parse all headers so the transaction holds the DB lock for as short as possible
     // (parsing is CPU-only, no I/O).
@@ -242,10 +322,6 @@ async fn sync_mailbox_inner(
     .await?;
     accounts::update_last_synced(pool, account.id).await?;
 
-    if let Err(e) = client.logout().await {
-        tracing::warn!(error = ?e, "imap logout failed (non-fatal)");
-    }
-
     tracing::info!(
         account_id = %account.id,
         mailbox = mailbox_name,
@@ -258,6 +334,7 @@ async fn sync_mailbox_inner(
         SyncReport {
             new_message_count: inserted,
             total_in_mailbox: i64::from(selected.exists),
+            cooldown_skipped: false,
         },
         new_ids,
     ))
@@ -292,13 +369,14 @@ async fn should_run_classify(token: &CancellationToken, pool: &Pool, account_id:
 /// 任务结束后注销，防止注册表无限增长。删除账户时可通过注册表取消对应令牌，终止在途任务。
 pub async fn sync_inbox(
     pool: &Pool,
+    imap: &ImapManager,
     account: &Account,
     auth_code: &SecretString,
     cancel: CancellationToken,
     account_tokens: Arc<Mutex<HashMap<Uuid, CancellationToken>>>,
     app_handle: AppHandle,
 ) -> AppResult<SyncReport> {
-    let (report, new_ids) = sync_mailbox_inner(pool, account, auth_code, "INBOX").await?;
+    let (report, new_ids) = sync_mailbox_inner(pool, imap, account, auth_code, "INBOX").await?;
 
     // Kick off background classification for the freshly-landed rows. We don't await — UI
     // gets the sync report immediately and is notified via Tauri events when background
@@ -420,15 +498,53 @@ pub async fn sync_inbox(
 /// chain in `selectMailbox` — no event emission needed here.
 pub async fn sync_mailbox(
     pool: &Pool,
+    imap: &ImapManager,
     account: &Account,
     auth_code: &SecretString,
     mailbox_name: &str,
 ) -> AppResult<SyncReport> {
-    let (report, _new_ids) = sync_mailbox_inner(pool, account, auth_code, mailbox_name).await?;
+    let (report, _new_ids) =
+        sync_mailbox_inner(pool, imap, account, auth_code, mailbox_name).await?;
     Ok(report)
 }
 
 const SENT_SYNC_TTL: time::Duration = time::Duration::minutes(5);
+
+/// 每账户「Sent 补同步」single-flight 集合。
+///
+/// 动机：5min TTL 的 due 检查读的是 DB 的 `last_synced_at`，首个在途同步完成前它不更新；
+/// 快速连续打开多个会话时（每个 conversation_thread 都调 ensure_sent_synced）会在账户
+/// 连接锁后面排起一串冗余整箱同步（实测 25s 内排了 10 个）。已在途 → 后来者直接跳过。
+fn sent_sync_in_flight() -> &'static std::sync::Mutex<std::collections::HashSet<Uuid>> {
+    static SET: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<Uuid>>> =
+        std::sync::OnceLock::new();
+    SET.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+/// RAII：drop 时从 single-flight 集合移除账户，保证失败/panic 也不残留。
+struct SentSyncGuard(Uuid);
+
+impl SentSyncGuard {
+    fn try_acquire(account_id: Uuid) -> Option<Self> {
+        let mut set = sent_sync_in_flight()
+            .lock()
+            .expect("sent sync in-flight lock poisoned");
+        if set.insert(account_id) {
+            Some(Self(account_id))
+        } else {
+            None
+        }
+    }
+}
+
+impl Drop for SentSyncGuard {
+    fn drop(&mut self) {
+        sent_sync_in_flight()
+            .lock()
+            .expect("sent sync in-flight lock poisoned")
+            .remove(&self.0);
+    }
+}
 
 /// 纯函数：Sent 上次同步时间 + 现在 → 是否需补同步。
 pub(crate) fn sent_sync_due(
@@ -441,9 +557,10 @@ pub(crate) fn sent_sync_due(
     }
 }
 
-/// 按需补同步该账户 Sent（5min 节流：每账户每 5min 至多一次整箱增量同步）。内部自连。失败由调用方 warn-not-fail。
+/// 按需补同步该账户 Sent（5min TTL + single-flight 去重）。走复用连接。失败由调用方 warn-not-fail。
 pub async fn ensure_sent_synced(
     pool: &Pool,
+    imap: &ImapManager,
     account: &Account,
     auth_code: &SecretString,
 ) -> AppResult<()> {
@@ -458,7 +575,12 @@ pub async fn ensure_sent_synced(
     if !sent_sync_due(sent.last_synced_at, time::OffsetDateTime::now_utc()) {
         return Ok(());
     }
-    sync_mailbox(pool, account, auth_code, &sent.name).await?;
+    // single-flight：已有同账户 Sent 同步在途 → 跳过（等它完成即刷新 last_synced_at）。
+    let Some(_guard) = SentSyncGuard::try_acquire(account.id) else {
+        tracing::debug!(account = %account.id, "sent sync already in flight; skip");
+        return Ok(());
+    };
+    sync_mailbox(pool, imap, account, auth_code, &sent.name).await?;
     Ok(())
 }
 
@@ -466,6 +588,22 @@ pub async fn ensure_sent_synced(
 mod ensure_sent_tests {
     use super::*;
     use time::{Duration, OffsetDateTime};
+
+    #[test]
+    fn sent_sync_single_flight_blocks_and_releases() {
+        let id = Uuid::new_v4();
+        let g1 = SentSyncGuard::try_acquire(id);
+        assert!(g1.is_some(), "首个获取应成功");
+        // 已在途：第二个获取被拒（快速连开会话时后来者直接跳过）
+        assert!(SentSyncGuard::try_acquire(id).is_none(), "在途时应拒绝");
+        // 其它账户不受影响
+        let g2 = SentSyncGuard::try_acquire(Uuid::new_v4());
+        assert!(g2.is_some(), "不同账户互不阻塞");
+        drop(g1);
+        drop(g2);
+        // 释放后可重新获取
+        assert!(SentSyncGuard::try_acquire(id).is_some(), "drop 后应可重取");
+    }
 
     #[test]
     fn due_when_never_synced() {
@@ -488,8 +626,22 @@ mod ensure_sent_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        decide_sync_mode, should_run_classify, AutoReplyPayload, ClassifiedPayload, SyncMode,
+        decide_sync_mode, list_refresh_due, should_run_classify, AutoReplyPayload,
+        ClassifiedPayload, SyncMode, LIST_REFRESH_INTERVAL,
     };
+
+    #[test]
+    fn list_refresh_due_on_first_sync_and_after_ttl() {
+        let now = time::OffsetDateTime::UNIX_EPOCH + time::Duration::days(100);
+        // 从未 LIST 过 → 需要刷新
+        assert!(list_refresh_due(None, now));
+        // 23h 前 → 未到 24h，不刷新
+        let recent = now - LIST_REFRESH_INTERVAL + time::Duration::hours(1);
+        assert!(!list_refresh_due(Some(recent), now));
+        // 25h 前 → 超过 TTL，刷新
+        let stale = now - LIST_REFRESH_INTERVAL - time::Duration::hours(1);
+        assert!(list_refresh_due(Some(stale), now));
+    }
 
     #[test]
     fn first_sync_when_no_local_uid_next() {

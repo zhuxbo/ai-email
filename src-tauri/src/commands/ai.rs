@@ -27,7 +27,7 @@ fn validate_classify_ids(ids: &[Uuid]) -> AppResult<()> {
 
 #[tauri::command]
 pub async fn ai_summarize(state: State<'_, AppState>, id: Uuid) -> AppResult<SummaryResult> {
-    summarize::summarize_message(state.pool().await?, id).await
+    summarize::summarize_message(state.pool().await?, &state.imap, id).await
 }
 
 /// Manual (re-)classify of one or more messages. Sync auto-fires the background path; this
@@ -68,7 +68,7 @@ pub async fn ai_translate(
     id: Uuid,
     target: String,
 ) -> AppResult<TranslateResult> {
-    translate::translate_message(state.pool().await?, id, &target).await
+    translate::translate_message(state.pool().await?, &state.imap, id, &target).await
 }
 
 #[tauri::command]
@@ -90,6 +90,7 @@ pub async fn ai_draft_reply(
 ) -> AppResult<DraftResult> {
     draft::draft_reply(
         state.pool().await?,
+        &state.imap,
         id,
         intent.as_deref(),
         force.unwrap_or(false),

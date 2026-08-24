@@ -18,9 +18,15 @@ use tokio_rustls::client::TlsStream;
 use crate::error::{AppError, AppResult};
 use crate::imap::tls;
 
-/// Total budget for TCP connect + TLS handshake + LOGIN + ID exchange.
-/// Covers slow provider login on weak networks without letting a half-open handshake hang forever.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(60);
+/// TCP connect budget. Kept short so an unreachable host fails fast instead of eating the
+/// whole handshake budget; the 3-way handshake itself needs well under a second on any
+/// usable network.
+const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// TLS handshake + LOGIN + ID budget. Providers under login throttling (QQ) stretch LOGIN
+/// specifically, so this phase keeps the bulk of the previous 60s total budget. Splitting
+/// the phases also lets logs distinguish "network unreachable" from "login throttled".
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Per-operation budget for LIST / SELECT / FETCH / STORE / MOVE.
 /// Keeps individual commands from stalling indefinitely on half-open connections.
@@ -87,9 +93,11 @@ pub struct FetchedHeader {
 }
 
 impl ImapClient {
-    /// IMAPS connect → LOGIN → ID. The entire handshake is bounded by [`CONNECT_TIMEOUT`].
-    /// Failure at any step returns an [`AppError::Imap`] with a readable message so the UI can
-    /// prompt the user to retry rather than spinning indefinitely.
+    /// IMAPS connect → LOGIN → ID. TCP has its own budget ([`TCP_CONNECT_TIMEOUT`]) so
+    /// an unreachable host fails fast; TLS+LOGIN+ID share [`HANDSHAKE_TIMEOUT`] because
+    /// throttled logins (QQ) stretch exactly this phase. Failure at any step returns an
+    /// [`AppError::Imap`] with a readable message naming the phase so logs can tell
+    /// network problems from rate limiting.
     pub async fn connect(
         host: &str,
         port: u16,
@@ -101,12 +109,38 @@ impl ImapClient {
             host,
             port,
             email,
-            timeout_secs = CONNECT_TIMEOUT.as_secs(),
+            tcp_timeout_secs = TCP_CONNECT_TIMEOUT.as_secs(),
+            handshake_timeout_secs = HANDSHAKE_TIMEOUT.as_secs(),
             "imap connect start"
         );
+        let tcp = match timeout(TCP_CONNECT_TIMEOUT, TcpStream::connect((host, port))).await {
+            Ok(Ok(tcp)) => tcp,
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    host, port, email, phase = "tcp", error = %e,
+                    elapsed_ms = elapsed_ms(started), "imap connect phase failed"
+                );
+                return Err(AppError::Io(e));
+            }
+            Err(_) => {
+                tracing::warn!(
+                    host,
+                    port,
+                    email,
+                    phase = "tcp",
+                    timeout_secs = TCP_CONNECT_TIMEOUT.as_secs(),
+                    elapsed_ms = elapsed_ms(started),
+                    "imap connect timeout"
+                );
+                return Err(AppError::Imap(format!(
+                    "IMAP TCP 连接超时（{}s）：{host}:{port}",
+                    TCP_CONNECT_TIMEOUT.as_secs()
+                )));
+            }
+        };
         match timeout(
-            CONNECT_TIMEOUT,
-            Self::connect_inner(host, port, email, auth_code),
+            HANDSHAKE_TIMEOUT,
+            Self::handshake(tcp, host, port, email, auth_code),
         )
         .await
         {
@@ -124,52 +158,26 @@ impl ImapClient {
                     host,
                     port,
                     email,
-                    timeout_secs = CONNECT_TIMEOUT.as_secs(),
+                    timeout_secs = HANDSHAKE_TIMEOUT.as_secs(),
                     elapsed_ms = elapsed_ms(started),
                     "imap connect timeout"
                 );
                 Err(AppError::Imap(format!(
-                    "IMAP 连接超时（{}s）：{host}:{port}",
-                    CONNECT_TIMEOUT.as_secs()
+                    "IMAP TLS/登录超时（{}s）：{host}:{port}",
+                    HANDSHAKE_TIMEOUT.as_secs()
                 )))
             }
         }
     }
 
-    async fn connect_inner(
+    async fn handshake(
+        tcp: TcpStream,
         host: &str,
         port: u16,
         email: &str,
         auth_code: &SecretString,
     ) -> AppResult<Self> {
         let connector = tls::build_connector();
-        let phase_started = Instant::now();
-        tracing::info!(host, port, email, phase = "tcp", "imap connect phase start");
-        let tcp = match TcpStream::connect((host, port)).await {
-            Ok(tcp) => {
-                tracing::info!(
-                    host,
-                    port,
-                    email,
-                    phase = "tcp",
-                    elapsed_ms = elapsed_ms(phase_started),
-                    "imap connect phase done"
-                );
-                tcp
-            }
-            Err(e) => {
-                tracing::warn!(
-                    host,
-                    port,
-                    email,
-                    phase = "tcp",
-                    elapsed_ms = elapsed_ms(phase_started),
-                    error = %e,
-                    "imap connect phase failed"
-                );
-                return Err(AppError::Io(e));
-            }
-        };
         let server_name = ServerName::try_from(host.to_owned())
             .map_err(|e| AppError::Imap(format!("invalid TLS server name: {e}")))?;
         let phase_started = Instant::now();
@@ -763,6 +771,37 @@ impl ImapClient {
         }
     }
 
+    /// NOOP keepalive：空闲期探测连接活性（防服务端/NAT 回收半开连接）。
+    /// 超时或失败即视为连接不可用——超时后协议流已错位，调用方必须丢弃连接。
+    pub async fn noop(&mut self) -> AppResult<()> {
+        let started = Instant::now();
+        match timeout(OP_TIMEOUT, async {
+            self.session
+                .run_command_and_check_ok("NOOP")
+                .await
+                .map_err(|e| AppError::Imap(e.to_string()))
+        })
+        .await
+        {
+            Ok(Ok(())) => {
+                tracing::debug!(elapsed_ms = elapsed_ms(started), "imap noop ok");
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, elapsed_ms = elapsed_ms(started), "imap noop failed");
+                Err(e)
+            }
+            Err(_) => {
+                tracing::warn!(
+                    timeout_secs = OP_TIMEOUT.as_secs(),
+                    elapsed_ms = elapsed_ms(started),
+                    "imap noop timeout"
+                );
+                Err(AppError::Imap("IMAP NOOP 保活超时".into()))
+            }
+        }
+    }
+
     pub async fn logout(mut self) -> AppResult<()> {
         self.session
             .logout()
@@ -1026,21 +1065,22 @@ mod tests {
     // --- #6: 超时常量合理性 ---
 
     #[test]
-    fn connect_timeout_is_sane() {
-        // 连接级超时应在 10s–60s 之间：太短导致误判，太长等于没超时。
-        let secs = CONNECT_TIMEOUT.as_secs();
+    fn tcp_connect_timeout_is_sane() {
+        // TCP 三次握手在可用网络 <1s；15s 已极宽松。应短于握手预算，让不可达主机快速失败。
+        let secs = TCP_CONNECT_TIMEOUT.as_secs();
         assert!(
-            (10..=60).contains(&secs),
-            "CONNECT_TIMEOUT={secs}s 不在 [10,60] 合理范围"
+            (5..=30).contains(&secs) && secs < HANDSHAKE_TIMEOUT.as_secs(),
+            "TCP_CONNECT_TIMEOUT={secs}s 不在合理范围或未短于握手预算"
         );
     }
 
     #[test]
-    fn connect_timeout_allows_slow_tls_login() {
-        let secs = CONNECT_TIMEOUT.as_secs();
+    fn handshake_timeout_allows_slow_throttled_login() {
+        // QQ 登录被限流时 LOGIN 阶段显著变慢，TLS+LOGIN+ID 预算应 ≥45s 防误判。
+        let secs = HANDSHAKE_TIMEOUT.as_secs();
         assert!(
-            secs >= 60,
-            "CONNECT_TIMEOUT={secs}s 仍可能把慢网络下的 TCP+TLS+LOGIN+ID 误判为失败"
+            secs >= 45,
+            "HANDSHAKE_TIMEOUT={secs}s 仍可能把被限流的登录误判为失败"
         );
     }
 
@@ -1079,8 +1119,8 @@ mod tests {
         .await
         .unwrap_or_else(|_| {
             Err(AppError::Imap(format!(
-                "IMAP 连接超时（{}s）：imap.example.com:993",
-                CONNECT_TIMEOUT.as_secs()
+                "IMAP TLS/登录超时（{}s）：imap.example.com:993",
+                HANDSHAKE_TIMEOUT.as_secs()
             )))
         });
 

@@ -50,7 +50,7 @@ pub async fn conversation_thread(
     message_id: Uuid,
 ) -> AppResult<ConversationView> {
     let pool = state.pool().await?;
-    let ctx = crate::ai::context::load_thread_context(pool, message_id).await?;
+    let ctx = crate::ai::context::load_thread_context(pool, &state.imap, message_id).await?;
     Ok(view_from_context(ctx))
 }
 
@@ -76,8 +76,14 @@ pub async fn sender_group_thread(
     // 选成员（DESC 最新在前）→ 物化正文（尽力而为；失败成员暂无 body）。
     let headers =
         db::messages::sender_group_members(pool, account_id, &from_addr, SENDER_GROUP_CAP).await?;
-    let report =
-        crate::imap::materialize::materialize_thread_bodies(pool, &acct, &auth, &headers).await?;
+    let report = crate::imap::materialize::materialize_thread_bodies(
+        pool,
+        &state.imap,
+        &acct,
+        &auth,
+        &headers,
+    )
+    .await?;
     if !report.failed.is_empty() {
         tracing::warn!(
             failed = ?report.failed,

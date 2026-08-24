@@ -51,6 +51,7 @@ pub struct DraftResult {
 /// `force=true` 时跳过 ai_results 缓存强制重新生成，并用新结果覆盖旧缓存。
 pub async fn draft_reply(
     pool: &Pool,
+    imap: &crate::imap::manager::ImapManager,
     message_id: Uuid,
     intent: Option<&str>,
     force: bool,
@@ -67,7 +68,7 @@ pub async fn draft_reply(
             .map_err(|e| AppError::Other(anyhow::anyhow!(e)))??;
 
     // Plan B：物化整条会话取净增量。删去旧"未缓存即 bail"守卫——load_thread_context 保证 body 入库。
-    let ctx = crate::ai::context::load_thread_context(pool, message_id).await?;
+    let ctx = crate::ai::context::load_thread_context(pool, imap, message_id).await?;
     let current = ctx
         .members
         .get(ctx.current_index)

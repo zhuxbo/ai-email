@@ -78,8 +78,13 @@ async fn build_member(
     })
 }
 
-/// 物化并切分一条会话。唯一入口：conversation_thread 与剥离引擎共用。内部自取 account+auth。
-pub async fn load_thread_context(pool: &Pool, message_id: Uuid) -> AppResult<ThreadContext> {
+/// 物化并切分一条会话。唯一入口：conversation_thread 与剥离引擎共用。内部自取 account+auth，
+/// IMAP 段（Sent 补同步 / 正文物化）走传入的复用连接管理器（两次独立顺序调用，无嵌套锁）。
+pub async fn load_thread_context(
+    pool: &Pool,
+    imap: &crate::imap::manager::ImapManager,
+    message_id: Uuid,
+) -> AppResult<ThreadContext> {
     let current = db::messages::get(pool, message_id)
         .await?
         .ok_or_else(|| AppError::Config(format!("message {message_id} not found")))?;
@@ -90,7 +95,8 @@ pub async fn load_thread_context(pool: &Pool, message_id: Uuid) -> AppResult<Thr
     // 无 thread_id（极罕见：连 message-id 都没有）→ 单封：物化 current 后返回。
     let Some(thread_id) = current.thread_id.clone() else {
         let auth = take_auth(account.id).await?;
-        let _ = crate::imap::materialize::materialize_one(pool, &account, &auth, current.id).await;
+        let _ = crate::imap::materialize::materialize_one(pool, imap, &account, &auth, current.id)
+            .await;
         let member = build_member(pool, &account, current).await?;
         return Ok(ThreadContext {
             thread_id: None,
@@ -102,16 +108,17 @@ pub async fn load_thread_context(pool: &Pool, message_id: Uuid) -> AppResult<Thr
 
     let auth = take_auth(account.id).await?;
     // 按需补同步 Sent（5min 节流；失败 warn-not-fail）
-    let sent_sync_ok = match crate::imap::sync::ensure_sent_synced(pool, &account, &auth).await {
-        Ok(()) => true,
-        Err(e) => {
-            tracing::warn!(error = %e, "ensure_sent_synced failed; own replies may be missing");
-            false
-        }
-    };
+    let sent_sync_ok =
+        match crate::imap::sync::ensure_sent_synced(pool, imap, &account, &auth).await {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(error = %e, "ensure_sent_synced failed; own replies may be missing");
+                false
+            }
+        };
     let members = db::conversations::list_conversation(pool, account.id, &thread_id).await?;
     let report =
-        crate::imap::materialize::materialize_thread_bodies(pool, &account, &auth, &members)
+        crate::imap::materialize::materialize_thread_bodies(pool, imap, &account, &auth, &members)
             .await?;
     if !report.failed.is_empty() {
         tracing::warn!(

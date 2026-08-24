@@ -1,5 +1,6 @@
 //! 会话正文物化：缺 body 的成员按 mailbox 分组批量 UID FETCH 入库。
-//! materialize_one 供拼引用单封；二者各自连 IMAP（fetch_raw_body 保留为附件裸字节原语，不并入此处）。
+//! materialize_one 供拼引用单封；二者均走 [`ImapManager`] 复用连接
+//! （fetch_raw_body 保留为附件裸字节原语，不并入此处）。
 use std::collections::{HashMap, HashSet};
 
 use secrecy::SecretString;
@@ -9,7 +10,7 @@ use crate::db::accounts::Account;
 use crate::db::messages::MessageHeader;
 use crate::db::{self, Pool};
 use crate::error::{AppError, AppResult};
-use crate::imap::client::ImapClient;
+use crate::imap::manager::ImapManager;
 use crate::imap::parse;
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -36,9 +37,10 @@ pub(crate) fn members_needing_body(
     out
 }
 
-/// 单封：连 IMAP 取 BODY[]、解析、入库 + 标记。供拼引用与单封物化复用。
+/// 单封：在复用连接上取 BODY[]、解析、入库 + 标记。供拼引用与单封物化复用。
 pub async fn materialize_one(
     pool: &Pool,
+    imap: &ImapManager,
     account: &Account,
     auth: &SecretString,
     message_id: Uuid,
@@ -51,20 +53,23 @@ pub async fn materialize_one(
         .ok_or_else(|| AppError::Config(format!("mailbox {} not found", msg.mailbox_id)))?;
     let uid = u32::try_from(msg.imap_uid)
         .map_err(|_| AppError::Imap(format!("invalid imap_uid: {}", msg.imap_uid)))?;
-    let port = u16::try_from(account.imap_port)
-        .map_err(|_| AppError::Imap(format!("invalid imap_port: {}", account.imap_port)))?;
-    let mut client = ImapClient::connect(&account.imap_host, port, &account.email, auth).await?;
-    client.select(&mailbox.name).await?;
-    let raw = client.uid_fetch_body(uid).await?;
-    if let Err(e) = client.logout().await {
-        tracing::warn!(error = ?e, "imap logout failed (non-fatal)");
-    }
+    let mailbox_name = mailbox.name.as_str();
+    let raw = imap
+        .run(account, auth, |mut lease| {
+            Box::pin(async move {
+                let client = lease.client()?;
+                client.select(mailbox_name).await?;
+                client.uid_fetch_body(uid).await
+            })
+        })
+        .await?;
     persist_body(pool, message_id, &raw).await
 }
 
 /// 批量：按 mailbox 分组拉缺失成员、逐封入库。尽力而为：单封失败计入 report.failed。
 pub async fn materialize_thread_bodies(
     pool: &Pool,
+    imap: &ImapManager,
     account: &Account,
     auth: &SecretString,
     members: &[MessageHeader],
@@ -75,57 +80,67 @@ pub async fn materialize_thread_bodies(
             have.insert(m.id);
         }
     }
-    let need = members_needing_body(members, &have);
+    let mut need = members_needing_body(members, &have);
     let mut report = MaterializeReport::default();
     if need.is_empty() {
         return Ok(report);
     }
-    let port = u16::try_from(account.imap_port)
-        .map_err(|_| AppError::Imap(format!("invalid imap_port: {}", account.imap_port)))?;
-    let mut client = ImapClient::connect(&account.imap_host, port, &account.email, auth).await?;
-    for (mailbox_id, items) in need {
-        let mailbox = match db::mailboxes::get(pool, mailbox_id).await? {
-            Some(mb) => mb,
-            None => {
-                tracing::warn!(mailbox_id = %mailbox_id, count = items.len(), "mailbox not found during materialize; marking items failed");
-                for (_, id) in items {
-                    report.failed.push(id);
+    // 引用先行：async move 会整体移动捕获，FnMut 二次调用即 E0507；借 &need（Copy）规避。
+    let need_ref = &need;
+    let fetched_by_group = imap
+        .run(account, auth, |mut lease| {
+            Box::pin(async move {
+                let client = lease.client()?;
+                // (mailbox_id, 该信箱批量 FETCH 到的 (uid, raw) 列表)。不同信箱的 UID 会重复，
+                // 必须按信箱分组配对，不能全局按 UID 合并。
+                let mut out: Vec<(Uuid, Vec<(u32, Vec<u8>)>)> = Vec::new();
+                for (mailbox_id, items) in need_ref {
+                let mailbox = match db::mailboxes::get(pool, *mailbox_id).await? {
+                    Some(mb) => mb,
+                    None => {
+                        tracing::warn!(mailbox_id = %mailbox_id, count = items.len(), "mailbox not found during materialize; skipping group");
+                        continue;
+                    }
+                };
+                if client.select(&mailbox.name).await.is_err() {
+                    tracing::warn!(mailbox = %mailbox.name, count = items.len(), "select failed during materialize; skipping group");
+                    continue;
                 }
-                continue;
-            }
-        };
-        if client.select(&mailbox.name).await.is_err() {
-            tracing::warn!(mailbox = %mailbox.name, count = items.len(), "select failed during materialize; marking items failed");
-            for (_, id) in &items {
-                report.failed.push(*id);
-            }
-            continue;
-        }
-        let uids: Vec<u32> = items.iter().map(|(u, _)| *u).collect();
-        let fetched = match client.uid_fetch_bodies(&uids).await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(error = %e, mailbox = %mailbox.name, "batch body fetch failed");
-                for (_, id) in &items {
-                    report.failed.push(*id);
+                let uids: Vec<u32> = items.iter().map(|(u, _)| *u).collect();
+                match client.uid_fetch_bodies(&uids).await {
+                    Ok(v) => out.push((*mailbox_id, v)),
+                    Err(e) => {
+                        tracing::warn!(error = %e, mailbox = %mailbox.name, "batch body fetch failed; skipping group");
+                    }
                 }
-                continue;
             }
-        };
+            Ok(out)
+            })
+        })
+        .await?;
+
+    let mut fetched_count = 0_usize;
+    for (mailbox_id, fetched) in fetched_by_group {
         let by_uid: HashMap<u32, Vec<u8>> = fetched.into_iter().collect();
+        let Some(items) = need.remove(&mailbox_id) else {
+            continue;
+        };
         for (uid, msg_id) in items {
             match by_uid.get(&uid) {
                 Some(raw) => match persist_body(pool, msg_id, raw).await {
-                    Ok(()) => report.fetched += 1,
+                    Ok(()) => fetched_count += 1,
                     Err(_) => report.failed.push(msg_id),
                 },
+                // 拉取阶段单封缺流（服务端未返回该 UID 的 BODY）。
                 None => report.failed.push(msg_id),
             }
         }
     }
-    if let Err(e) = client.logout().await {
-        tracing::warn!(error = ?e, "imap logout failed (non-fatal)");
+    // 拉取阶段被跳过的组（信箱缺行 / select 失败 / 批量 FETCH 失败）成员全部计失败。
+    for items in need.into_values() {
+        report.failed.extend(items.into_iter().map(|(_, id)| id));
     }
+    report.fetched = fetched_count;
     Ok(report)
 }
 
