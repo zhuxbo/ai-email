@@ -1,0 +1,25 @@
+[Unit]
+Description=AI Email aggregation and MCP server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ai-email
+Group=ai-email
+ExecStart=/opt/ai-email/ai-email-server /etc/ai-email/config.json
+WorkingDirectory=/var/lib/ai-email
+StateDirectory=ai-email
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ai-email
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
