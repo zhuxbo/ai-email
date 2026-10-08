@@ -1,55 +1,32 @@
-# Lefthook config — STRICT mode.
-# Any check failure blocks the operation. Do not bypass with --no-verify.
-# See CLAUDE.md "Quality Gates" for the policy.
-
+# 本机安装 lefthook 和 gitleaks 后运行 lefthook install。
+# 检查失败不得用 --no-verify 绕过。
 pre-commit:
   parallel: true
   commands:
     rust-format:
-      glob: '*.rs'
-      run: cd src-tauri && cargo fmt --check
-      fail_text: 'Rust files not formatted. Run: cd src-tauri && cargo fmt'
-
+      glob: 'server/**/*.rs'
+      run: cargo fmt --manifest-path server/Cargo.toml --check
+      fail_text: '请运行 cargo fmt --manifest-path server/Cargo.toml'
     rust-clippy:
-      glob: '*.rs'
-      run: cd src-tauri && cargo clippy --no-deps --all-targets -- -D warnings
-      fail_text: 'Fix clippy warnings before committing'
-
-    prettier:
-      glob: '*.{ts,tsx,js,jsx,json,md,yml,yaml,html,css}'
-      run: pnpm exec prettier --check {staged_files}
-      fail_text: 'Formatting required. Run: pnpm exec prettier --write {staged_files}'
-
-    eslint:
-      glob: '*.{ts,tsx}'
-      run: pnpm exec eslint --max-warnings 0 --no-warn-ignored {staged_files}
-      fail_text: 'Fix ESLint errors before committing'
-
-    tsc:
-      glob: '*.{ts,tsx}'
-      run: pnpm exec tsc --noEmit
-      fail_text: 'Fix TypeScript errors before committing'
-
+      glob: 'server/**/*.rs'
+      run: cargo clippy --locked --manifest-path server/Cargo.toml --all-targets -- -D warnings
+      fail_text: '请修复 Rust clippy 警告'
     gitleaks:
       run: gitleaks protect --staged --no-banner --redact -v
-      fail_text: 'Secrets detected — remove before committing'
+      fail_text: '请移除待提交内容中的凭据'
 
 commit-msg:
   commands:
-    commitlint:
-      run: pnpm exec commitlint --edit {1}
-      fail_text: 'Commit message must follow Conventional Commits (feat:, fix:, refactor:, ...)'
+    conventional-title:
+      run: >-
+        python3 -c 'import pathlib,re,sys; title=pathlib.Path(sys.argv[1]).read_text().splitlines()[0]; sys.exit(0 if re.fullmatch(r"(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert): .{1,93}", title) and len(title)<=100 else 1)' "{1}"
+      fail_text: '提交标题须为 type: 主题，且不超过100字符'
 
 pre-push:
-  parallel: true
   commands:
-    cargo-test:
-      run: cd src-tauri && cargo test --all-features
-      fail_text: 'Rust tests must pass before push'
-
-    vitest:
-      run: pnpm exec vitest run --passWithNoTests
-      fail_text: 'Vitest must pass before push'
-    # cargo audit moved to CI (.github/workflows/audit.yml) — runs weekly + on
-    # dependency changes. Keeps pre-push fast and avoids forcing every dev to
-    # `cargo install cargo-audit` locally.
+    server-tests:
+      run: cargo test --locked --manifest-path server/Cargo.toml
+      fail_text: '服务端测试必须通过'
+    bridge-tests:
+      run: cargo build --locked --manifest-path server/Cargo.toml && python3 -m unittest discover -s scripts -p 'test_*.py'
+      fail_text: 'MCP桥接及服务冒烟测试必须通过'

@@ -1,24 +1,14 @@
-## Summary
+## 改动说明
 
-<!-- 1-3 bullets describing what changed and why -->
+<!-- 说明具体问题、结果行为及范围 -->
 
-## Test plan
+## 验证
 
-- [ ] Unit tests added/updated
-- [ ] Integration tests pass locally
-- [ ] Tested manually on macOS / Windows / Linux (delete as appropriate)
-- [ ] Tested on Android (if mobile-affecting)
+<!-- 按改动涉及模块填写实际执行结果；不适用项删除 -->
 
-## Security
-
-- [ ] No credentials, API keys, or auth codes in this diff
-- [ ] If touching IMAP / SMTP / AI calls: ran `/security-review`
-- [ ] If touching prompts: regression tests still pass
-
-## Quality checklist
-
-- [ ] `cd src-tauri && cargo fmt && cargo clippy --no-deps -- -D warnings`
-- [ ] `pnpm exec prettier --check .`
-- [ ] `pnpm exec eslint --max-warnings 0 .`
-- [ ] `pnpm exec tsc --noEmit`
-- [ ] `gitleaks protect --staged`
+- [ ] 服务端 fmt、clippy、测试及 Python 桥接/冒烟测试通过
+- [ ] Android 单元测试、lint、APK 构建通过
+- [ ] macOS MailSearchChecks 和应用打包通过
+- [ ] 外部接口、配置或使用方式变化已同步文档
+- [ ] 不含令牌、邮箱授权码、签名密钥或本机数据库
+- [ ] 邮件传输测试仅使用假服务；真实邮箱或设备验收情况已明确说明

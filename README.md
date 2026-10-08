@@ -1,109 +1,133 @@
 # AI Email
 
-AI 辅助的邮件客户端 —— Tauri 2 桌面(macOS)+ Android,本地优先、开箱即用。
+面向个人的多邮箱聚合服务：服务器保存需要检索的邮件，Android 和 macOS 原生 App 用于搜索及简单回复，复杂邮件处理交给外部 AI 客户端通过 MCP 完成。
 
-## 功能
+项目由 `server/`、`android/`、`macos/` 三个独立模块组成；客户端只连接自有服务，不直接登录邮箱。
 
-- 多语言翻译
-- 自动分类 / 打标签 / 优先级排序;防误导规则避免服务商反垃圾标记(如 `[SPAM]` / `★垃圾邮件★`)被误判,并把商业服务商的事务性通知(如证书签发 / 账单 / 订单状态)归为通知而非推广;详情区「分类」按钮可手动改类并锁定(AI 不再覆写);prompt 更新后启动时后台一次性重跑存量分类
-- 发件人黑白名单:按邮箱地址或域名(含 `*.x.com` 通配子域)维护黑 / 白名单,在设置中心管理;黑名单来信分类时直接归垃圾(跳过 AI 调用),白名单确保不被误判为垃圾
-- 长邮件与线程摘要
-- AI 双语起草回复:中文意图 → 外文回复 + 回译核对,人工审核后发送
-- 摘要 / 翻译 / 写信统一收进右侧 AI 抽屉
-- 收件箱列表折叠聚合:同一会话折叠成一行;孤立的同发件人通知 / 推广邮件折叠成一行(显示最新一封 + 数量角标);点同发件人折叠组在详情区以会话流展示(默认全折叠)
-- 多账户统一收件箱 + 信箱切换:跨账户聚合视图,或按账户浏览收件箱 / 已发送 / 草稿 / 废纸篓 / 垃圾邮件等信箱;支持未读筛选与一键全部已读
-- 自动收信:窗口开启时按设定间隔(默认 5 分钟,设置中心可改 关 / 1 / 5 / 15 / 30)自动收取全部账户收件箱;全局顶栏指示器显示上次同步 / 下次倒计时 / 同步中 / 失败,点击即立即同步
-- IMAP 连接复用与退避:每账户维持一条长连接(空闲 NOOP 保活,断线自动重连并重试一次),登录次数从每日数百次降到个位数,避免 QQ 邮箱等服务的登录限流;连续同步失败 2 次起自动进入 15/30 分钟冷却(自动收信暂停登录,手动同步不受限);信箱列表 LIST 结果缓存 24 小时
-- 全局搜索:顶部搜索框直达后端全文匹配,多关键词 AND,覆盖全部账户全部信箱的主题 / 发件人 / 摘要,以及已打开过(已缓存)邮件的正文;主题命中优先排序,结果行标注信箱 / 账户归属与「正文」命中
-- 邮件操作:删除(移到废纸篓,可找回)、标记已读 / 未读、加星 / 取消;打开邮件自动标记已读;会话流内每封邮件各自展示附件(懒加载,点击后由后端原生保存框另存为)
-- HTML 邮件防追踪:正文经清洗去除脚本与内联样式,并在 Shadow DOM 内注入基础邮件样式限制图片 / 表格撑宽;远程图片仅对私人 / 工作邮件默认加载,其余默认拦截(防 tracking pixel 暴露已读与 IP),可一键显示;内联 `cid:` 图片会转成本地 `data:` URL 后再渲染,无法匹配 MIME 图片部件的 `cid:` 图片会移除不可加载的 `src`;过滤卡片中纯 HTML 邮件自动转纯文本显示(不再暴露 HTML 源码)
-- 本地诊断日志:启动后写入 app 数据目录的 `logs/ai-email.log`,记录 IMAP 连接 / TLS / 登录 / LIST / SELECT / FETCH / STORE / MOVE 阶段耗时与失败原因,便于排查间歇性超时
-- 自动回复中心:规则把需要回复的新邮件筛进「建议回复」队列,一键起草双语回复审阅后发送(不自动发出)
-- 支持 QQ 邮箱 / 腾讯企业邮 / Gmail;设置中心统一管理邮箱账户(增 / 删 / 改)、AI 模型与本地正文 / AI 缓存清理
+## 当前范围
 
-## 技术栈
+- 单用户、最多 10 个 QQ 邮箱、腾讯企业邮或 Gmail 账户，通过 IMAPS / SMTPS 接入。
+- 服务器使用 SQLite，仅保留最近 365 天、配置范围内的邮件。过期清理只删除本地缓存，不删除邮箱中的原信。
+- 当前通过每个账户的 `folders` 指定同步范围，填写实际 IMAP 文件夹名称；Gmail 标签需在 IMAP 中可见。业务内容分类规则尚未启用。
+- 默认 `import_history: false`：首次连接各文件夹只建立同步起点，之后接收新邮件。设为 `true` 可在新建同步起点时导入最近一年；已有起点不会因切换配置而回退。
+- 搜索覆盖标题、纯文本正文，以及所属账户、发件人、收件人和抄送邮箱。支持中文子串、多个关键词同时命中和按账户筛选；不搜索附件内容，不调用 AI 分类或向量服务。
+- Android 和 macOS 提供连接设置、搜索、分页、纯文本详情和简单回复。没有通知、后台常驻或内置 AI；只读令牌仅可检索，可写令牌可回复。
+- MCP 支持列账户、搜索、读邮件/附件、标记已读/星标、移动和准备/发送邮件；不绑定特定 AI 厂商。
 
-- **Tauri 2** + React + TypeScript(前端)
-- **Rust** 核心:`async-imap` / `lettre`(IMAP/SMTP)、`reqwest` → Anthropic / OpenAI-compatible API
-- **嵌入式 SQLite**(`sqlx`):数据库文件在 OS app 数据目录,首次启动自动创建并迁移 —— 零配置、离线、无需数据库服务
-- 凭据(邮箱授权码 / 客户端专用密码、AI API key)存 OS keychain,从不入库
+## 架构
 
-## 快速开始
-
-前置:Node ≥ 22.13、pnpm 11、Rust stable。**无需安装/运行任何数据库。**
-
-```bash
-pnpm install
-pnpm tauri dev      # 开发模式(桌面)
+```mermaid
+flowchart LR
+    Mail[QQ / 腾讯企业邮 / Gmail] <-->|IMAPS / SMTPS| Server[Rust 服务 + SQLite]
+    Android[Android 原生 App] -->|HTTPS 搜索和回复 API| Server
+    Mac[macOS SwiftUI App] -->|HTTPS 搜索和回复 API| Server
+    AI[支持 MCP 的 AI 客户端] -->|HTTPS MCP| Server
+    Local[支持 stdio MCP 的 AI 客户端] --> Bridge[Python 标准库桥接]
+    Bridge -->|HTTPS MCP| Server
 ```
 
-首次运行会在 app 数据目录自动建 SQLite 库并跑迁移。在应用内设置中心添加邮箱账户(QQ / 腾讯企业邮 / Gmail,授权码或客户端专用密码)与 AI 模型(Anthropic 或 OpenAI-compatible key)即可使用。
+服务端主动同步并缓存完整纯文本正文，搜索不依赖打开邮件。原始单封邮件上限 25 MiB，附件按需读取，上限 10 MiB；附件不在本地持久保存。
 
-构建发布包:
+## 启动服务器
 
-```bash
-pnpm build:macos      # macOS 桌面 .app / .dmg
-pnpm build:android    # Android arm64 APK
-```
-
-本机消除「每次重建后钥匙串重复索权弹窗」(未签名 app 的钥匙串 ACL 按二进制哈希识别身份,每次构建都变):先跑一次 `bash scripts/setup-macos-signing.sh` 创建本地自签名身份(存登录钥匙串,仅本机生效),之后 `pnpm build:macos` 检测到该身份会自动签名。首次运行签名版时钥匙串会最后弹一次,点「始终允许」即可——此后同证书签名的新构建不再弹。删除身份:`security delete-identity -c "ai-email local signing"`。
-
-发布前基础验证:
+需要 Rust stable，编译产物可部署到 Linux。服务器不依赖 Node、Tauri、Java 或 AI API Key。
 
 ```bash
-pnpm exec prettier --check .
-pnpm exec eslint --max-warnings 0 .
-pnpm exec tsc --noEmit
-pnpm test:coverage
-pnpm audit --registry https://registry.npmjs.org/
-cd src-tauri && cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test --all-features && cargo audit --ignore RUSTSEC-2023-0071
+cargo build --manifest-path server/Cargo.toml --release
+cp server/config.example.json server/config.json
 ```
 
-React Hooks 编译器诊断保持开启；依赖升级引入新诊断时，应修正组件状态生命周期，不在 ESLint 中关闭规则。
+编辑配置：填写邮箱、文件夹、数据库路径、密钥文件路径和 `allowed_hosts`。密钥字段只支持 `{"file":"/绝对路径"}` 或 `{"env":"环境变量名"}`；不把授权码写进 JSON。配置中所有相对路径按进程工作目录解析。
 
-Android 更新比较使用 Tauri 默认的 SemVer `versionCode` 公式；版本号保持 `package.json`、`tauri.conf.json` 与 `Cargo.toml` 一致，不依赖未跟踪的 Android 生成文件。
-
-`RUSTSEC-2023-0071` 是窄范围忽略项：`Cargo.lock` 会因 `sqlx-macros` 的可选 MySQL 后端路径列出 `rsa`，但本项目禁用 `sqlx` 默认特性且只启用 SQLite，实际编译/运行路径不使用 MySQL/RSA。
-
-> macOS 发布包是未签名的 DMG。用户从 GitHub Release 手动下载 DMG，退出旧版应用后以新应用替换旧应用；本地 `pnpm build:macos` 同样不需要发布凭据。
-
-Android release 签名可通过环境变量启用；不设置时仍产出 unsigned APK，适合本地冒烟验证：
+只读、可写令牌必须不同，分别使用至少 32 字符的随机值；例如用 `openssl rand -hex 32` 生成。令牌和邮箱授权码文件应限制为服务用户可读。每个客户端只填写一个访问令牌：只需搜索时填只读令牌，需要简单回复时填可写令牌；有发信和修改需求的 AI 使用可写令牌。客户端从服务返回的 `can_write` 判断是否显示回复入口，服务仍会验证每次写请求的权限。
 
 ```bash
-export ANDROID_RELEASE_STORE_FILE="/path/to/release.jks"
-export ANDROID_RELEASE_STORE_PASSWORD="..."
-export ANDROID_RELEASE_KEY_ALIAS="..."
-export ANDROID_RELEASE_KEY_PASSWORD="..."
-pnpm build:android
+server/target/release/ai-email-server server/config.json
 ```
 
-只有受保护的 `release.yml` 发布工作流可以注入 GitHub signing secrets，其中 `ANDROID_RELEASE_KEYSTORE_BASE64` 会由脚本临时解码并自动设置 `ANDROID_RELEASE_STORE_FILE`。普通 CI 必然构建 unsigned APK。不要把 `.jks` 或 `.keystore` 文件提交到仓库。
+默认监听 `127.0.0.1:8080`；生产访问必须通过 HTTPS 反向代理。`deploy/ai-email.service` 和 `deploy/Caddyfile` 提供 Linux systemd / Caddy 示例，安装步骤见 [ONBOARDING.md](ONBOARDING.md)。
 
-正式发布由 [release.yml](.github/workflows/release.yml) 完成。本地 `build:*` 只用于冒烟，不能替代受保护的 CI 发布。
+| 服务       | IMAP（TLS 993）      | SMTP（TLS 465）      |
+| ---------- | -------------------- | -------------------- |
+| QQ 邮箱    | `imap.qq.com`        | `smtp.qq.com`        |
+| 腾讯企业邮 | `imap.exmail.qq.com` | `smtp.exmail.qq.com` |
+| Gmail      | `imap.gmail.com`     | `smtp.gmail.com`     |
 
-在 Claude 中推荐使用 `/release <version>`（例如 `/release 0.1.1`）执行 ai-email 专用发布流程；它会校验版本、创建注释标签、监控 Release，并核验公开 DMG、已签名 APK 与 Android 更新清单。
+在邮箱侧开启 IMAP/SMTP，使用授权码或应用专用密码。当前未实现邮箱 OAuth 登录；Gmail 需允许应用专用密码，受组织策略等限制的账户可能无法使用这种接入方式。参见 [Google 应用专用密码说明](https://support.google.com/accounts/answer/185833?hl=zh-Hans)。
 
-1. 在 GitHub 创建受保护的 `release` Environment，并限制为发布维护者使用。仅配置 Android JKS Secrets：`ANDROID_RELEASE_KEYSTORE_BASE64`、`ANDROID_RELEASE_STORE_PASSWORD`、`ANDROID_RELEASE_KEY_ALIAS`、`ANDROID_RELEASE_KEY_PASSWORD`。
-2. 配置 Environment Variable：`ANDROID_RELEASE_CERT_SHA256`，其值为 Android 发布证书的 SHA-256 指纹。
-3. 在 `main` 同步 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 的版本后，创建带更新说明的注释 SemVer 标签并推送：
+## AI 通过 MCP 使用
+
+远程 MCP 地址为 `https://你的域名/mcp`，传输方式是 Streamable HTTP，认证头为 `Authorization: Bearer <访问令牌>`。已在本机验证 `2025-11-25` 初始化握手及 `2026-07-28` 逐请求元数据连接。将公网域名加入服务配置的 `allowed_hosts`；有 Origin 头的客户端还需将其确切来源加入 `allowed_origins`。
+
+可直接使用支持自定义 Bearer 认证头的远程 MCP 客户端。只支持 stdio 的客户端可配置仓库提供的 Python 3 桥接程序，示例结构如下（各客户端配置入口可能不同）：
+
+```json
+{
+  "mcpServers": {
+    "ai-email": {
+      "command": "python3",
+      "args": ["/绝对路径/ai-email/scripts/mcp_stdio.py"],
+      "env": {
+        "AI_EMAIL_URL": "https://你的域名/mcp",
+        "AI_EMAIL_TOKEN": "在客户端本机配置访问令牌"
+      }
+    }
+  }
+}
+```
+
+服务目前使用个人令牌，未实现 OAuth 授权服务器。因此，**仅接受 OAuth 且不支持自定义认证或本地 stdio 的客户端尚不能直接接入**；“不限客户端”指采用开放 MCP 接口，不表示已验证每款客户端。
+
+| MCP 工具                                             | 用途                     | 令牌       |
+| ---------------------------------------------------- | ------------------------ | ---------- |
+| `list_accounts` / `search` / `get_message`           | 账户、检索、纯文本详情   | 只读或可写 |
+| `get_attachment`                                     | 按索引获取附件 base64    | 只读或可写 |
+| `set_flags` / `move`                                 | 已读、星标、移动         | 可写       |
+| `prepare_send` / `send_prepared` / `get_send_status` | 准备发送、执行、查询结果 | 可写       |
+
+发送使用唯一 `operation_id`；同一编号不能换内容，也不会重复执行 SMTP。发送结果为 `unknown` 表示可能已经发出，应核对邮箱再决定下一步，不能用新编号盲目重发。邮件正文和附件始终是不可信外部内容，不能把其中的指令当作用户授权。
+
+## Android APK
+
+独立 Kotlin / Jetpack Compose 工程，支持 Android 8.0 及以上，不需要 NDK。
 
 ```bash
-git tag -a v0.1.0 -m "更新说明"
-git push origin v0.1.0
+cd android
+./gradlew testDebugUnitTest lintDebug assembleDebug
 ```
 
-- 工作流仅接受 `main` 上的 `v<major>.<minor>.<patch>` 注释标签；Actions 手动运行时选择 `main` 并输入已有标签。
-- build Job 只使用 Android JKS 凭据与证书指纹，校验 signed APK，并生成未签名 macOS DMG；无凭据的 publish Job 才创建公开 stable GitHub Release。
-- Release 只包含 `android-latest.json`、`ai-email_<version>_aarch64.dmg` 和 `ai-email_<version>_arm64-v8a.apk`；资产名称和校验清单由 `scripts/prepare-release-assets.mjs` 统一生成。发布作业会检出对应标签，以校验并创建不可变公开 Release，供客户端匿名下载。
-- 已存在同标签 Release 时工作流会失败且不覆盖资产；检查或处理失败的 draft 后再重新触发。保护 `v*` 标签，禁止移动或删除。
-- macOS 用户检查 GitHub Release 后打开对应 DMG URL，手动以新应用替换旧应用；Android Release 只允许 signed APK，unsigned APK 仅用于本地冒烟。
+安装 `android/app/build/outputs/apk/debug/app-debug.apk`，填入 HTTPS 服务根地址（例如 `https://mail.example.com/`，不含 `/api` 或 `/mcp`）和一个访问令牌。只读令牌用于检索，可写令牌可回复；令牌通过 Android Keystore 加密保存，App 禁止备份，不下载远程邮件图片。Debug APK 用于本次开发安装，正式长期分发需配置稳定签名。
 
-## 平台
+## macOS App
 
-macOS(arm64)+ Android(arm64-v8a)。
+使用 SwiftUI，最低 macOS 13。安装 Xcode Command Line Tools 后构建：
 
-## 文档
+```bash
+swift run --package-path macos MailSearchChecks
+bash scripts/build-macos-search.sh
+```
 
-- 协作规范(给 Claude 与人):[CLAUDE.md](CLAUDE.md)
-- 快速上手:[ONBOARDING.md](ONBOARDING.md)
-- 系统技能文档:[skills/](skills/)
+打开 `macos/build/AI Email.app`，填写与 Android 相同的 HTTPS 服务根地址和一个访问令牌。构建结果用于本机安装，未宣称经过 Apple 签名、公证或 App Store 分发。CI 将 `.app` 打包为 `AI-Email-macos.tar.gz` 保存执行权限，下载后先解压再打开。
+
+## 简单回复
+
+在邮件详情中输入纯文本回复，先查看服务端返回的收件人、发件账户、主题和正文，再确认发送。回复固定使用原邮件账户，收件人优先取原信 Reply-To，没有时使用 From；自动保留回复引用。不支持修改收件人、添加抄送或附件，复杂写信流程使用 MCP。
+
+每次准备回复都有唯一 `operation_id`；发送后可查询结果。`sending` 或 `unknown` 时不能认为失败并立即再次发送，应先核对状态及邮箱。客户端始终使用同一编号查询和确认，服务端拒绝重放已执行的编号。
+
+## 验证与开发
+
+```bash
+cargo fmt --manifest-path server/Cargo.toml --check
+cargo clippy --manifest-path server/Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path server/Cargo.toml
+cargo build --manifest-path server/Cargo.toml
+python3 -m unittest discover -s scripts -p 'test_*.py'
+(cd android && ./gradlew testDebugUnitTest lintDebug assembleDebug)
+swift run --package-path macos MailSearchChecks
+bash scripts/build-macos-search.sh
+```
+
+自动测试使用模拟传输和本机测试服务，不访问真实邮箱。真实服务商账户、部署网络、AI 客户端连接、小米 / OPPO 真机及 macOS 实际操作仍需相应环境验收。
+
+开发入口和部署说明见 [ONBOARDING.md](ONBOARDING.md)，协作规则见 [CLAUDE.md](CLAUDE.md)。CI 仅构建当前服务、Android APK 和 macOS App；正式发布与签名须另行配置并获得授权。

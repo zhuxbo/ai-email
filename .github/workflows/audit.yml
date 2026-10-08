@@ -1,65 +1,33 @@
 name: Dependency Audit
 
-# Runs on dependency-manifest changes touching main + PRs targeting main, plus manual
-# dispatch. No cron — keeps the Actions tab quiet during sprint iteration; trigger a fresh
-# audit from the Actions tab (workflow_dispatch) or by touching a manifest on main.
 on:
   workflow_dispatch:
   push:
     branches: [main]
     paths:
-      - 'package.json'
-      - 'pnpm-lock.yaml'
-      - 'pnpm-workspace.yaml'
-      - 'src-tauri/Cargo.toml'
-      - 'src-tauri/Cargo.lock'
+      - 'server/Cargo.toml'
+      - 'server/Cargo.lock'
       - '.github/workflows/audit.yml'
   pull_request:
     branches: [main]
     paths:
-      - 'package.json'
-      - 'pnpm-lock.yaml'
-      - 'pnpm-workspace.yaml'
-      - 'src-tauri/Cargo.toml'
-      - 'src-tauri/Cargo.lock'
+      - 'server/Cargo.toml'
+      - 'server/Cargo.lock'
       - '.github/workflows/audit.yml'
 
 permissions:
   contents: read
 
 jobs:
-  npm-audit:
-    name: pnpm audit
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: pnpm/action-setup@v3
-        with:
-          version: 11.2.2
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - run: pnpm install --frozen-lockfile
-      # `.npmrc` points at npmmirror for fast installs, but npmmirror doesn't implement the
-      # audit endpoint. Override the registry just for this command so we hit the real one.
-      - name: pnpm audit (real npm registry)
-        run: pnpm audit --registry https://registry.npmjs.org/
-
   cargo-audit:
     name: cargo audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Drop China crates mirror on CI
+      - name: Use crates.io on CI
         run: rm -f .cargo/config.toml
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
-      - name: Run cargo audit
-        working-directory: src-tauri
-        # RUSTSEC-2023-0071 (rsa 0.9.x Marvin Attack, medium 5.9, no upstream fix):
-        # sqlx-macros's default features pull in sqlx-mysql → rsa. We disable mysql via
-        # `default-features = false` on sqlx so the vulnerable code never compiles, but
-        # cargo audit scans Cargo.lock — which still lists the crate.
-        # Track upstream: https://github.com/launchbadge/sqlx/issues/2939
-        run: cargo audit --ignore RUSTSEC-2023-0071
+      - run: cargo install cargo-audit --locked
+      - name: Audit server dependencies
+        working-directory: server
+        run: cargo audit

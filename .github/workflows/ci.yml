@@ -13,168 +13,62 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
-# Targets are arm64 macOS desktop + arm64-v8a Android only, so every job runs on
-# macOS (Apple Silicon) runners — no Ubuntu/Windows. build-android cross-compiles
-# the Android arm64 .so from the same macOS host used for the desktop build.
 jobs:
-  lint-and-test:
-    name: Lint & Test
-    runs-on: macos-latest
-
+  server:
+    name: Server & MCP bridge
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-
-      - name: Drop China crates mirror on CI
-        # .cargo/config.toml replaces crates-io with rsproxy.cn for fast
-        # downloads in mainland China. GitHub-hosted runners can't reach it
-        # reliably — let CI talk to the real crates-io instead.
-        shell: bash
+      - name: Use crates.io on CI
         run: rm -f .cargo/config.toml
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v3
-        with:
-          version: 11.2.2
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: 'pnpm'
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri -> target
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Prettier check
-        run: pnpm exec prettier --check .
-
-      - name: ESLint
-        run: pnpm exec eslint --max-warnings 0 .
-
-      - name: TypeScript check
-        run: pnpm exec tsc --noEmit
-
-      - name: Vitest
-        run: pnpm test:coverage
-
-      - name: Rust format
-        working-directory: src-tauri
-        run: cargo fmt --check
-
-      - name: Clippy
-        working-directory: src-tauri
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
-      - name: Rust tests
-        working-directory: src-tauri
-        run: cargo test --all-features
-
-  build-desktop:
-    name: Build Desktop
-    needs: lint-and-test
-    runs-on: macos-latest
-
-    steps:
-      - uses: actions/checkout@v7
-      - name: Drop China crates mirror on CI
-        shell: bash
-        run: rm -f .cargo/config.toml
-      - uses: pnpm/action-setup@v3
-        with:
-          version: 11.2.2
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: 'pnpm'
-      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri -> target
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build
-        run: pnpm build:macos
-
-      - name: Upload macOS artifacts
-        uses: actions/upload-artifact@v4
+          workspaces: server -> target
+      - run: cargo fmt --manifest-path server/Cargo.toml --check
+      - run: cargo clippy --locked --manifest-path server/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --locked --manifest-path server/Cargo.toml
+      - run: cargo build --locked --release --manifest-path server/Cargo.toml
+      - run: python3 -m unittest discover -s scripts -p 'test_*.py'
+        env:
+          AI_EMAIL_TEST_BINARY: ${{ github.workspace }}/server/target/release/ai-email-server
+      - uses: actions/upload-artifact@v4
         with:
-          name: ai-email-macos
-          path: |
-            src-tauri/target/release/bundle/macos/ai-email.app
-            src-tauri/target/release/bundle/dmg/*.dmg
+          name: ai-email-server-linux-x64
+          path: server/target/release/ai-email-server
 
-  build-android:
-    name: Build Android
-    needs: lint-and-test
-    runs-on: macos-latest
-
+  native-android:
+    name: Native Android Search
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-
-      - name: Drop China crates mirror on CI
-        shell: bash
-        run: rm -f .cargo/config.toml
-
-      - uses: pnpm/action-setup@v3
-        with:
-          version: 11.2.2
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: 'pnpm'
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-
-      - name: Setup Android NDK
-        id: setup-ndk
-        uses: nttld/setup-ndk@v1
+      - uses: android-actions/setup-android@v4
+      - run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+      - name: Test, lint and build installable debug APK
+        working-directory: android
+        run: ./gradlew --no-daemon testDebugUnitTest lintDebug assembleDebug
+      - uses: actions/upload-artifact@v4
         with:
-          ndk-version: r26b
+          name: ai-email-native-search-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
 
-      # tauri's generated project targets compileSdk = 36; install it explicitly
-      # so the build never depends on AGP's best-effort auto-download.
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v4
-
-      - name: Install SDK platform + build-tools (compileSdk = 36)
-        run: |
-          sdkmanager "platforms;android-36" "build-tools;36.0.0"
-
-      - uses: dtolnay/rust-toolchain@stable
+  native-macos:
+    name: Native macOS Search
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check native client behavior and build macOS app
+        run: swift run --package-path macos MailSearchChecks && bash scripts/build-macos-search.sh
+      - name: Archive app preserving executable permissions
+        run: tar -czf macos/build/AI-Email-macos.tar.gz -C macos/build 'AI Email.app'
+      - uses: actions/upload-artifact@v4
         with:
-          targets: aarch64-linux-android
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri -> target
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build Android APK (arm64-v8a)
-        env:
-          NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
-          ANDROID_NDK_ROOT: ${{ steps.setup-ndk.outputs.ndk-path }}
-        run: pnpm build:android
-
-      - name: Upload Android artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: ai-email-android
-          path: src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          name: ai-email-native-macos
+          path: macos/build/AI-Email-macos.tar.gz
+          if-no-files-found: error

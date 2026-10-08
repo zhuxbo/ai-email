@@ -1,25 +1,22 @@
-# Dependencies
-node_modules/
-.pnpm-store/
-
-# Rust
+# Rust / Swift / Android 构建缓存
 target/
 **/*.rs.bk
+macos/.build/
+macos/.swiftpm/
+**/.gradle/
+**/.kotlin/
+build/
+android/local.properties
 
-# Tauri
-src-tauri/target/
-# gen/schemas is auto-generated; gen/android is the committed Android project
-src-tauri/gen/schemas/
-src-tauri/WixTools/
-src-tauri/*.app
-
-# Frontend build
+# 历史本机缓存保留，不参与当前构建
+node_modules/
+.pnpm-store/
 dist/
 dist-ssr/
-build/
 .vite/
+src-tauri/
 
-# Env / secrets
+# 凭据、本机配置及服务数据
 .env
 .env.local
 .env.*.local
@@ -29,39 +26,28 @@ build/
 *.jks
 *.keystore
 *.p12
+server/config.json
+*.db
+*.db-shm
+*.db-wal
+dev-credentials.json
 
-# Logs
+# 工具、编辑器与系统缓存
+__pycache__/
+*.pyc
 *.log
 logs/
-npm-debug.log*
-pnpm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-lerna-debug.log*
-
-# IDE / editors
 .idea/
 .vscode/*
 !.vscode/extensions.json
 !.vscode/settings.json
 .fleet/
 .zed/
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
 *.sw?
-
-# OS
 .DS_Store
 Thumbs.db
-
-# Coverage
 coverage/
 *.lcov
-.nyc_output/
-
-# Misc
 .cache/
 .turbo/
 *.tsbuildinfo
@@ -69,8 +55,5 @@ coverage/
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
 
-# Superpowers (process docs / brainstorm artifacts — never committed)
+# 过程文档与本次改动备份，不入库
 .superpowers/
-
-# dev 构建的明文凭据旁路文件（debug-only，实落 app 数据目录、本不在仓库；此为兜底）
-dev-credentials.json
